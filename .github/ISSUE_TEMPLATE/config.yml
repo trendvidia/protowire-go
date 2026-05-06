@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/trendvidia/protowire-go/security/advisories/new
+    about: Report a security issue privately. Do NOT open a public issue.
+  - name: Format-spec discussion (PXF / SBE / envelope)
+    url: https://github.com/trendvidia/protowire/discussions
+    about: Wire-format questions and proposals belong in the spec repo.

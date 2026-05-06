@@ -1,0 +1,19 @@
+# Go test binaries (from `go test -c`)
+*.test
+
+# Go coverage output
+*.out
+coverage.txt
+coverage.html
+
+# AI assistant
+.claude
+CLAUDE.md
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

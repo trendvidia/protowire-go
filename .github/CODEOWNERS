@@ -1,0 +1,8 @@
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-policies/about-code-owners
+#
+# Default owner for everything in the repo. PR review notifications and
+# the GitHub UI's "Required reviewers" surface route through this file;
+# the actual merge gate is enforced by the project's autonomous review
+# system. See CONTRIBUTING.md.
+
+* @trendvidia
