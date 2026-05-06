@@ -11,6 +11,30 @@ format changes.
 
 ## [Unreleased]
 
+## [0.70.2] — 2026-05-06
+
+Documentation-only release.
+
+### Documentation
+
+- New §"Performance: opting into the fast path" in the README
+  explaining when and how a top-level binary should add the
+  `replace google.golang.org/protobuf => github.com/trendvidia/protobuf-go v1.36.12`
+  directive to its own `go.mod` to enable the `dynamicpb` fast path.
+  Calls out the library-vs-binary distinction so libraries don't pin
+  the fork transitively for their consumers.
+- Updated §"Schema registry integration":
+  - Refresh semantics rewritten to reflect `protoregistry/client`
+    v0.70.0+ (incremental aggregate updates). Per-schema lookups via
+    `Schema(...)` / `FindMessageByName` are still atomic. Namespace-
+    wide lookups (`FindFileByPath`, `FindExtensionByNumber`) are
+    eventually consistent — use `Pin` for decodes that need a stable
+    schema view end-to-end.
+  - New "Fork dependency carried by `protoregistry/client`"
+    subsection: depending on `protoregistry/client` makes the
+    trendvidia/protobuf-go fork mandatory at the binary level
+    (the namespace registry types it uses don't exist in upstream).
+
 ## [0.70.1] — 2026-05-06
 
 ### Fixed
@@ -88,6 +112,7 @@ Initial public release. Versioned to match sibling components in the
 - Minimum Go version is `1.25` (set by the floor of transitive
   dependencies, surfaced by `go mod tidy`).
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v0.70.1...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v0.70.2...HEAD
+[0.70.2]: https://github.com/trendvidia/protowire-go/compare/v0.70.1...v0.70.2
 [0.70.1]: https://github.com/trendvidia/protowire-go/compare/v0.70.0...v0.70.1
 [0.70.0]: https://github.com/trendvidia/protowire-go/releases/tag/v0.70.0
