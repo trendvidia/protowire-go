@@ -11,6 +11,22 @@ format changes.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **PXF parser stricter on key forms**, mirroring the upstream grammar
+  tightening in
+  [`trendvidia/protowire@8262bbb`](https://github.com/trendvidia/protowire/commit/8262bbb)
+  (`docs/grammar.ebnf`, `docs/draft-trendvidia-protowire-00.txt`):
+  - `=` (field assignment) and `{ … }` (submessage) now require an
+    identifier key. Inputs like `123 = 234` or `child { 123 = 123 }`
+    are now parse errors with
+    `"field assignment with '=' requires an identifier key, got integer
+    (\"123\"); use ':' for map entries"`.
+  - `:` (map entry) is rejected at document top level — the document
+    represents a proto message, never a `map<K,V>`. Use `=` for
+    top-level field assignments. Map literals (`field = { 1: "x" }`)
+    still work because `:` remains valid inside `{ … }` blocks.
+
 ## [0.70.2] — 2026-05-06
 
 Documentation-only release.

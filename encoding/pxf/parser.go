@@ -69,7 +69,10 @@ func (p *parser) parseDocument() (*Document, error) {
 	}
 	doc.Entries = make([]Entry, 0, 8)
 	for p.current.Kind != EOF {
-		entry, err := p.parseEntry(0)
+		// Top-level: only field_entry is allowed. The document represents a
+		// proto message, never a map<K,V>; map_entry (`:` form) is reserved
+		// for the inside of a `{ ... }` block. See docs/grammar.ebnf → document.
+		entry, err := p.parseEntry(0, false)
 		if err != nil {
 			return nil, err
 		}
@@ -82,18 +85,31 @@ func (p *parser) parseDocument() (*Document, error) {
 // explicit depth counter for HARDENING.md § Recursion. depth is the number of
 // open '{' / '[' the parser has descended into; rejection happens when a fresh
 // descent would push depth past MaxNestingDepth.
-func (p *parser) parseEntry(depth int) (Entry, error) {
+//
+// allowMapEntry gates the `:` (map-entry) form: false at document top level,
+// true inside any '{ ... }' block where the surrounding field could be a
+// map<K,V>. See docs/grammar.ebnf → field_entry, map_entry.
+func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 	leading := p.flushComments()
 
 	pos := p.current.Pos
 	if p.current.Kind != IDENT && p.current.Kind != STRING && p.current.Kind != INT {
 		return nil, errorf(pos, "expected identifier, string, or integer, got %s (%q)", p.current.Kind, p.current.Value)
 	}
+	keyKind := p.current.Kind
 	key := p.current.Value
 	p.advance()
 
 	switch p.current.Kind {
 	case EQUALS:
+		// `=` denotes a field assignment on a proto message; the key must
+		// be an identifier (= proto field name). Map-style keys (string /
+		// integer) are only valid with `:`.
+		if keyKind != IDENT {
+			return nil, errorf(pos,
+				"field assignment with '=' requires an identifier key, got %s (%q); use ':' for map entries",
+				keyKind, key)
+		}
 		p.advance()
 		val, err := p.parseValue(depth)
 		if err != nil {
@@ -102,6 +118,12 @@ func (p *parser) parseEntry(depth int) (Entry, error) {
 		return &Assignment{Pos: pos, Key: key, Value: val, LeadingComments: leading}, nil
 
 	case COLON:
+		// Map entry. Only allowed inside a '{ ... }' block, never at
+		// document top level.
+		if !allowMapEntry {
+			return nil, errorf(pos,
+				"map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")
+		}
 		p.advance()
 		val, err := p.parseValue(depth)
 		if err != nil {
@@ -110,6 +132,13 @@ func (p *parser) parseEntry(depth int) (Entry, error) {
 		return &MapEntry{Pos: pos, Key: key, Value: val, LeadingComments: leading}, nil
 
 	case LBRACE:
+		// `{ ... }` denotes a submessage field; same identifier-only rule
+		// as `=` applies.
+		if keyKind != IDENT {
+			return nil, errorf(pos,
+				"submessage block requires an identifier key, got %s (%q)",
+				keyKind, key)
+		}
 		if depth+1 > MaxNestingDepth {
 			return nil, errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
 		}
@@ -244,7 +273,10 @@ func (p *parser) parseBlockVal(depth int) (Value, error) {
 func (p *parser) parseBody(depth int) ([]Entry, error) {
 	entries := make([]Entry, 0, 4)
 	for p.current.Kind != RBRACE && p.current.Kind != EOF {
-		entry, err := p.parseEntry(depth)
+		// Inside a '{ ... }' block we don't know whether the surrounding
+		// field is a message or a map<K,V>; both forms are accepted and
+		// disambiguated by the schema layer.
+		entry, err := p.parseEntry(depth, true)
 		if err != nil {
 			return nil, err
 		}
