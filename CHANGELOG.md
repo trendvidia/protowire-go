@@ -11,6 +11,20 @@ format changes.
 
 ## [Unreleased]
 
+## [0.70.1] — 2026-05-06
+
+### Fixed
+
+- Compile error in downstream consumers that depend on upstream
+  `google.golang.org/protobuf` (no `dynamicpb.Message.SetUnsafe`
+  method). The `fastSet` helpers in `encoding/pxf/decode_fast.go` and
+  `encoding/sbe/unmarshal.go` now route through an interface
+  assertion instead of calling `SetUnsafe` on the concrete type, so
+  the fast path is opt-in and the package compiles against either
+  backend. Without the trendvidia/protobuf-go fork, decode falls
+  through to the standard `protoreflect.Message.Set` — same correctness,
+  no perf regression for users who already depend on upstream.
+
 ## [0.70.0] — 2026-05-06
 
 Initial public release. Versioned to match sibling components in the
@@ -74,5 +88,6 @@ Initial public release. Versioned to match sibling components in the
 - Minimum Go version is `1.25` (set by the floor of transitive
   dependencies, surfaced by `go mod tidy`).
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v0.70.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v0.70.1...HEAD
+[0.70.1]: https://github.com/trendvidia/protowire-go/compare/v0.70.0...v0.70.1
 [0.70.0]: https://github.com/trendvidia/protowire-go/releases/tag/v0.70.0
