@@ -227,6 +227,31 @@ go install github.com/trendvidia/protowire/cmd/protowire@latest
 
 See the [spec repo README](https://github.com/trendvidia/protowire#cli) for subcommands (encode / decode / validate / fmt / sbe2proto / proto2sbe) and registry-mode flags.
 
+## Performance: opting into the fast path
+
+`protowire-go` works out of the box against upstream `google.golang.org/protobuf` — `go get github.com/trendvidia/protowire-go` is all you need. On the unmarshal hot path, however, it can route through three additional setters on `*dynamicpb.Message` (`SetUnsafe`, `AppendUnsafe`, `MapSetUnsafe`) that skip a per-field `Interface()` boxing allocation. Those setters live in our `google.golang.org/protobuf` fork, [trendvidia/protobuf-go](https://github.com/trendvidia/protobuf-go).
+
+The codec selects between the two paths at runtime via an interface assertion:
+
+- If the message implementation exposes the unsafe setters → fast path (~10–19 % lower decode latency on `dynamicpb`-backed messages on the bench fixtures, see numbers below).
+- Otherwise → standard `protoreflect.Message.Set` path.
+
+Because Go's `replace` directives [do not propagate across module boundaries](https://go.dev/ref/mod#go-mod-file-replace), depending on `protowire-go` from another module does not pull in the fork — every top-level module that wants the fast path opts in itself by adding one line to its own `go.mod`:
+
+```
+replace google.golang.org/protobuf => github.com/trendvidia/protobuf-go v1.36.12
+```
+
+Run `go mod tidy` afterward and re-verify with `go test ./...`. The fork keeps the `google.golang.org/protobuf` import path, tracks upstream's tags closely, and adds nothing user-visible beyond the three unsafe setters — code that compiles against upstream compiles against the fork unchanged.
+
+When to opt in:
+
+- **Binaries / services** that benchmark show latency or allocation pressure on `dynamicpb` decode paths — likely yes.
+- **Libraries** in the middle of a dependency tree — leave the choice to the binary at the top. A library that pins the fork forces it on every downstream consumer.
+- **Apps using only generated `proto.Message` types** (no `dynamicpb`) — the fast path doesn't apply, so the fork buys nothing.
+
+The benchmark numbers in the next section are measured with the fork installed.
+
 ## Benchmarks
 
 ### PXF text format
