@@ -213,9 +213,33 @@ err := opts.Unmarshal(jsonBytes, msg)
 Behavior worth knowing:
 
 - **Eager population.** `Dial` / `client.New` fetches every schema in the namespace up front, so lookup misses surface at startup, not in the request path. Restrict to a subset with `client.WithSchemas("foo", "bar")`.
-- **Polling refresh** (default 30s, configurable via `client.WithRefreshInterval`). A background goroutine re-fetches only schemas whose current version advanced. Hot-swaps are atomic — readers in flight see a consistent snapshot. Failures are logged and survived (stale-while-error). Force a refresh with `r.Refresh(ctx)`.
-- **`Pin(ctx, map[string]uint64)`** returns a derived `Resolver` frozen at a specific (`schemaID` → `version`) map — useful when replaying captured PXF or SBE payloads against the exact schema version they were produced with.
+- **Incremental polling refresh** (default 30s, configurable via `client.WithRefreshInterval`). A background goroutine re-fetches only schemas whose current version advanced and applies the diff in place — `UpdateFile` / `UnregisterFile` for changed/removed entries, no full rebuild. Failures are logged and survived (stale-while-error). Force a refresh with `r.Refresh(ctx)`.
+- **Per-schema lookups remain atomic.** `r.Schema(schemaID).FindMessageByName(...)` and `r.FindMessageByName(...)` (which routes through the cross-schema name index) read from an `atomic.Pointer`-swapped snapshot, so a single lookup always sees a coherent per-schema view.
+- **Namespace-wide lookups are eventually consistent.** `r.FindFileByPath(...)` and `r.FindExtensionByNumber(...)` go through a Resolver-level aggregate that the refresh mutates incrementally. Two consecutive calls on the same `*Resolver` *can* straddle a refresh boundary and see different snapshots. For decodes that perform multiple lookups and need a stable view of the schema (e.g. nested-message dispatch), use `r.Pin(...)` (see below).
+- **`Pin(ctx, map[string]uint64)`** returns a derived `Resolver` frozen at a specific (`schemaID` → `version`) map. Pinned resolvers do not refresh, build their aggregate once at Pin time, and are fully atomic. Use them for replay of captured PXF/SBE payloads, *or* whenever a single decode operation should observe one fixed schema version end-to-end.
 - **`r.Schema(schemaID)`** narrows lookups to one schema in the namespace when the caller knows which schema owns the type — cheaper and immune to cross-schema FQN collisions.
+
+### Fork dependency carried by `protoregistry/client`
+
+`protoregistry/client` v0.70.0+ stores descriptors in
+`*protoregistry.NamespacedFiles` / `*protoregistry.NamespacedTypes`, which only
+exist in our [`trendvidia/protobuf-go`](https://github.com/trendvidia/protobuf-go) fork.
+That means **any binary that imports `protoregistry/client` must add the same
+`replace` directive to its own `go.mod`**:
+
+```
+replace google.golang.org/protobuf => github.com/trendvidia/protobuf-go v1.36.12
+```
+
+Go's `replace` does not propagate across module boundaries, so depending on
+`protowire-go` alone gets you the optional fast path described in the
+[Performance](#performance-opting-into-the-fast-path) section below; depending
+on `protoregistry/client` makes the fork mandatory at the binary level. If the
+top-level `go.mod` is missing the replace, the build fails with
+`undefined: protoregistry.NamespacedFiles` from the registry client.
+
+Match the fork version pinned by both libraries (currently `v1.36.12`) when
+you add the replace. They are tagged in lockstep on every fork bump.
 
 ## Command-line tool
 
