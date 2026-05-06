@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+## [0.70.3] — 2026-05-06
+
+Parser-strictness release. Stays inside the 0.70.x wire-contract line:
+the wire output is unchanged, only inputs that were never schema-valid
+are now rejected at parse time.
+
 ### Changed (breaking)
 
 - **PXF parser stricter on key forms**, mirroring the upstream grammar
