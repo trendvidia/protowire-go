@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+## [0.71.0] — 2026-05-10
+
+Layered-configuration release. Adds `pxf.Secret` recognition,
+generalizes WKT scalar shorthand to map-value position, exposes
+hooks for layered-config consumers (chameleon), and fixes a
+subtle presence-tracking gap in the WKT shorthand decoders.
+
+Wire format unchanged. No breaking changes to existing exported
+APIs. Semver-minor.
+
 ### Fixed
 
 - **WKT scalar-shorthand decoders now mark inner fields present.**
