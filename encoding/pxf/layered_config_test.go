@@ -325,6 +325,153 @@ func TestApplyDefault_RawStdAndRawStdEncodingBytes(t *testing.T) {
 	})
 }
 
+// --- ApplyDefault for message-typed WKT fields ---
+
+const wktDefaultsProtoSrc = `
+syntax = "proto3";
+package wktdef_test.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/wrappers.proto";
+import "pxf/bignum.proto";
+
+message WKTDefaults {
+  google.protobuf.Timestamp t = 1;
+  google.protobuf.Duration d = 2;
+  google.protobuf.StringValue sv = 3;
+  google.protobuf.Int32Value i32v = 4;
+  google.protobuf.Int64Value i64v = 5;
+  google.protobuf.UInt32Value u32v = 6;
+  google.protobuf.UInt64Value u64v = 7;
+  google.protobuf.BoolValue bv = 8;
+  google.protobuf.FloatValue fv = 9;
+  google.protobuf.DoubleValue dv = 10;
+  google.protobuf.BytesValue bytv = 11;
+  pxf.BigInt bi = 12;
+  pxf.Decimal dec = 13;
+  pxf.BigFloat bf = 14;
+}
+`
+
+func compileWKTDefaults(t *testing.T) protoreflect.MessageDescriptor {
+	t.Helper()
+	sources := map[string]string{
+		"test.proto":       wktDefaultsProtoSrc,
+		"pxf/bignum.proto": bignumProtoSrc,
+	}
+	comp := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(
+			&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(sources)},
+		),
+	}
+	files, err := comp.Compile(context.Background(), "test.proto")
+	require.NoError(t, err)
+	d, err := files.AsResolver().FindDescriptorByName("wktdef_test.v1.WKTDefaults")
+	require.NoError(t, err)
+	return d.(protoreflect.MessageDescriptor)
+}
+
+func TestApplyDefault_WKTMessageFields(t *testing.T) {
+	desc := compileWKTDefaults(t)
+
+	cases := []struct {
+		field string
+		def   string
+		check func(t *testing.T, sub protoreflect.Message)
+	}{
+		{"t", "2026-05-09T12:00:00Z", func(t *testing.T, sub protoreflect.Message) {
+			seconds := sub.Get(sub.Descriptor().Fields().ByName("seconds")).Int()
+			assert.Greater(t, seconds, int64(0))
+		}},
+		{"d", "1h30m", func(t *testing.T, sub protoreflect.Message) {
+			seconds := sub.Get(sub.Descriptor().Fields().ByName("seconds")).Int()
+			assert.Equal(t, int64(5400), seconds)
+		}},
+		{"sv", "hello", func(t *testing.T, sub protoreflect.Message) {
+			assert.Equal(t, "hello", sub.Get(sub.Descriptor().Fields().ByName("value")).String())
+		}},
+		{"i32v", "42", func(t *testing.T, sub protoreflect.Message) {
+			assert.Equal(t, int64(42), sub.Get(sub.Descriptor().Fields().ByName("value")).Int())
+		}},
+		{"i64v", "9000000000", func(t *testing.T, sub protoreflect.Message) {
+			assert.Equal(t, int64(9000000000), sub.Get(sub.Descriptor().Fields().ByName("value")).Int())
+		}},
+		{"u32v", "100", func(t *testing.T, sub protoreflect.Message) {
+			assert.Equal(t, uint64(100), sub.Get(sub.Descriptor().Fields().ByName("value")).Uint())
+		}},
+		{"u64v", "200", func(t *testing.T, sub protoreflect.Message) {
+			assert.Equal(t, uint64(200), sub.Get(sub.Descriptor().Fields().ByName("value")).Uint())
+		}},
+		{"bv", "true", func(t *testing.T, sub protoreflect.Message) {
+			assert.True(t, sub.Get(sub.Descriptor().Fields().ByName("value")).Bool())
+		}},
+		{"fv", "1.5", func(t *testing.T, sub protoreflect.Message) {
+			assert.InDelta(t, 1.5, sub.Get(sub.Descriptor().Fields().ByName("value")).Float(), 0.0001)
+		}},
+		{"dv", "3.14", func(t *testing.T, sub protoreflect.Message) {
+			assert.InDelta(t, 3.14, sub.Get(sub.Descriptor().Fields().ByName("value")).Float(), 0.0001)
+		}},
+		{"bi", "12345", func(t *testing.T, sub protoreflect.Message) {
+			abs := sub.Get(sub.Descriptor().Fields().ByName("abs")).Bytes()
+			assert.NotEmpty(t, abs)
+		}},
+		{"dec", "3.14", func(t *testing.T, sub protoreflect.Message) {
+			scale := sub.Get(sub.Descriptor().Fields().ByName("scale")).Int()
+			assert.Equal(t, int64(2), scale)
+		}},
+		{"bf", "2.71828", func(t *testing.T, sub protoreflect.Message) {
+			prec := sub.Get(sub.Descriptor().Fields().ByName("prec")).Uint()
+			assert.Greater(t, prec, uint64(0))
+		}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.field, func(t *testing.T) {
+			msg := dynamicpb.NewMessage(desc)
+			fd := desc.Fields().ByName(protoreflect.Name(c.field))
+			require.NotNil(t, fd)
+			require.NoError(t, pxf.ApplyDefault(msg, fd, c.def))
+			sub := msg.Get(fd).Message()
+			c.check(t, sub)
+		})
+	}
+}
+
+func TestApplyDefault_WKTInvalidValue(t *testing.T) {
+	desc := compileWKTDefaults(t)
+
+	cases := []struct {
+		field   string
+		bad     string
+		errKind string
+	}{
+		{"t", "not-a-timestamp", "timestamp"},
+		{"d", "not-a-duration", "duration"},
+		{"i32v", "not-a-number", "int32"},
+		{"bi", "not-a-bigint", "big integer"},
+		{"dec", "not-a-decimal", "decimal"},
+		{"bf", "not-a-bigfloat", "big float"},
+		// BytesValue defaults are unsupported by parseScalarDefault
+		// (pre-existing protowire-go limitation): the wrapper-defaults
+		// path doesn't include a BytesKind branch. Pinning this so a
+		// future change either supports it or stays explicit about
+		// rejecting it.
+		{"bytv", "aGVsbG8=", "unsupported default kind"},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.field, func(t *testing.T) {
+			msg := dynamicpb.NewMessage(desc)
+			fd := desc.Fields().ByName(protoreflect.Name(c.field))
+			require.NotNil(t, fd)
+			err := pxf.ApplyDefault(msg, fd, c.bad)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.errKind)
+		})
+	}
+}
+
 // --- IsRequired / Default ---
 
 func TestIsRequired(t *testing.T) {
