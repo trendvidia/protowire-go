@@ -103,17 +103,16 @@ func isSecret(desc protoreflect.MessageDescriptor) bool {
 	return desc.FullName() == "pxf.Secret"
 }
 
-func setSecretValue(msg protoreflect.Message, value string) {
-	msg.Set(msg.Descriptor().Fields().ByName("value"), protoreflect.ValueOfString(value))
-}
-
-func readSecretValue(msg protoreflect.Message) string {
-	return msg.Get(msg.Descriptor().Fields().ByName("value")).String()
-}
-
 // secretHasMetadata reports whether the Secret message carries hint or
 // fingerprint, in which case the encoder must emit the explicit block
 // form to round-trip those fields. Empty metadata → scalar shorthand.
+//
+// Note: there is no setSecretValue / readSecretValue helper here.
+// Secret.value is a plain string field, so the codec uses the existing
+// scalar paths (consumeScalar / writeScalar) directly — adding helpers
+// that wrap them would either bypass UTF-8 validation or duplicate
+// logic. Compare with pxf.BigInt etc. which DO need helpers because
+// their inner representation is multi-field (abs + negative bytes).
 func secretHasMetadata(msg protoreflect.Message) bool {
 	d := msg.Descriptor()
 	if hf := d.Fields().ByName("hint"); hf != nil && msg.Get(hf).String() != "" {

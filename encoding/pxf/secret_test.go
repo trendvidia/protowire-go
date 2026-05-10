@@ -47,8 +47,8 @@ message SecretDemo {
 func compileSecretProto(t *testing.T) protoreflect.FileDescriptor {
 	t.Helper()
 	sources := map[string]string{
-		"test.proto":        secretTestProtoSrc,
-		"pxf/secret.proto":  secretProtoSrc,
+		"test.proto":       secretTestProtoSrc,
+		"pxf/secret.proto": secretProtoSrc,
 	}
 	comp := protocompile.Compiler{
 		Resolver: protocompile.WithStandardImports(
