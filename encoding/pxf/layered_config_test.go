@@ -557,13 +557,6 @@ func TestSkipPostDecode(t *testing.T) {
 	})
 }
 
-func mustFindDescriptor(t *testing.T, fd protoreflect.FileDescriptor, name string) protoreflect.MessageDescriptor {
-	t.Helper()
-	d := fd.Messages().ByName(protoreflect.Name(name))
-	require.NotNil(t, d, "descriptor %q not found", name)
-	return d
-}
-
 // --- Result.PresentFields ---
 
 func TestPresentFields_ReturnsAllPresentPaths(t *testing.T) {
