@@ -46,7 +46,7 @@ func (o UnmarshalOptions) UnmarshalDescriptor(data []byte, desc protoreflect.Mes
 // and returns field presence metadata.
 func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect.MessageDescriptor) (*dynamicpb.Message, *Result, error) {
 	msg := dynamicpb.NewMessage(desc)
-	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown)
+	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
 	if err != nil {
 		return nil, nil, err
 	}

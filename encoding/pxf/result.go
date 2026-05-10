@@ -56,3 +56,18 @@ func (r *Result) NullFields() []string {
 	}
 	return paths
 }
+
+// PresentFields returns the paths of all fields encountered during
+// parsing — both fields set to a concrete value and fields set to null.
+// Equivalent to the union of [Result.IsSet] and [Result.IsNull] paths.
+//
+// Useful for layered-config systems (chameleon) that union per-layer
+// presence into a merged-result presence set, then run defaults /
+// required-validation against that union.
+func (r *Result) PresentFields() []string {
+	paths := make([]string, 0, len(r.presentFields))
+	for p := range r.presentFields {
+		paths = append(paths, p)
+	}
+	return paths
+}

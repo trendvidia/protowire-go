@@ -85,6 +85,46 @@ func isBigFloat(desc protoreflect.MessageDescriptor) bool {
 	return desc.FullName() == "pxf.BigFloat"
 }
 
+// pxf.Secret well-known type.
+//
+// Secret carries a sensitive scalar plus optional hint/fingerprint
+// metadata. PXF accepts two surface forms:
+//
+//	pw = "x"                              # scalar shorthand
+//	pw { value = "x", hint = "h" }        # explicit block
+//
+// The codec treats the inner `value` field as a string for transport
+// purposes. Memguard handoff happens in the consumer (chameleon
+// resolver), not here — this codec only routes bytes between the wire
+// and the proto message. Keeping that boundary clean lets protowire-go
+// stay free of any memguard dependency.
+
+func isSecret(desc protoreflect.MessageDescriptor) bool {
+	return desc.FullName() == "pxf.Secret"
+}
+
+func setSecretValue(msg protoreflect.Message, value string) {
+	msg.Set(msg.Descriptor().Fields().ByName("value"), protoreflect.ValueOfString(value))
+}
+
+func readSecretValue(msg protoreflect.Message) string {
+	return msg.Get(msg.Descriptor().Fields().ByName("value")).String()
+}
+
+// secretHasMetadata reports whether the Secret message carries hint or
+// fingerprint, in which case the encoder must emit the explicit block
+// form to round-trip those fields. Empty metadata → scalar shorthand.
+func secretHasMetadata(msg protoreflect.Message) bool {
+	d := msg.Descriptor()
+	if hf := d.Fields().ByName("hint"); hf != nil && msg.Get(hf).String() != "" {
+		return true
+	}
+	if ff := d.Fields().ByName("fingerprint"); ff != nil && msg.Get(ff).String() != "" {
+		return true
+	}
+	return false
+}
+
 // Big number field setters (decode direction).
 
 func setBigIntFields(msg protoreflect.Message, v *big.Int) {

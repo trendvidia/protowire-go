@@ -24,6 +24,18 @@ type UnmarshalOptions struct {
 	// DiscardUnknown silently skips fields not found in the schema
 	// instead of returning an error.
 	DiscardUnknown bool
+
+	// SkipPostDecode disables the per-parse pass that applies
+	// (pxf.default) values to absent fields and validates
+	// (pxf.required) fields. Layered configuration systems (e.g.
+	// chameleon) need defaults + required to apply on the MERGED
+	// result, not per-layer — a base layer may legitimately omit a
+	// required field that a higher layer provides, and per-layer
+	// defaults silently get clobbered by merge's "absent → fall
+	// through" rule. With SkipPostDecode = true, callers get raw
+	// presence tracking and run their own post-merge passes via
+	// [IsRequired] and [Default].
+	SkipPostDecode bool
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -35,5 +47,5 @@ func UnmarshalFull(data []byte, msg proto.Message) (*Result, error) {
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
 func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result, error) {
-	return unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown)
+	return unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
 }

@@ -11,6 +11,108 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **WKT scalar-shorthand decoders now mark inner fields present.**
+  Before this fix, parsing `pw = "x"` (PXF scalar shorthand for a
+  pxf.Secret-typed field) set `Secret.value` on the message but did
+  not call `markPresent` for the `pw.value` path. Block-form parsing
+  (`pw { value = "x" }`) always marked it. Result: presence tracking
+  was inconsistent based on which surface form was used. After the
+  fix, both forms produce identical `Result.PresentFields()`.
+
+  Affects all seven WKT shorthand handlers in `decodeMsgValue`:
+  Timestamp (seconds, nanos), Duration (seconds, nanos), wrapper
+  types (value), BigInt (abs, negative), Decimal (unscaled, scale,
+  negative), BigFloat (mantissa, exponent, prec, negative), Secret
+  (value).
+
+  `consumeListMsg` and `decodeMapInline` are unchanged: per-element
+  inner-field presence isn't tracked in those contexts (the parent
+  list/map field is the unit of presence).
+
+### Added
+
+- **`UnmarshalOptions.SkipPostDecode`** — disables the per-parse pass
+  that applies `(pxf.default)` and validates `(pxf.required)` so
+  callers can run those passes against a merged result instead of
+  per-document. Targeted at layered-configuration libraries (e.g.
+  chameleon) where:
+    - A base layer may legitimately omit a required field a higher
+      layer provides — per-layer validation rejects this.
+    - Per-layer defaults are silently lost during merge: the
+      default-filled value's path is "absent" in the layer's
+      `Result`, so merge falls through and clobbers it.
+  With `SkipPostDecode = true`, `UnmarshalFull` returns raw presence
+  tracking only.
+
+- **`pxf.IsRequired(fd)` and `pxf.Default(fd)`** — exported the
+  `(pxf.required)` and `(pxf.default)` annotation accessors.
+  Previously package-private (used only by `postDecode`); now
+  available to consumers running their own merged-result passes.
+
+- **`pxf.ApplyDefault(msg, fd, def)`** — exported the scalar default
+  applier. Parses the literal `def` string (PXF form) and sets it on
+  the field. The bytes/enum/message-default branches are reused, so
+  consumers don't have to re-implement them.
+
+- **`Result.PresentFields() []string`** — symmetric to
+  `Result.NullFields`. Returns every path encountered during parse
+  (set + null). Lets layered-config systems union per-layer presence
+  into a merged-result presence set.
+
+- **WKT scalar shorthand in `map<*, message>` value position.**
+  `decodeMapInline` and `encodeMapField` now go through the same
+  well-known-type shortcut path as `decodeMsgValue`/`encodeMessageField`
+  (top-level fields) and `consumeListMsg`/`encodeListField` (repeated
+  fields). Affects `pxf.Secret`, `pxf.BigInt`, `pxf.Decimal`,
+  `pxf.BigFloat`, `google.protobuf.Timestamp`, `google.protobuf.Duration`,
+  and the `*Value` wrapper types. So:
+
+  ```
+  weights     = { "a": 100, "b": -7 }              # pxf.BigInt
+  tenant_keys = { "acme": "k1", "globex": "k2" }   # pxf.Secret
+  expirations = { "acme": 2026-12-31T00:00:00Z }   # google.protobuf.Timestamp
+  ```
+
+  Previously these required block form per entry (`"acme": { value = "k1" }`)
+  even though the same shortcut worked everywhere else. Block form
+  remains valid; mixed shorthand + block in the same map literal
+  works per-entry.
+
+- **`pxf.Secret` well-known type recognition in PXF.** The PXF
+  codec now treats `pxf.Secret` as a value-shaped well-known
+  type, with scalar shorthand decode/encode:
+
+  ```
+  db_password = "supersecret"                  # scalar shorthand
+  db_password {                                # explicit form, with metadata
+    value = "supersecret"
+    hint  = "Postgres primary"
+    fingerprint = "sha256:abc123"
+  }
+  ```
+
+  Encode preserves authoring metadata: scalar form is emitted only when
+  `hint` and `fingerprint` are both empty, otherwise the block form is
+  used so re-emit doesn't silently drop the metadata. Repeated
+  `pxf.Secret` accepts both forms in list literals.
+
+  The codec stays free of any memory-protection dependency — it routes
+  the inner `value` field as a plain string, identical to how
+  `pxf.BigInt` bytes are routed. Memory protection (mlock, encrypt at
+  rest in process, wipe on destroy) is the consumer runtime's
+  responsibility, out of scope for this codec.
+
+  Canonical descriptor: `proto/pxf/secret.proto` in the
+  trendvidia/protowire spec repo.
+
+  Added to wire-compatible siblings via the `isSecret` /
+  `setSecretValue` / `readSecretValue` / `secretHasMetadata` helpers in
+  `encoding/pxf/wellknown.go`.
+
+  No wire-format change; this is text-format-only sugar.
+
 ## [0.70.3] — 2026-05-06
 
 Parser-strictness release. Stays inside the 0.70.x wire-contract line:
