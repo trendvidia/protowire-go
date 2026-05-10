@@ -114,7 +114,7 @@ func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolve
 	return d.decodeFields(msg, false)
 }
 
-func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown bool) (*Result, error) {
+func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown, skipPostDecode bool) (*Result, error) {
 	var d directDecoder
 	d.lex = lexer{input: data, line: 1, col: 1}
 	d.resolver = resolver
@@ -135,8 +135,10 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeRes
 	if err := d.decodeFields(msg, false); err != nil {
 		return nil, err
 	}
-	if err := postDecode(msg, d.result, d.nullMaskFd, ""); err != nil {
-		return nil, err
+	if !skipPostDecode {
+		if err := postDecode(msg, d.result, d.nullMaskFd, ""); err != nil {
+			return nil, err
+		}
 	}
 	return d.result, nil
 }
@@ -293,6 +295,26 @@ func (d *directDecoder) decodeFieldValue(msg protoreflect.Message, fd protorefle
 	return nil
 }
 
+// markInnerPresent records `<pathPrefix><field>.<name>` in the result
+// for each inner-field name. Used by WKT scalar-shorthand decoders so
+// presence tracking stays consistent with what block-form parsing
+// produces — `pw = "x"` and `pw { value = "x" }` both leave
+// `pw.value` marked present.
+//
+// Only meaningful for top-level decodeMsgValue. consumeListMsg and
+// decodeMapInline don't track per-element inner-field presence
+// (the parent list/map field is the unit of presence in those
+// contexts).
+func (d *directDecoder) markInnerPresent(fd protoreflect.FieldDescriptor, names ...string) {
+	if d.result == nil {
+		return
+	}
+	base := d.pathPrefix + string(fd.Name())
+	for _, name := range names {
+		d.result.markPresent(base + "." + name)
+	}
+}
+
 func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {
 	mdesc := fd.Message()
 
@@ -306,6 +328,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		}
 		sub := msg.Mutable(fd).Message()
 		setTimestampFields(sub, t)
+		d.markInnerPresent(fd, "seconds", "nanos")
 		d.advance()
 		return nil
 	}
@@ -316,6 +339,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		}
 		sub := msg.Mutable(fd).Message()
 		setDurationFields(sub, dur)
+		d.markInnerPresent(fd, "seconds", "nanos")
 		d.advance()
 		return nil
 	}
@@ -327,6 +351,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		}
 		sub := msg.Mutable(fd).Message()
 		fastSet(sub, innerFd, v)
+		d.markInnerPresent(fd, "value")
 		return nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
@@ -336,6 +361,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		}
 		sub := msg.Mutable(fd).Message()
 		setBigIntFields(sub, bi)
+		d.markInnerPresent(fd, "abs", "negative")
 		d.advance()
 		return nil
 	}
@@ -346,6 +372,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		}
 		sub := msg.Mutable(fd).Message()
 		setDecimalFields(sub, unscaled, scale, negative)
+		d.markInnerPresent(fd, "unscaled", "scale", "negative")
 		d.advance()
 		return nil
 	}
@@ -356,7 +383,23 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		}
 		sub := msg.Mutable(fd).Message()
 		setBigFloatFields(sub, bf)
+		d.markInnerPresent(fd, "mantissa", "exponent", "prec", "negative")
 		d.advance()
+		return nil
+	}
+	// pxf.Secret: scalar shorthand `pw = "x"`. Block form falls through
+	// to the generic message decoder below, which handles
+	// `pw { value = "x", hint = "h" }` correctly via the underlying
+	// proto descriptor.
+	if isSecret(mdesc) && d.current.Kind == STRING {
+		innerFd := mdesc.Fields().ByName("value")
+		v, err := d.consumeScalar(innerFd)
+		if err != nil {
+			return err
+		}
+		sub := msg.Mutable(fd).Message()
+		fastSet(sub, innerFd, v)
+		d.markInnerPresent(fd, "value")
 		return nil
 	}
 	// google.protobuf.Any with sugar syntax
@@ -530,6 +573,19 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		d.advance()
 		return protoreflect.ValueOfMessage(sub), nil
 	}
+	// pxf.Secret in repeated context: accept scalar shorthand (a list
+	// of plain strings), otherwise fall through to the generic
+	// block-form path.
+	if isSecret(mdesc) && d.current.Kind == STRING {
+		innerFd := mdesc.Fields().ByName("value")
+		v, err := d.consumeScalar(innerFd)
+		if err != nil {
+			return protoreflect.Value{}, err
+		}
+		sub := list.NewElement().Message()
+		fastSet(sub, innerFd, v)
+		return protoreflect.ValueOfMessage(sub), nil
+	}
 
 	if d.current.Kind != LBRACE {
 		return protoreflect.Value{}, errorf(d.current.Pos, "expected '{' for repeated message element")
@@ -579,6 +635,93 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 		}
 
 		if valFd.Kind() == protoreflect.MessageKind || valFd.Kind() == protoreflect.GroupKind {
+			mdesc := valFd.Message()
+
+			// WKT scalar shortcuts in map-value position. Mirrors the
+			// equivalent block in decodeMsgValue / consumeListMsg so
+			// `tenants = { "acme": "key" }` works for pxf.Secret,
+			// `weights = { "x": 42 }` works for pxf.BigInt, etc.
+			if isTimestamp(mdesc) && d.current.Kind == TIMESTAMP {
+				t, err := time.Parse(time.RFC3339Nano, d.current.Value)
+				if err != nil {
+					t, err = time.Parse(time.RFC3339, d.current.Value)
+					if err != nil {
+						return errorf(d.current.Pos, "invalid timestamp %q: %v", d.current.Value, err)
+					}
+				}
+				sub := m.NewValue().Message()
+				setTimestampFields(sub, t)
+				d.advance()
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+			if isDuration(mdesc) && d.current.Kind == DURATION {
+				dur, err := time.ParseDuration(d.current.Value)
+				if err != nil {
+					return errorf(d.current.Pos, "invalid duration %q: %v", d.current.Value, err)
+				}
+				sub := m.NewValue().Message()
+				setDurationFields(sub, dur)
+				d.advance()
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+			if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
+				innerFd := mdesc.Fields().ByName("value")
+				v, err := d.consumeScalar(innerFd)
+				if err != nil {
+					return err
+				}
+				sub := m.NewValue().Message()
+				fastSet(sub, innerFd, v)
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+			if isBigInt(mdesc) && d.current.Kind == INT {
+				bi, err := parseBigInt(d.current.Value)
+				if err != nil {
+					return errorf(d.current.Pos, "%v", err)
+				}
+				sub := m.NewValue().Message()
+				setBigIntFields(sub, bi)
+				d.advance()
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+			if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+				unscaled, scale, negative, err := parseDecimal(d.current.Value)
+				if err != nil {
+					return errorf(d.current.Pos, "%v", err)
+				}
+				sub := m.NewValue().Message()
+				setDecimalFields(sub, unscaled, scale, negative)
+				d.advance()
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+				bf, err := parseBigFloat(d.current.Value)
+				if err != nil {
+					return errorf(d.current.Pos, "%v", err)
+				}
+				sub := m.NewValue().Message()
+				setBigFloatFields(sub, bf)
+				d.advance()
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+			if isSecret(mdesc) && d.current.Kind == STRING {
+				innerFd := mdesc.Fields().ByName("value")
+				v, err := d.consumeScalar(innerFd)
+				if err != nil {
+					return err
+				}
+				sub := m.NewValue().Message()
+				fastSet(sub, innerFd, v)
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
+
 			if d.current.Kind != LBRACE {
 				return errorf(d.current.Pos, "expected '{' for map message value")
 			}
@@ -830,8 +973,26 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 	return nil
 }
 
-// applyDefault parses a default value string and sets it on the message field.
+// ApplyDefault parses a (pxf.default) value string and sets it on the
+// given message field. The string is the same PXF literal form the
+// annotation accepts: `42` for ints, `true`/`false` for bools, `"hello"`
+// for strings, base64 for bytes, RFC3339 for timestamps inside their
+// inner fields, etc.
+//
+// Exported for layered-config consumers (e.g. chameleon) that run a
+// post-merge defaults pass with [UnmarshalOptions.SkipPostDecode].
+// In-tree callers (postDecode) use the lowercase alias.
+func ApplyDefault(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def string) error {
+	return applyDefaultImpl(msg, fd, def)
+}
+
+// applyDefault preserves the existing in-package call shape; ApplyDefault
+// is the public spelling.
 func applyDefault(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def string) error {
+	return applyDefaultImpl(msg, fd, def)
+}
+
+func applyDefaultImpl(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def string) error {
 	switch fd.Kind() {
 	case protoreflect.StringKind:
 		msg.Set(fd, protoreflect.ValueOfString(def))

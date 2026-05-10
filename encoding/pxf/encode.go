@@ -201,6 +201,18 @@ func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protor
 		e.buf.WriteByte('\n')
 		return nil
 	}
+	// pxf.Secret: scalar shorthand iff hint and fingerprint are empty
+	// (otherwise we would silently drop authoring metadata on re-emit).
+	// The block-form fallthrough handles the metadata case.
+	if isSecret(mdesc) && !secretHasMetadata(sub) {
+		innerFd := mdesc.Fields().ByName("value")
+		e.writeFieldPrefix(level, fd.Name())
+		if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
+			return err
+		}
+		e.buf.WriteByte('\n')
+		return nil
+	}
 	// Any sugar: @type + inline fields
 	if isAny(mdesc) && e.resolver != nil {
 		encoded, err := e.tryEncodeAny(fd, sub, level)
@@ -265,6 +277,12 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 			} else if isBigFloat(mdesc) {
 				e.writeIndent(level + 1)
 				e.buf.WriteString(formatBigFloat(sub))
+			} else if isSecret(mdesc) && !secretHasMetadata(sub) {
+				innerFd := mdesc.Fields().ByName("value")
+				e.writeIndent(level + 1)
+				if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
+					return err
+				}
 			} else {
 				e.writeIndent(level + 1)
 				e.buf.WriteString("{\n")
@@ -321,10 +339,85 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 
 	for _, kv := range entries {
 		if valFd.Kind() == protoreflect.MessageKind || valFd.Kind() == protoreflect.GroupKind {
+			sub := kv.val.Message()
+			mdesc := valFd.Message()
+
+			// WKT scalar emission in map-value position. Mirrors the
+			// equivalent block in encodeMessageField / encodeListField
+			// so a Timestamp / Duration / wrapper / BigInt / Decimal /
+			// BigFloat / Secret value renders as `key: <scalar>`
+			// rather than `key: { value = <scalar> }`. Secret falls
+			// back to block form when hint or fingerprint is set, so
+			// authoring metadata round-trips.
+			if isTimestamp(mdesc) {
+				t := readTimestamp(sub)
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				e.buf.WriteString(t.Format(time.RFC3339Nano))
+				e.buf.WriteByte('\n')
+				continue
+			}
+			if isDuration(mdesc) {
+				d := readDuration(sub)
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				e.buf.WriteString(d.String())
+				e.buf.WriteByte('\n')
+				continue
+			}
+			if isWrapperType(mdesc) {
+				innerFd := mdesc.Fields().ByName("value")
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
+					return err
+				}
+				e.buf.WriteByte('\n')
+				continue
+			}
+			if isBigInt(mdesc) {
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				e.buf.WriteString(formatBigInt(sub))
+				e.buf.WriteByte('\n')
+				continue
+			}
+			if isDecimal(mdesc) {
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				e.buf.WriteString(readDecimalStr(sub))
+				e.buf.WriteByte('\n')
+				continue
+			}
+			if isBigFloat(mdesc) {
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				e.buf.WriteString(formatBigFloat(sub))
+				e.buf.WriteByte('\n')
+				continue
+			}
+			if isSecret(mdesc) && !secretHasMetadata(sub) {
+				innerFd := mdesc.Fields().ByName("value")
+				e.writeIndent(level + 1)
+				e.buf.WriteString(kv.keyStr)
+				e.buf.WriteString(": ")
+				if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
+					return err
+				}
+				e.buf.WriteByte('\n')
+				continue
+			}
+
 			e.writeIndent(level + 1)
 			e.buf.WriteString(kv.keyStr)
 			e.buf.WriteString(": {\n")
-			if err := e.encodeMessage(kv.val.Message(), level+2); err != nil {
+			if err := e.encodeMessage(sub, level+2); err != nil {
 				return err
 			}
 			e.writeIndent(level + 1)

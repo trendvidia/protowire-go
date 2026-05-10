@@ -15,14 +15,26 @@ const (
 	extDefault  protoreflect.FieldNumber = 50001
 )
 
-// isRequired returns true if the field has (pxf.required) = true.
-func isRequired(fd protoreflect.FieldDescriptor) bool {
+// IsRequired reports whether the field has (pxf.required) = true.
+// Exported for layered-config consumers (e.g. chameleon) that run
+// their own post-merge required-validation pass with SkipPostDecode.
+func IsRequired(fd protoreflect.FieldDescriptor) bool {
 	return getBoolOption(fd, extRequired)
 }
 
-// getDefault returns the default value string if the field has (pxf.default).
-func getDefault(fd protoreflect.FieldDescriptor) (string, bool) {
+// Default returns the (pxf.default) value string if set. The string is
+// a PXF literal (e.g. `42`, `true`, `"hello"`); callers parse it with
+// [ApplyDefault] or their own logic. Exported for layered-config
+// consumers running post-merge defaults passes.
+func Default(fd protoreflect.FieldDescriptor) (string, bool) {
 	return getStringOption(fd, extDefault)
+}
+
+// isRequired and getDefault are kept as private aliases so the
+// existing in-package callsites (postDecode) don't churn.
+func isRequired(fd protoreflect.FieldDescriptor) bool { return IsRequired(fd) }
+func getDefault(fd protoreflect.FieldDescriptor) (string, bool) {
+	return Default(fd)
 }
 
 // findNullMaskField returns the "_null" field if it exists and is a

@@ -61,6 +61,11 @@ message BigNumDefaults {
   pxf.Decimal dec_with_default = 2 [(pxf.default) = "3.14"];
   pxf.BigFloat float_with_default = 3 [(pxf.default) = "2.718"];
 }
+
+message BigNumMaps {
+  map<string, pxf.BigInt> weights = 1;
+  map<string, pxf.Decimal> rates = 2;
+}
 `
 
 func compileBigNumProto(t *testing.T) protoreflect.FileDescriptor {
@@ -120,6 +125,56 @@ func readDecimalFromMsg(msg protoreflect.Message, fieldName string) (unscaled *b
 	negative = sub.Get(d.Fields().ByName("negative")).Bool()
 	unscaled = new(big.Int).SetBytes(unscaledBytes)
 	return
+}
+
+func TestBigIntMapValueScalarShorthand(t *testing.T) {
+	desc := bigNumDesc(t, "BigNumMaps")
+	input := `weights = {
+  "alpha": 100
+  "beta": -7
+}`
+	msg, err := pxf.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+
+	fd := msg.ProtoReflect().Descriptor().Fields().ByName("weights")
+	m := msg.ProtoReflect().Get(fd).Map()
+	require.Equal(t, 2, m.Len())
+
+	read := func(key string) *big.Int {
+		sub := m.Get(protoreflect.ValueOfString(key).MapKey()).Message()
+		d := sub.Descriptor()
+		absBytes := sub.Get(d.Fields().ByName("abs")).Bytes()
+		negative := sub.Get(d.Fields().ByName("negative")).Bool()
+		v := new(big.Int).SetBytes(absBytes)
+		if negative {
+			v.Neg(v)
+		}
+		return v
+	}
+	assert.Equal(t, big.NewInt(100), read("alpha"))
+	assert.Equal(t, big.NewInt(-7), read("beta"))
+
+	// Encode round-trip emits scalar shorthand, not block form.
+	out, err := pxf.Marshal(msg)
+	require.NoError(t, err)
+	s := string(out)
+	assert.Contains(t, s, "alpha: 100")
+	assert.Contains(t, s, "beta: -7")
+	assert.NotContains(t, s, "alpha: {")
+}
+
+func TestDecimalMapValueScalarShorthand(t *testing.T) {
+	desc := bigNumDesc(t, "BigNumMaps")
+	input := `rates = {
+  "usd": 1.00
+  "eur": 0.92
+}`
+	msg, err := pxf.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+
+	fd := msg.ProtoReflect().Descriptor().Fields().ByName("rates")
+	m := msg.ProtoReflect().Get(fd).Map()
+	require.Equal(t, 2, m.Len())
 }
 
 func TestBigIntBasic(t *testing.T) {
