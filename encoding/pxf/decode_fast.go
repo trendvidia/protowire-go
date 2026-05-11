@@ -96,6 +96,19 @@ func (d *directDecoder) advance() {
 	}
 }
 
+// peekKind returns the next significant token kind without consuming it.
+// Used by consumeDirective to disambiguate prefix identifiers from body
+// field keys (an IDENT followed by `=` or `:` is the latter).
+func (d *directDecoder) peekKind() TokenKind {
+	pos, line, col := d.lex.pos, d.lex.line, d.lex.col
+	saved := d.current
+	d.advance()
+	next := d.current.Kind
+	d.lex.pos, d.lex.line, d.lex.col = pos, line, col
+	d.current = saved
+	return next
+}
+
 func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown bool) error {
 	var d directDecoder
 	d.lex = lexer{input: data, line: 1, col: 1}
@@ -161,8 +174,11 @@ func (d *directDecoder) consumeDirectives(result *Result) error {
 	}
 }
 
-// consumeDirective consumes `@<name> [<type>] [{ ... }]`. The leading
-// AT_DIRECTIVE token is current on entry.
+// consumeDirective consumes `@<name> *(<prefix-id>) [{ ... }]`. The
+// leading AT_DIRECTIVE token is current on entry. Mirrors parser.go's
+// parseDirective: zero-or-more prefix identifiers (draft §3.4.2),
+// with the single-prefix case populating the legacy Type field for
+// v0.72.0 back-compat.
 func (d *directDecoder) consumeDirective() (Directive, error) {
 	dir := Directive{
 		Pos:  d.current.Pos,
@@ -170,9 +186,18 @@ func (d *directDecoder) consumeDirective() (Directive, error) {
 	}
 	d.advance() // consume AT_DIRECTIVE
 
-	if d.current.Kind == IDENT {
-		dir.Type = d.current.Value
+	for d.current.Kind == IDENT {
+		switch d.peekKind() {
+		case EQUALS, COLON:
+			// d.current is the first body entry's key; leave it.
+			goto prefixesDone
+		}
+		dir.Prefixes = append(dir.Prefixes, d.current.Value)
 		d.advance()
+	}
+prefixesDone:
+	if len(dir.Prefixes) == 1 {
+		dir.Type = dir.Prefixes[0]
 	}
 
 	if d.current.Kind == LBRACE {

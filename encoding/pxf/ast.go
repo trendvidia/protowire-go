@@ -20,20 +20,38 @@ type Document struct {
 	LeadingComments []Comment // comments before the first entry (or after @type)
 }
 
-// Directive is a top-of-document `@<name> [<type>] [{ ... }]` entry. The
-// canonical use is metadata that sits alongside the schema-typed body —
-// e.g. chameleon's `@header chameleon.v1.LayerHeader { id = "x" }` — but
-// the grammar is open-ended: any name except `type` is accepted, with
-// an optional dotted type name and an optional inline block.
+// Directive is a top-of-document `@<name> *(<prefix-id>) [{ ... }]`
+// entry. The canonical use is side-channel metadata that sits alongside
+// the schema-typed body — e.g. chameleon's `@header
+// chameleon.v1.LayerHeader { id = "x" }` — but the grammar is open-ended:
+// any name except `type` is accepted, followed by zero-or-more prefix
+// identifiers and an optional inline block.
+//
+// Prefix identifiers are positional and per-directive. The two
+// registrations defined by the protowire spec:
+//
+//   - One prefix identifier (v0.72.0 conventional shape) — the
+//     identifier names the inner block's message type, dotted. Used by
+//     `@header` and similar.
+//   - `@entry` (draft §3.4.3) — zero, one, or two prefix identifiers
+//     (label, type); a single prefix is disambiguated by the presence
+//     of a `.` (dotted ⇒ type; bare ⇒ label).
 //
 // Body holds the RAW bytes between the opening `{` and matching `}`
 // (both exclusive), suitable for handing back to [UnmarshalFull] /
 // [Unmarshal] against the consumer's chosen message. Body is nil when
 // the directive has no inline block.
 type Directive struct {
-	Pos             Position
-	Name            string // e.g. "header"; never "type" (those go to Document.TypeURL)
-	Type            string // qualified type name, e.g. "chameleon.v1.LayerHeader"; "" if absent
+	Pos      Position
+	Name     string // e.g. "header"; never "type" (those go to Document.TypeURL)
+	Prefixes []string // identifiers between @<name> and the optional `{ ... }`, in source order
+	// Type is preserved for v0.72.0-era consumers: when exactly one
+	// prefix identifier was supplied, Type holds it (matching the
+	// previous single-Type field's behavior). For zero or two-plus
+	// prefixes, Type is empty and callers MUST read Prefixes directly.
+	// New code should use Prefixes; Type is retained to avoid churning
+	// downstream consumers that haven't migrated.
+	Type            string
 	Body            []byte // raw inner bytes of the block; nil if the directive has no `{ ... }`
 	LeadingComments []Comment
 }

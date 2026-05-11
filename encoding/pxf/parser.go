@@ -50,6 +50,22 @@ func (p *parser) flushComments() []Comment {
 	return c
 }
 
+// peekKind returns the kind of the next significant token (skipping
+// newlines and comments) without consuming it or disturbing pending-
+// comment accumulation. Used by parseDirective to disambiguate "this
+// IDENT is a directive prefix" from "this IDENT is a body field key".
+func (p *parser) peekKind() TokenKind {
+	pos, line, col := p.lex.pos, p.lex.line, p.lex.col
+	saved := p.current
+	nComments := len(p.comments)
+	p.advance()
+	next := p.current.Kind
+	p.lex.pos, p.lex.line, p.lex.col = pos, line, col
+	p.current = saved
+	p.comments = p.comments[:nComments]
+	return next
+}
+
 // Parse parses PXF source into an AST Document with comments attached.
 func Parse(input []byte) (*Document, error) {
 	return newParser(input).parseDocument()
@@ -101,10 +117,15 @@ directives:
 	return doc, nil
 }
 
-// parseDirective reads `@<name> [<type>] [{ ... }]`. The AT_DIRECTIVE
-// token is current on entry. Returns the directive plus the byte offset
-// immediately after the directive's last token (the `}` for block form,
-// the type name for bare form, or `@<name>` if neither is present).
+// parseDirective reads `@<name> *(<prefix-id>) [{ ... }]`. The
+// AT_DIRECTIVE token is current on entry. Returns the directive plus
+// the byte offset immediately after the directive's last token (the
+// `}` for block form, the last prefix identifier for bare form, or
+// `@<name>` if neither is present).
+//
+// The grammar accepts zero-or-more prefix identifiers between `@<name>`
+// and the optional `{ ... }` block (draft §3.4.2). Specific directive
+// registrations may impose a cardinality; the parser does not.
 func (p *parser) parseDirective() (*Directive, int, error) {
 	leading := p.flushComments()
 	atPos := p.current.Pos
@@ -117,11 +138,28 @@ func (p *parser) parseDirective() (*Directive, int, error) {
 	endOffset := atPos.Offset + 1 + len(name) // `@` + name
 	p.advance()                               // consume AT_DIRECTIVE
 
-	// Optional type name.
-	if p.current.Kind == IDENT {
-		d.Type = p.current.Value
+	// Zero-or-more prefix identifiers. PXF is whitespace-insignificant,
+	// so we can't end the prefix run at a newline. Instead, one-token
+	// lookahead disambiguates: an IDENT followed by `=` or `:` is a
+	// body field key, not a directive prefix.
+	for p.current.Kind == IDENT {
+		switch p.peekKind() {
+		case EQUALS, COLON:
+			// p.current is the first body entry's key; leave it for
+			// the body parser.
+			goto prefixesDone
+		}
+		d.Prefixes = append(d.Prefixes, p.current.Value)
 		endOffset = p.current.Pos.Offset + len(p.current.Value)
 		p.advance()
+	}
+prefixesDone:
+	// Back-compat: a single prefix identifier populates the legacy
+	// Type field, matching v0.72.0's single-Type shape so existing
+	// consumers (e.g. chameleon's `@header T { ... }` reader) keep
+	// working unchanged.
+	if len(d.Prefixes) == 1 {
+		d.Type = d.Prefixes[0]
 	}
 
 	// Optional inline block. Use parseBlockVal so the inner content is
