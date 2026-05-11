@@ -36,6 +36,17 @@ type UnmarshalOptions struct {
 	// presence tracking and run their own post-merge passes via
 	// [IsRequired] and [Default].
 	SkipPostDecode bool
+
+	// SkipValidate disables the per-call schema reserved-name check
+	// (draft §3.13). The default behavior — running the check on every
+	// decode call — is the safe one because the check catches schemas
+	// that would silently produce unreachable enum values or fields.
+	// Callers that have already validated their descriptors out-of-band
+	// (e.g. a registry-load step that pre-screens schemas before
+	// caching their descriptors) may set this to bypass the per-call
+	// recheck. Validate explicitly via [ValidateDescriptor] when
+	// pre-screening.
+	SkipValidate bool
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -47,5 +58,11 @@ func UnmarshalFull(data []byte, msg proto.Message) (*Result, error) {
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
 func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result, error) {
-	return unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
+	r := msg.ProtoReflect()
+	if !o.SkipValidate {
+		if err := asValidationError(ValidateFile(r.Descriptor().ParentFile())); err != nil {
+			return nil, err
+		}
+	}
+	return unmarshalDirectFull(data, r, o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
 }
