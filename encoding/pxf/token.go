@@ -32,7 +32,8 @@ const (
 	COLON    // :
 	COMMA    // ,
 
-	AT_TYPE // @type
+	AT_TYPE      // @type — body's message type, no inline block
+	AT_DIRECTIVE // @<name> for name != "type" — Value holds the name (without @)
 )
 
 var tokenNames = map[TokenKind]string{
@@ -40,7 +41,7 @@ var tokenNames = map[TokenKind]string{
 	IDENT: "identifier", STRING: "string", INT: "integer", FLOAT: "float",
 	BOOL: "bool", NULL: "null", BYTES: "bytes", TIMESTAMP: "timestamp", DURATION: "duration",
 	LBRACE: "{", RBRACE: "}", LBRACKET: "[", RBRACKET: "]",
-	EQUALS: "=", COLON: ":", COMMA: ",", AT_TYPE: "@type",
+	EQUALS: "=", COLON: ":", COMMA: ",", AT_TYPE: "@type", AT_DIRECTIVE: "@directive",
 }
 
 func (k TokenKind) String() string {
@@ -51,9 +52,14 @@ func (k TokenKind) String() string {
 }
 
 // Position represents a location in source text.
+//
+// Offset is the byte index into the input where the token starts. It
+// is populated by the lexer and used by callers that need to slice
+// the original byte stream (e.g. directive body extraction).
 type Position struct {
 	Line   int
 	Column int
+	Offset int
 }
 
 func (p Position) String() string {

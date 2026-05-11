@@ -57,16 +57,36 @@ func Parse(input []byte) (*Document, error) {
 
 func (p *parser) parseDocument() (*Document, error) {
 	doc := &Document{}
-	doc.LeadingComments = p.flushComments() // comments before @type
+	doc.LeadingComments = p.flushComments() // comments before any directive or body entry
 
-	if p.current.Kind == AT_TYPE {
-		p.advance() // consume @type
-		if p.current.Kind != IDENT {
-			return nil, errorf(p.current.Pos, "expected type name after @type, got %s", p.current.Kind)
+	// Top-of-document directives. @type and @<name> may interleave in any
+	// order; @type populates TypeURL, others append to Directives.
+	// doc.BodyOffset is the byte right after the last directive's
+	// closing `}` (block form) or last token (bare form). Stays 0 when
+	// there are no directives, so chameleon hashes from byte 0.
+directives:
+	for {
+		switch p.current.Kind {
+		case AT_TYPE:
+			p.advance() // consume @type
+			if p.current.Kind != IDENT {
+				return nil, errorf(p.current.Pos, "expected type name after @type, got %s", p.current.Kind)
+			}
+			doc.TypeURL = p.current.Value
+			doc.BodyOffset = p.current.Pos.Offset + len(p.current.Value)
+			p.advance()
+		case AT_DIRECTIVE:
+			d, end, err := p.parseDirective()
+			if err != nil {
+				return nil, err
+			}
+			doc.Directives = append(doc.Directives, *d)
+			doc.BodyOffset = end
+		default:
+			break directives
 		}
-		doc.TypeURL = p.current.Value
-		p.advance()
 	}
+
 	doc.Entries = make([]Entry, 0, 8)
 	for p.current.Kind != EOF {
 		// Top-level: only field_entry is allowed. The document represents a
@@ -79,6 +99,156 @@ func (p *parser) parseDocument() (*Document, error) {
 		doc.Entries = append(doc.Entries, entry)
 	}
 	return doc, nil
+}
+
+// parseDirective reads `@<name> [<type>] [{ ... }]`. The AT_DIRECTIVE
+// token is current on entry. Returns the directive plus the byte offset
+// immediately after the directive's last token (the `}` for block form,
+// the type name for bare form, or `@<name>` if neither is present).
+func (p *parser) parseDirective() (*Directive, int, error) {
+	leading := p.flushComments()
+	atPos := p.current.Pos
+	name := p.current.Value
+	d := &Directive{
+		Pos:             atPos,
+		Name:            name,
+		LeadingComments: leading,
+	}
+	endOffset := atPos.Offset + 1 + len(name) // `@` + name
+	p.advance()                               // consume AT_DIRECTIVE
+
+	// Optional type name.
+	if p.current.Kind == IDENT {
+		d.Type = p.current.Value
+		endOffset = p.current.Pos.Offset + len(p.current.Value)
+		p.advance()
+	}
+
+	// Optional inline block. Use parseBlockVal so the inner content is
+	// validated (string / brace / comment well-formedness); then slice
+	// the raw bytes between { and } from the input for Body.
+	if p.current.Kind == LBRACE {
+		open := p.current.Pos.Offset
+		if _, err := p.parseBlockVal(0); err != nil {
+			return nil, 0, err
+		}
+		close := findMatchingBrace(p.lex.input, open)
+		if close < 0 {
+			// parseBlockVal succeeded, so a matching brace must exist —
+			// this is defensive belt-and-braces.
+			return nil, 0, errorf(d.Pos, "directive @%s: unmatched '{'", d.Name)
+		}
+		d.Body = p.lex.input[open+1 : close]
+		endOffset = close + 1
+	}
+	return d, endOffset, nil
+}
+
+// findMatchingBrace returns the offset of the `}` that matches the `{`
+// at openOffset. Returns -1 on unterminated input. Mirrors the lexer's
+// string / comment handling so braces inside literals don't confuse
+// the brace count.
+func findMatchingBrace(input []byte, openOffset int) int {
+	depth := 1
+	i := openOffset + 1
+	for i < len(input) {
+		ch := input[i]
+		switch {
+		case ch == '{':
+			depth++
+			i++
+		case ch == '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+			i++
+		case ch == '"':
+			i = skipDirString(input, i)
+			if i < 0 {
+				return -1
+			}
+		case ch == 'b' && i+1 < len(input) && input[i+1] == '"':
+			i = skipDirBytes(input, i)
+			if i < 0 {
+				return -1
+			}
+		case ch == '#':
+			i = skipDirEOL(input, i+1)
+		case ch == '/' && i+1 < len(input) && input[i+1] == '/':
+			i = skipDirEOL(input, i+2)
+		case ch == '/' && i+1 < len(input) && input[i+1] == '*':
+			j := i + 2
+			closed := false
+			for j+1 < len(input) {
+				if input[j] == '*' && input[j+1] == '/' {
+					j += 2
+					closed = true
+					break
+				}
+				j++
+			}
+			if !closed {
+				return -1
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+	return -1
+}
+
+func skipDirString(input []byte, i int) int {
+	if i+2 < len(input) && input[i+1] == '"' && input[i+2] == '"' {
+		j := i + 3
+		for j+2 < len(input) {
+			if input[j] == '"' && input[j+1] == '"' && input[j+2] == '"' {
+				return j + 3
+			}
+			j++
+		}
+		return -1
+	}
+	j := i + 1
+	for j < len(input) {
+		if input[j] == '\\' {
+			if j+1 >= len(input) {
+				return -1
+			}
+			j += 2
+			continue
+		}
+		if input[j] == '"' {
+			return j + 1
+		}
+		if input[j] == '\n' {
+			return -1
+		}
+		j++
+	}
+	return -1
+}
+
+func skipDirBytes(input []byte, i int) int {
+	j := i + 2 // past `b"`
+	for j < len(input) {
+		if input[j] == '"' {
+			return j + 1
+		}
+		if input[j] == '\n' {
+			return -1
+		}
+		j++
+	}
+	return -1
+}
+
+func skipDirEOL(input []byte, i int) int {
+	for i < len(input) && input[i] != '\n' {
+		i++
+	}
+	return i
 }
 
 // parseEntry, parseValue, parseList, parseBlockVal, and parseBody thread an

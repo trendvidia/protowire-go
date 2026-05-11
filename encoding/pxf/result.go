@@ -10,6 +10,16 @@ package pxf
 type Result struct {
 	nullFields    map[string]struct{}
 	presentFields map[string]struct{}
+	directives    []Directive
+}
+
+// Directives returns the `@<name> [<type>] [{ ... }]` blocks the
+// decoder saw at the document root, in source order. Excludes the
+// `@type` directive (which is consumed by the decoder and exposed via
+// the document's type binding). Callers typically iterate and call
+// UnmarshalFull on each Directive.Body against their chosen message.
+func (r *Result) Directives() []Directive {
+	return r.directives
 }
 
 func newResult() *Result {

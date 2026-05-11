@@ -13,9 +13,29 @@ type Comment struct {
 
 // Document is the root AST node of a PXF file.
 type Document struct {
-	TypeURL         string // from @type directive, may be empty
+	TypeURL         string      // from @type directive, may be empty
+	Directives      []Directive // @<name> [<type>] [{ ... }] entries before the body, in source order; excludes @type
+	BodyOffset      int         // byte offset in the input where the schema-typed body begins (after all leading directives)
 	Entries         []Entry
 	LeadingComments []Comment // comments before the first entry (or after @type)
+}
+
+// Directive is a top-of-document `@<name> [<type>] [{ ... }]` entry. The
+// canonical use is metadata that sits alongside the schema-typed body —
+// e.g. chameleon's `@header chameleon.v1.LayerHeader { id = "x" }` — but
+// the grammar is open-ended: any name except `type` is accepted, with
+// an optional dotted type name and an optional inline block.
+//
+// Body holds the RAW bytes between the opening `{` and matching `}`
+// (both exclusive), suitable for handing back to [UnmarshalFull] /
+// [Unmarshal] against the consumer's chosen message. Body is nil when
+// the directive has no inline block.
+type Directive struct {
+	Pos             Position
+	Name            string // e.g. "header"; never "type" (those go to Document.TypeURL)
+	Type            string // qualified type name, e.g. "chameleon.v1.LayerHeader"; "" if absent
+	Body            []byte // raw inner bytes of the block; nil if the directive has no `{ ... }`
+	LeadingComments []Comment
 }
 
 // Entry is a node that can appear in a message or map body.

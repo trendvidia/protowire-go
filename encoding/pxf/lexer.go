@@ -53,7 +53,7 @@ func (l *lexer) advance() byte {
 }
 
 func (l *lexer) currentPos() Position {
-	return Position{Line: l.line, Column: l.col}
+	return Position{Line: l.line, Column: l.col, Offset: l.pos}
 }
 
 func (l *lexer) skipSpaces() {
@@ -298,10 +298,13 @@ func (l *lexer) lexDirective(pos Position) Token {
 		l.advance()
 	}
 	name := string(l.input[start:l.pos])
+	if name == "" {
+		return Token{Kind: ILLEGAL, Value: "@", Pos: pos}
+	}
 	if name == "type" {
 		return Token{Kind: AT_TYPE, Value: "@type", Pos: pos}
 	}
-	return Token{Kind: ILLEGAL, Value: "@" + name, Pos: pos}
+	return Token{Kind: AT_DIRECTIVE, Value: name, Pos: pos}
 }
 
 func (l *lexer) lexNumber(pos Position) Token {

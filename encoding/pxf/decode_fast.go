@@ -103,12 +103,8 @@ func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolve
 	d.discardUnknown = discardUnknown
 	d.advance()
 
-	if d.current.Kind == AT_TYPE {
-		d.advance()
-		if d.current.Kind != IDENT {
-			return errorf(d.current.Pos, "expected type name after @type, got %s", d.current.Kind)
-		}
-		d.advance()
+	if err := d.consumeDirectives(nil); err != nil {
+		return err
 	}
 
 	return d.decodeFields(msg, false)
@@ -124,12 +120,8 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeRes
 	d.nullMaskFd = findNullMaskField(msg.Descriptor())
 	d.advance()
 
-	if d.current.Kind == AT_TYPE {
-		d.advance()
-		if d.current.Kind != IDENT {
-			return nil, errorf(d.current.Pos, "expected type name after @type, got %s", d.current.Kind)
-		}
-		d.advance()
+	if err := d.consumeDirectives(d.result); err != nil {
+		return nil, err
 	}
 
 	if err := d.decodeFields(msg, false); err != nil {
@@ -141,6 +133,80 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeRes
 		}
 	}
 	return d.result, nil
+}
+
+// consumeDirectives drains any leading `@type` / `@<name>` directives,
+// recording @<name> entries on result (if non-nil). Returns when the
+// current token is the first body token.
+func (d *directDecoder) consumeDirectives(result *Result) error {
+	for {
+		switch d.current.Kind {
+		case AT_TYPE:
+			d.advance()
+			if d.current.Kind != IDENT {
+				return errorf(d.current.Pos, "expected type name after @type, got %s", d.current.Kind)
+			}
+			d.advance()
+		case AT_DIRECTIVE:
+			dir, err := d.consumeDirective()
+			if err != nil {
+				return err
+			}
+			if result != nil {
+				result.directives = append(result.directives, dir)
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+// consumeDirective consumes `@<name> [<type>] [{ ... }]`. The leading
+// AT_DIRECTIVE token is current on entry.
+func (d *directDecoder) consumeDirective() (Directive, error) {
+	dir := Directive{
+		Pos:  d.current.Pos,
+		Name: d.current.Value,
+	}
+	d.advance() // consume AT_DIRECTIVE
+
+	if d.current.Kind == IDENT {
+		dir.Type = d.current.Value
+		d.advance()
+	}
+
+	if d.current.Kind == LBRACE {
+		open := d.current.Pos.Offset
+		close := findMatchingBrace(d.lex.input, open)
+		if close < 0 {
+			return dir, errorf(dir.Pos, "directive @%s: unmatched '{'", dir.Name)
+		}
+		dir.Body = d.lex.input[open+1 : close]
+		// Re-seat the lexer just past the closing `}` and re-derive
+		// line/col so error messages remain accurate after the jump.
+		d.lex.pos = close + 1
+		d.lex.line, d.lex.col = lineColAt(d.lex.input, close+1)
+		d.advance()
+	}
+	return dir, nil
+}
+
+// lineColAt returns the (1-based line, 1-based column) of byte offset
+// off in input. Used to re-seat the lexer after a directive block jump.
+func lineColAt(input []byte, off int) (int, int) {
+	line, col := 1, 1
+	if off > len(input) {
+		off = len(input)
+	}
+	for i := 0; i < off; i++ {
+		if input[i] == '\n' {
+			line++
+			col = 1
+		} else {
+			col++
+		}
+	}
+	return line, col
 }
 
 // decodeFields reads key=value / key{} entries into msg.
@@ -953,7 +1019,7 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 		_, isPresent := result.presentFields[path]
 		if !isPresent {
 			if isRequired(fd) {
-				return errorf(Position{1, 1}, "required field %q is absent", path)
+				return errorf(Position{Line: 1, Column: 1}, "required field %q is absent", path)
 			}
 			if def, ok := getDefault(fd); ok {
 				if err := applyDefault(msg, fd, def); err != nil {
