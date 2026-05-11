@@ -11,6 +11,71 @@ format changes.
 
 ## [Unreleased]
 
+## [0.72.0] — 2026-05-11
+
+Generic `@<directive>` grammar release. Extends the PXF text format
+with optional `@<name> [<type>] [{ ... }]` blocks at document root,
+in addition to the existing `@type` directive. Wire format
+unchanged. Existing `@type ...` documents continue to parse
+identically.
+
+### Added
+
+- **`@<directive>` grammar** at document root. Zero or more
+  `@<name> [<type>] [{ ... }]` blocks may appear before the
+  schema-typed body, in any order with `@type`. Name "type" remains
+  reserved (declares the body's message type). All other names are
+  user-defined. The block's inner body is parsed for syntactic
+  well-formedness (string / brace / comment matching) but its
+  contents are NOT decoded against any schema — they're handed back
+  to the caller as raw bytes.
+
+  Motivating use case: chameleon's `@header chameleon.v1.LayerHeader
+  { id = "x" }` preamble. Before this release chameleon had to peel
+  the `@header` block off the byte stream itself via a duplicate
+  PXF tokenizer; now `pxf.UnmarshalFull` and `pxf.Parse` consume the
+  preamble natively and expose the directive list to the caller.
+
+- **`pxf.Directive` AST type**: `{ Pos, Name, Type, Body []byte,
+  LeadingComments }`. `Body` is a slice into the original input
+  containing the raw inner bytes of the `{ ... }` block (or nil for
+  no-block directives).
+
+- **`Document.Directives []Directive`** — the directives Parse saw
+  at document root, in source order. Excludes `@type` (still surfaced
+  via `Document.TypeURL` for backward compat).
+
+- **`Document.BodyOffset int`** — byte offset where the schema-typed
+  body begins (immediately after the last directive's closing `}` or
+  token). Lets callers hash / slice the body without re-scanning.
+
+- **`Result.Directives() []Directive`** — same shape, populated by
+  `pxf.UnmarshalFull` so callers don't need to invoke Parse
+  separately. Empty when the document has no `@<name>` directives.
+
+- **`AT_DIRECTIVE` token kind** for `@<name>` where `name != "type"`.
+  The token's `Value` carries the bare name (without `@`).
+
+- **`Position.Offset int`** — byte index into the input. Populated
+  on every token / AST node so callers can slice the raw stream.
+
+### Changed
+
+- **Lexer no longer emits `ILLEGAL` for `@<name>`** when name is a
+  valid identifier and != "type". Previously such inputs failed
+  immediately; now they tokenize as `AT_DIRECTIVE` and parse as
+  directive blocks.
+
+### Notes for downstream consumers
+
+- Documents that previously parsed continue to parse with byte-
+  identical results — `@type` handling is unchanged, and any body
+  without `@<name>` blocks emits `len(doc.Directives) == 0`.
+- Documents that previously errored on `@<name>` now succeed and
+  produce a directive entry. Callers that want to reject unknown
+  directives should iterate `Result.Directives()` and error on
+  anything unexpected.
+
 ## [0.71.0] — 2026-05-10
 
 Layered-configuration release. Adds `pxf.Secret` recognition,
