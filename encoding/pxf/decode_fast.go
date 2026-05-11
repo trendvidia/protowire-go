@@ -148,13 +148,24 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeRes
 	return d.result, nil
 }
 
-// consumeDirectives drains any leading `@type` / `@<name>` directives,
-// recording @<name> entries on result (if non-nil). Returns when the
-// current token is the first body token.
+// consumeDirectives drains any leading `@type` / `@<name>` / `@table`
+// directives, recording @<name> and @table entries on result (if
+// non-nil). Returns when the current token is the first body token.
+//
+// Enforces the @table standalone constraint (draft §3.4.4): a document
+// containing any @table directive MUST NOT also carry @type or any
+// top-level field entries.
 func (d *directDecoder) consumeDirectives(result *Result) error {
+	sawType := false
+	var firstTablePos Position
+	hasTable := false
 	for {
 		switch d.current.Kind {
 		case AT_TYPE:
+			if hasTable {
+				return errorf(d.current.Pos, "@table directive cannot coexist with @type (draft §3.4.4)")
+			}
+			sawType = true
 			d.advance()
 			if d.current.Kind != IDENT {
 				return errorf(d.current.Pos, "expected type name after @type, got %s", d.current.Kind)
@@ -168,9 +179,196 @@ func (d *directDecoder) consumeDirectives(result *Result) error {
 			if result != nil {
 				result.directives = append(result.directives, dir)
 			}
+		case AT_TABLE:
+			if sawType {
+				return errorf(d.current.Pos, "@table directive cannot coexist with @type (draft §3.4.4)")
+			}
+			tbl, err := d.consumeTableDirective()
+			if err != nil {
+				return err
+			}
+			if !hasTable {
+				firstTablePos = tbl.Pos
+				hasTable = true
+			}
+			if result != nil {
+				result.tables = append(result.tables, tbl)
+			}
 		default:
+			if hasTable && d.current.Kind != EOF {
+				return errorf(firstTablePos,
+					"@table directive cannot coexist with top-level field entries (draft §3.4.4)")
+			}
 			return nil
 		}
+	}
+}
+
+// consumeTableDirective mirrors parser.parseTableDirective for the
+// direct-decode path. AT_TABLE is current on entry.
+func (d *directDecoder) consumeTableDirective() (TableDirective, error) {
+	tbl := TableDirective{Pos: d.current.Pos}
+	d.advance() // consume @table
+
+	if d.current.Kind != IDENT {
+		return tbl, errorf(d.current.Pos, "expected row message type after @table, got %s", d.current.Kind)
+	}
+	tbl.Type = d.current.Value
+	d.advance()
+
+	if d.current.Kind != LPAREN {
+		return tbl, errorf(d.current.Pos, "expected '(' to start @table column list, got %s", d.current.Kind)
+	}
+	d.advance()
+
+	if d.current.Kind != IDENT {
+		return tbl, errorf(d.current.Pos, "@table column list must contain at least one field name, got %s", d.current.Kind)
+	}
+	for {
+		if d.current.Kind != IDENT {
+			return tbl, errorf(d.current.Pos, "expected column field name, got %s", d.current.Kind)
+		}
+		colName := d.current.Value
+		if containsDot(colName) {
+			return tbl, errorf(d.current.Pos, "@table column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
+		}
+		tbl.Columns = append(tbl.Columns, colName)
+		d.advance()
+		if d.current.Kind == COMMA {
+			d.advance()
+			continue
+		}
+		if d.current.Kind == RPAREN {
+			break
+		}
+		return tbl, errorf(d.current.Pos, "expected ',' or ')' in @table column list, got %s", d.current.Kind)
+	}
+	d.advance() // consume )
+
+	for d.current.Kind == LPAREN {
+		row, err := d.consumeTableRow(len(tbl.Columns))
+		if err != nil {
+			return tbl, err
+		}
+		tbl.Rows = append(tbl.Rows, row)
+	}
+	return tbl, nil
+}
+
+// consumeTableRow mirrors parser.parseTableRow. The fast-path decoder
+// re-uses the AST-tier parser internally for cell values; this keeps
+// the direct-decode entry point complete (and lets UnmarshalFull
+// expose rows via Result.Tables()) while reserving an inline-bind
+// optimization for a future change. LPAREN is current on entry.
+func (d *directDecoder) consumeTableRow(expected int) (TableRow, error) {
+	pos := d.current.Pos
+	d.advance() // consume (
+
+	row := TableRow{Pos: pos, Cells: make([]Value, 0, expected)}
+	cell, err := d.consumeRowCell()
+	if err != nil {
+		return row, err
+	}
+	row.Cells = append(row.Cells, cell)
+	for d.current.Kind == COMMA {
+		d.advance()
+		cell, err := d.consumeRowCell()
+		if err != nil {
+			return row, err
+		}
+		row.Cells = append(row.Cells, cell)
+	}
+	if d.current.Kind != RPAREN {
+		return row, errorf(d.current.Pos, "expected ',' or ')' in @table row, got %s", d.current.Kind)
+	}
+	d.advance()
+	if len(row.Cells) != expected {
+		return row, errorf(pos, "@table row has %d cells, expected %d (column count)", len(row.Cells), expected)
+	}
+	return row, nil
+}
+
+// consumeRowCell consumes one cell of a @table row. Returns nil for
+// an empty cell (no value between commas, or at row start/end).
+// Rejects list / block values per v1 cell-grammar.
+func (d *directDecoder) consumeRowCell() (Value, error) {
+	switch d.current.Kind {
+	case COMMA, RPAREN:
+		return nil, nil
+	case LBRACKET:
+		return nil, errorf(d.current.Pos, "@table cells cannot contain list values in v1 (draft §3.4.4)")
+	case LBRACE:
+		return nil, errorf(d.current.Pos, "@table cells cannot contain block values in v1 (draft §3.4.4)")
+	}
+	// Re-use the AST-tier value parser by handing off to a small inline
+	// reader. We construct a one-shot parser around the current lexer
+	// state so the value-shape branches stay in one place.
+	return d.consumeValue()
+}
+
+// consumeValue parses one PXF value at the current decoder position,
+// covering the same shapes as parser.parseValue but using the
+// directDecoder's state. Used by @table row cells.
+func (d *directDecoder) consumeValue() (Value, error) {
+	pos := d.current.Pos
+	switch d.current.Kind {
+	case STRING:
+		v := &StringVal{Pos: pos, Value: d.current.Value}
+		d.advance()
+		return v, nil
+	case INT:
+		v := &IntVal{Pos: pos, Raw: d.current.Value}
+		d.advance()
+		return v, nil
+	case FLOAT:
+		v := &FloatVal{Pos: pos, Raw: d.current.Value}
+		d.advance()
+		return v, nil
+	case BOOL:
+		v := &BoolVal{Pos: pos, Value: d.current.Value == "true"}
+		d.advance()
+		return v, nil
+	case BYTES:
+		raw := d.current.Value
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			decoded, err = base64.RawStdEncoding.DecodeString(raw)
+			if err != nil {
+				return nil, errorf(pos, "invalid base64: %v", err)
+			}
+		}
+		v := &BytesVal{Pos: pos, Value: decoded}
+		d.advance()
+		return v, nil
+	case TIMESTAMP:
+		t, err := time.Parse(time.RFC3339Nano, d.current.Value)
+		if err != nil {
+			t, err = time.Parse(time.RFC3339, d.current.Value)
+			if err != nil {
+				return nil, errorf(pos, "invalid timestamp %q: %v", d.current.Value, err)
+			}
+		}
+		v := &TimestampVal{Pos: pos, Value: t, Raw: d.current.Value}
+		d.advance()
+		return v, nil
+	case DURATION:
+		dur, err := time.ParseDuration(d.current.Value)
+		if err != nil {
+			return nil, errorf(pos, "invalid duration %q: %v", d.current.Value, err)
+		}
+		v := &DurationVal{Pos: pos, Value: dur, Raw: d.current.Value}
+		d.advance()
+		return v, nil
+	case NULL:
+		v := &NullVal{Pos: pos}
+		d.advance()
+		return v, nil
+	case IDENT:
+		v := &IdentVal{Pos: pos, Name: d.current.Value}
+		d.advance()
+		return v, nil
+	default:
+		return nil, errorf(pos, "expected value, got %s (%q)", d.current.Kind, d.current.Value)
 	}
 }
 

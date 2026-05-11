@@ -13,11 +13,43 @@ type Comment struct {
 
 // Document is the root AST node of a PXF file.
 type Document struct {
-	TypeURL         string      // from @type directive, may be empty
-	Directives      []Directive // @<name> [<type>] [{ ... }] entries before the body, in source order; excludes @type
-	BodyOffset      int         // byte offset in the input where the schema-typed body begins (after all leading directives)
+	TypeURL         string           // from @type directive, may be empty
+	Directives      []Directive      // @<name> *(prefix) [{ ... }] entries before the body, in source order; excludes @type and @table
+	Tables          []TableDirective // @table directives in source order; per draft §3.4.4 a document with any @table MUST NOT have @type or body entries
+	BodyOffset      int              // byte offset in the input where the schema-typed body begins (after all leading directives)
 	Entries         []Entry
 	LeadingComments []Comment // comments before the first entry (or after @type)
+}
+
+// TableDirective is a `@table <type> ( col1, col2, ... ) row*` entry
+// at document root (draft §3.4.4). It carries many instances of one
+// message type in a single document — the protowire-native CSV.
+//
+// Cells are scalar-shaped in v1: list ('[ ... ]') and block ('{ ... }')
+// values are not permitted in cells. An empty cell (no value between
+// commas) denotes an absent field; a `null` literal denotes a present-
+// but-null field; any other value denotes a present field with that
+// value. See [TableRow] for cell representation.
+//
+// A document with any TableDirective MUST NOT have a @type directive
+// or any top-level field entries: the @table header IS the document's
+// type declaration. Decoders enforce this in [Parse].
+type TableDirective struct {
+	Pos             Position
+	Type            string     // row message type, e.g. "trades.v1.Trade"
+	Columns         []string   // top-level field names on Type; len(Columns) >= 1
+	Rows            []TableRow // zero or more rows
+	LeadingComments []Comment
+}
+
+// TableRow is one parenthesized cell tuple in a @table directive.
+// Cells is the same length as the containing TableDirective.Columns.
+// A nil Value in Cells denotes an absent field (the "empty cell"
+// between two commas); a *NullVal denotes a present-but-null field;
+// any other Value denotes a present field with that value.
+type TableRow struct {
+	Pos   Position
+	Cells []Value // nil entries denote absent fields; len == len(table.Columns)
 }
 
 // Directive is a top-of-document `@<name> *(<prefix-id>) [{ ... }]`

@@ -98,8 +98,29 @@ directives:
 			}
 			doc.Directives = append(doc.Directives, *d)
 			doc.BodyOffset = end
+		case AT_TABLE:
+			tbl, end, err := p.parseTableDirective()
+			if err != nil {
+				return nil, err
+			}
+			doc.Tables = append(doc.Tables, *tbl)
+			doc.BodyOffset = end
 		default:
 			break directives
+		}
+	}
+
+	// Standalone constraint (draft §3.4.4): a document containing any
+	// @table directive MUST NOT also carry @type or top-level field
+	// entries — the @table header IS the document's type declaration.
+	if len(doc.Tables) > 0 {
+		if doc.TypeURL != "" {
+			return nil, errorf(doc.Tables[0].Pos,
+				"@table directive cannot coexist with @type; the @table header declares the document's type (draft §3.4.4)")
+		}
+		if p.current.Kind != EOF {
+			return nil, errorf(p.current.Pos,
+				"@table directive cannot coexist with top-level field entries; the document's payload is the @table rows (draft §3.4.4)")
 		}
 	}
 
@@ -115,6 +136,136 @@ directives:
 		doc.Entries = append(doc.Entries, entry)
 	}
 	return doc, nil
+}
+
+// parseTableDirective reads `@table <type> ( col1, col2, ... ) row*`.
+// AT_TABLE is current on entry. Returns the table plus the byte offset
+// immediately after the directive's last token (the `)` of the last
+// row, the `)` of the column list when there are no rows, or earlier
+// on error). See draft §3.4.4.
+func (p *parser) parseTableDirective() (*TableDirective, int, error) {
+	leading := p.flushComments()
+	atPos := p.current.Pos
+	tbl := &TableDirective{
+		Pos:             atPos,
+		LeadingComments: leading,
+	}
+	endOffset := atPos.Offset + len("@table")
+	p.advance() // consume @table
+
+	// Required: row message type (dotted identifier).
+	if p.current.Kind != IDENT {
+		return nil, 0, errorf(p.current.Pos, "expected row message type after @table, got %s", p.current.Kind)
+	}
+	tbl.Type = p.current.Value
+	endOffset = p.current.Pos.Offset + len(p.current.Value)
+	p.advance()
+
+	// Required: column list in `( ... )`. At least one column.
+	if p.current.Kind != LPAREN {
+		return nil, 0, errorf(p.current.Pos, "expected '(' to start @table column list, got %s", p.current.Kind)
+	}
+	p.advance() // consume (
+
+	if p.current.Kind != IDENT {
+		return nil, 0, errorf(p.current.Pos, "@table column list must contain at least one field name, got %s", p.current.Kind)
+	}
+	for {
+		if p.current.Kind != IDENT {
+			return nil, 0, errorf(p.current.Pos, "expected column field name, got %s", p.current.Kind)
+		}
+		colName := p.current.Value
+		// v1: column entries are unqualified field names; dotted paths
+		// reserved for a future revision.
+		if containsDot(colName) {
+			return nil, 0, errorf(p.current.Pos, "@table column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
+		}
+		tbl.Columns = append(tbl.Columns, colName)
+		p.advance()
+		if p.current.Kind == COMMA {
+			p.advance()
+			continue
+		}
+		if p.current.Kind == RPAREN {
+			break
+		}
+		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @table column list, got %s", p.current.Kind)
+	}
+	endOffset = p.current.Pos.Offset + 1 // past `)`
+	p.advance()                          // consume )
+
+	// Zero or more rows.
+	for p.current.Kind == LPAREN {
+		row, rowEnd, err := p.parseTableRow(len(tbl.Columns))
+		if err != nil {
+			return nil, 0, err
+		}
+		tbl.Rows = append(tbl.Rows, *row)
+		endOffset = rowEnd
+	}
+	return tbl, endOffset, nil
+}
+
+// parseTableRow reads `( cell ( ',' cell )* )` with an arity check
+// against expected. LPAREN is current on entry. Returns the row plus
+// the byte offset immediately past the closing `)`.
+func (p *parser) parseTableRow(expected int) (*TableRow, int, error) {
+	pos := p.current.Pos
+	p.advance() // consume (
+
+	row := &TableRow{Pos: pos, Cells: make([]Value, 0, expected)}
+	// First cell.
+	cell, err := p.parseRowCell()
+	if err != nil {
+		return nil, 0, err
+	}
+	row.Cells = append(row.Cells, cell)
+	// Remaining cells.
+	for p.current.Kind == COMMA {
+		p.advance()
+		cell, err := p.parseRowCell()
+		if err != nil {
+			return nil, 0, err
+		}
+		row.Cells = append(row.Cells, cell)
+	}
+	if p.current.Kind != RPAREN {
+		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @table row, got %s", p.current.Kind)
+	}
+	endOffset := p.current.Pos.Offset + 1
+	p.advance() // consume )
+
+	if len(row.Cells) != expected {
+		return nil, 0, errorf(pos, "@table row has %d cells, expected %d (column count)", len(row.Cells), expected)
+	}
+	return row, endOffset, nil
+}
+
+// parseRowCell consumes one cell of a @table row. Returns nil for an
+// empty cell (no value between two commas, or at row start/end).
+// Rejects list ('[ ... ]') and block ('{ ... }') values per v1
+// cell-grammar (draft §3.4.4).
+func (p *parser) parseRowCell() (Value, error) {
+	switch p.current.Kind {
+	case COMMA, RPAREN:
+		return nil, nil
+	case LBRACKET:
+		return nil, errorf(p.current.Pos, "@table cells cannot contain list values in v1 (draft §3.4.4)")
+	case LBRACE:
+		return nil, errorf(p.current.Pos, "@table cells cannot contain block values in v1 (draft §3.4.4)")
+	}
+	return p.parseValue(0)
+}
+
+// containsDot reports whether s has a '.' rune. Inlined here so we
+// don't pull strings.Contains into parser.go for one call site.
+func containsDot(s string) bool {
+	for i := range len(s) {
+		if s[i] == '.' {
+			return true
+		}
+	}
+	return false
 }
 
 // parseDirective reads `@<name> *(<prefix-id>) [{ ... }]`. The

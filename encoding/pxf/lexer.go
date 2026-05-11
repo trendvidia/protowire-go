@@ -109,6 +109,12 @@ func (l *lexer) Next() Token {
 	case ch == ']':
 		l.advance()
 		return Token{Kind: RBRACKET, Value: "]", Pos: pos}
+	case ch == '(':
+		l.advance()
+		return Token{Kind: LPAREN, Value: "(", Pos: pos}
+	case ch == ')':
+		l.advance()
+		return Token{Kind: RPAREN, Value: ")", Pos: pos}
 	case ch == '=':
 		l.advance()
 		return Token{Kind: EQUALS, Value: "=", Pos: pos}
@@ -304,6 +310,9 @@ func (l *lexer) lexDirective(pos Position) Token {
 	if name == "type" {
 		return Token{Kind: AT_TYPE, Value: "@type", Pos: pos}
 	}
+	if name == "table" {
+		return Token{Kind: AT_TABLE, Value: "@table", Pos: pos}
+	}
 	return Token{Kind: AT_DIRECTIVE, Value: name, Pos: pos}
 }
 
@@ -364,7 +373,7 @@ func (l *lexer) lexTimestamp(pos Position, start int) Token {
 	for l.pos < len(l.input) {
 		ch := l.peek()
 		if ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r' ||
-			ch == ',' || ch == ']' || ch == '}' || ch == '#' {
+			ch == ',' || ch == ']' || ch == '}' || ch == ')' || ch == '#' {
 			break
 		}
 		if ch == '/' && (l.peekAt(1) == '/' || l.peekAt(1) == '*') {
