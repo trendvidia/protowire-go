@@ -11,6 +11,89 @@ format changes.
 
 ## [Unreleased]
 
+## [0.73.0] — 2026-05-11
+
+Companion release to `protowire` v0.73.0. Three additive PXF text-
+format changes, no wire-format impact: a schema-level reserved-name
+constraint (draft §3.13), the `@entry` directive plus a generalized
+zero-or-more prefix list on every named directive (§3.4.3), and the
+`@table` bulk-rows directive (§3.4.4) — the protowire-native CSV.
+
+### Added
+
+- **Schema reserved-name check.** New `pxf.ValidateFile` /
+  `pxf.ValidateDescriptor` walk a protobuf FileDescriptor and report
+  every message-field, oneof, or enum-value name that case-sensitively
+  collides with `null`, `true`, or `false`. Such names lex as PXF
+  value keywords, so the declared element is unreachable from PXF
+  surface syntax — the binding silently can't be selected. The check
+  runs by default at the top of every `Unmarshal*` call and rejects
+  non-conformant schemas before any decoding happens. Callers that
+  have already validated their descriptors (registry-load passes,
+  codegen pre-screening) can set `UnmarshalOptions.SkipValidate = true`
+  to bypass the per-call recheck.
+
+- **`@entry` directive + zero-or-more prefix list.** `named_directive`
+  now accepts `*( IDENT )` between `@<name>` and the optional
+  `{ ... }` block (was `[ IDENT ]`). The grammar is whitespace-
+  insignificant, so the parser uses one-token lookahead to keep a
+  body field key from being eaten as a directive prefix (an IDENT
+  followed by `=` or `:` is a body entry, not a prefix). The
+  `pxf.Directive` AST grows a `Prefixes []string` field exposing the
+  full prefix sequence; the legacy `Type` field is preserved
+  (populated from `Prefixes[0]` when there's exactly one prefix) so
+  v0.72.0-era consumers like chameleon's `@header` reader keep
+  working unchanged.
+
+  `@entry` is consumer-interpreted; the parser records the prefixes
+  and body but assigns no meaning. The dot-disambiguation rule
+  ("single dotted prefix ⇒ type; single bare prefix ⇒ label") for
+  the one-prefix form is a semantic convention applied by the
+  consumer, not the parser.
+
+- **`@table` directive.** New top-level form:
+
+  ```
+  @table <type> ( col1, col2, ... )
+  ( val1, val2, ... )
+  ( val1, val2, ... )
+  ```
+
+  Lexer additions: `LPAREN` / `RPAREN` tokens, a dedicated `AT_TABLE`
+  keyword, and a one-character fix to the timestamp lexer so values
+  like `2026-05-11T10:00:00Z` don't eat their row's closing `)`.
+
+  AST: new `pxf.TableDirective` (Type, Columns, Rows) and
+  `pxf.TableRow` (Cells). `Document` grows a `Tables []TableDirective`
+  field. Three-state cells: a `nil` Value in `TableRow.Cells` is an
+  empty cell (absent field); a `*NullVal` is present-but-null; any
+  other Value is present-with-value — same semantics as the keyed
+  form, just spelled positionally.
+
+  v1 restrictions (intentional, relaxable later): cells are scalar-
+  shaped (no `[...]` lists, no `{...}` blocks); columns are
+  unqualified field names (no dotted paths); rows have strict arity
+  (row arity MUST equal column count); a document with `@table`
+  MUST NOT carry `@type` or top-level field entries (the `@table`
+  header IS the document's type declaration). All five rules are
+  enforced by both `Parse` and the direct-decode path; error
+  messages cite draft §3.4.4.
+
+  Tables flow through `UnmarshalFull` via `Result.Tables()`. Plain
+  `Unmarshal` silently discards table data (the bound message stays
+  zero-valued, since the document has no body) but still enforces
+  the standalone constraint.
+
+### Changed
+
+- `UnmarshalOptions` grows `SkipValidate bool` (default false). The
+  default-on behavior is the safe one because reserved-name traps
+  are silent; pre-validating callers opt in to the skip.
+
+- `pxf.Directive.Type` is now derived from `Prefixes` (back-compat):
+  populated when `len(Prefixes) == 1`, empty otherwise. New code
+  should read `Prefixes` directly.
+
 ## [0.72.0] — 2026-05-11
 
 Generic `@<directive>` grammar release. Extends the PXF text format
