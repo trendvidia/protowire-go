@@ -254,6 +254,32 @@ b = 2`, "§3.4.4"},
 	}
 }
 
+// --- AST-tier error paths (mirror of the fast-path coverage in
+// table_fastpath_test.go; both implementations must reject) ---
+
+func TestParseTable_AstErrorPaths(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		in     string
+		errSub string
+	}{
+		{"missing_type", `@table ( col )
+( "x" )`, "expected row message type"},
+		{"missing_lparen", `@table T col )
+( "x" )`, "expected '('"},
+		{"bad_column_separator", `@table T ( a b )`, "expected ',' or ')'"},
+		{"trailing_comma_in_columns", `@table T (a,)`, "expected column field name"},
+		{"row_unterminated", `@table T ( a )
+( "x"`, "expected ',' or ')'"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := pxf.Parse([]byte(c.in))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.errSub)
+		})
+	}
+}
+
 // --- AT_TABLE lexer recognition ---
 
 func TestParseTable_LexerRecognizes_AtTable(t *testing.T) {
