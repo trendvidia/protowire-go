@@ -11,15 +11,29 @@ type Result struct {
 	nullFields    map[string]struct{}
 	presentFields map[string]struct{}
 	directives    []Directive
+	tables        []TableDirective
 }
 
-// Directives returns the `@<name> [<type>] [{ ... }]` blocks the
+// Directives returns the `@<name> *(prefix) [{ ... }]` blocks the
 // decoder saw at the document root, in source order. Excludes the
-// `@type` directive (which is consumed by the decoder and exposed via
-// the document's type binding). Callers typically iterate and call
-// UnmarshalFull on each Directive.Body against their chosen message.
+// `@type` and `@table` directives (which have their own accessors).
+// Callers typically iterate and call UnmarshalFull on each
+// Directive.Body against their chosen message.
 func (r *Result) Directives() []Directive {
 	return r.directives
+}
+
+// Tables returns the `@table` directives the decoder saw at the
+// document root, in source order. Each TableDirective carries a row
+// message type, a column list, and a sequence of row tuples. See
+// draft §3.4.4 for cell-state semantics.
+//
+// A document that uses `@table` will have an empty body — the rows
+// are the document's payload, not the bound message. Callers walk
+// each TableDirective.Rows and bind each row's cells to a fresh
+// instance of TableDirective.Type via the consumer-supplied schema.
+func (r *Result) Tables() []TableDirective {
+	return r.tables
 }
 
 func newResult() *Result {

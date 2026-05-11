@@ -30,11 +30,22 @@ func UnmarshalFullDescriptor(data []byte, desc protoreflect.MessageDescriptor) (
 
 // Unmarshal parses PXF data into msg.
 func (o UnmarshalOptions) Unmarshal(data []byte, msg proto.Message) error {
-	return unmarshalDirect(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown)
+	r := msg.ProtoReflect()
+	if !o.SkipValidate {
+		if err := asValidationError(ValidateFile(r.Descriptor().ParentFile())); err != nil {
+			return err
+		}
+	}
+	return unmarshalDirect(data, r, o.TypeResolver, o.DiscardUnknown)
 }
 
 // UnmarshalDescriptor parses PXF data using the given message descriptor.
 func (o UnmarshalOptions) UnmarshalDescriptor(data []byte, desc protoreflect.MessageDescriptor) (*dynamicpb.Message, error) {
+	if !o.SkipValidate {
+		if err := asValidationError(ValidateDescriptor(desc)); err != nil {
+			return nil, err
+		}
+	}
 	msg := dynamicpb.NewMessage(desc)
 	if err := unmarshalDirect(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown); err != nil {
 		return nil, err
@@ -45,6 +56,11 @@ func (o UnmarshalOptions) UnmarshalDescriptor(data []byte, desc protoreflect.Mes
 // UnmarshalFullDescriptor parses PXF data using the given message descriptor
 // and returns field presence metadata.
 func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect.MessageDescriptor) (*dynamicpb.Message, *Result, error) {
+	if !o.SkipValidate {
+		if err := asValidationError(ValidateDescriptor(desc)); err != nil {
+			return nil, nil, err
+		}
+	}
 	msg := dynamicpb.NewMessage(desc)
 	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
 	if err != nil {

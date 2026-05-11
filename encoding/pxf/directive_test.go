@@ -345,6 +345,111 @@ func TestBackwardCompat_AtTypeStillWorks(t *testing.T) {
 	assert.Empty(t, doc.Directives)
 }
 
+// --- Prefix list: zero-or-more identifiers (draft §3.4.2) ---
+
+func TestParse_Directive_TwoPrefixes(t *testing.T) {
+	// @entry label some.pkg.Type { ... } — the labeled-and-typed shape
+	// from draft §3.4.3.
+	doc, err := pxf.Parse([]byte(`@entry alice users.v1.User { name = "Alice" }
+string_field = "body"`))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	d := doc.Directives[0]
+	assert.Equal(t, "entry", d.Name)
+	assert.Equal(t, []string{"alice", "users.v1.User"}, d.Prefixes)
+	// Two prefixes: legacy Type field empty per the back-compat rule.
+	assert.Equal(t, "", d.Type)
+	assert.Contains(t, string(d.Body), `name = "Alice"`)
+}
+
+func TestParse_Directive_ThreePrefixes(t *testing.T) {
+	// The grammar accepts arbitrarily many prefix identifiers; specific
+	// directive registrations may cap them. The parser does not.
+	doc, err := pxf.Parse([]byte(`@x a b c { id = "i" }
+string_field = "body"`))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	assert.Equal(t, []string{"a", "b", "c"}, doc.Directives[0].Prefixes)
+	assert.Equal(t, "", doc.Directives[0].Type)
+}
+
+func TestParse_Directive_OnePrefixPopulatesType(t *testing.T) {
+	// v0.72.0 back-compat: a single prefix identifier still surfaces
+	// in the legacy Type field.
+	doc, err := pxf.Parse([]byte(`@header chameleon.v1.LayerHeader { id = "x" }
+string_field = "y"`))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	d := doc.Directives[0]
+	assert.Equal(t, []string{"chameleon.v1.LayerHeader"}, d.Prefixes)
+	assert.Equal(t, "chameleon.v1.LayerHeader", d.Type)
+}
+
+func TestParse_Directive_ZeroPrefixes(t *testing.T) {
+	// @entry { ... } — anonymous, typeless from draft §3.4.3.
+	doc, err := pxf.Parse([]byte(`@entry { note = "metadata" }
+string_field = "body"`))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	d := doc.Directives[0]
+	assert.Empty(t, d.Prefixes)
+	assert.Equal(t, "", d.Type)
+	assert.Contains(t, string(d.Body), `note = "metadata"`)
+}
+
+func TestParse_Directive_LookaheadDoesNotEatBodyFieldKey(t *testing.T) {
+	// Regression guard for the obvious-but-wrong implementation: a
+	// greedy IDENT-consumption loop swallows the first body entry's
+	// key. Lookahead through `=` (and `:`) prevents that.
+	for _, in := range []string{
+		`@foo SomeType
+string_field = "x"`,
+		`@foo
+string_field = "x"`,
+		`@foo a b
+string_field = "x"`,
+	} {
+		t.Run(in, func(t *testing.T) {
+			doc, err := pxf.Parse([]byte(in))
+			require.NoError(t, err)
+			require.Len(t, doc.Directives, 1, "directive must be the only top-of-doc item")
+			require.Len(t, doc.Entries, 1, "body entry must be parsed separately, not as a prefix")
+		})
+	}
+}
+
+func TestParse_Directive_MultipleEntriesPreservedInOrder(t *testing.T) {
+	in := `@entry alice users.v1.User { name = "Alice" }
+@entry bob   users.v1.User { name = "Bob" }
+@entry orders.v1.Order { id = "o-99" }
+string_field = "manifest"`
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 3)
+	assert.Equal(t, []string{"alice", "users.v1.User"}, doc.Directives[0].Prefixes)
+	assert.Equal(t, []string{"bob", "users.v1.User"}, doc.Directives[1].Prefixes)
+	// Single dotted prefix — interpreted by the consumer as "typed only".
+	assert.Equal(t, []string{"orders.v1.Order"}, doc.Directives[2].Prefixes)
+	assert.Equal(t, "orders.v1.Order", doc.Directives[2].Type)
+}
+
+// UnmarshalFull also has to walk the new prefix grammar via the fast
+// path in decode_fast.go.
+func TestUnmarshalFull_RecordsPrefixList(t *testing.T) {
+	allTypes := msgDesc(t, "AllTypes")
+	cfg := dynamicpb.NewMessage(allTypes)
+
+	in := []byte(`@entry alice test.v1.Nested { name = "Alice", value = 7 }
+string_field = "body"`)
+	res, err := pxf.UnmarshalFull(in, cfg)
+	require.NoError(t, err)
+
+	dirs := res.Directives()
+	require.Len(t, dirs, 1)
+	assert.Equal(t, "entry", dirs[0].Name)
+	assert.Equal(t, []string{"alice", "test.v1.Nested"}, dirs[0].Prefixes)
+}
+
 // msgDesc, AllTypes, and Nested are defined in pxf_test.go.
 
 var _ protoreflect.Message = (*dynamicpb.Message)(nil)

@@ -28,20 +28,24 @@ const (
 	RBRACE   // }
 	LBRACKET // [
 	RBRACKET // ]
+	LPAREN   // (   used by @table column list and row tuples
+	RPAREN   // )
 	EQUALS   // =
 	COLON    // :
 	COMMA    // ,
 
 	AT_TYPE      // @type — body's message type, no inline block
-	AT_DIRECTIVE // @<name> for name != "type" — Value holds the name (without @)
+	AT_TABLE     // @table — bulk-row directive (draft §3.4.4)
+	AT_DIRECTIVE // @<name> for name != "type"/"table" — Value holds the name (without @)
 )
 
 var tokenNames = map[TokenKind]string{
 	EOF: "EOF", ILLEGAL: "ILLEGAL", NEWLINE: "newline", COMMENT: "comment",
 	IDENT: "identifier", STRING: "string", INT: "integer", FLOAT: "float",
 	BOOL: "bool", NULL: "null", BYTES: "bytes", TIMESTAMP: "timestamp", DURATION: "duration",
-	LBRACE: "{", RBRACE: "}", LBRACKET: "[", RBRACKET: "]",
-	EQUALS: "=", COLON: ":", COMMA: ",", AT_TYPE: "@type", AT_DIRECTIVE: "@directive",
+	LBRACE: "{", RBRACE: "}", LBRACKET: "[", RBRACKET: "]", LPAREN: "(", RPAREN: ")",
+	EQUALS: "=", COLON: ":", COMMA: ",",
+	AT_TYPE: "@type", AT_TABLE: "@table", AT_DIRECTIVE: "@directive",
 }
 
 func (k TokenKind) String() string {
