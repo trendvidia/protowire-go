@@ -4,6 +4,7 @@
 package pxf_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,6 +104,82 @@ string_field = "ok"`
 	require.Len(t, doc.Entries, 1)
 }
 
+func TestParse_Directive_BraceInLineComment(t *testing.T) {
+	for _, prefix := range []string{"#", "//"} {
+		t.Run(prefix, func(t *testing.T) {
+			in := `@d X {
+  ` + prefix + ` inline { } braces in comment
+  name = "value"
+}
+string_field = "ok"`
+			doc, err := pxf.Parse([]byte(in))
+			require.NoError(t, err)
+			require.Len(t, doc.Directives, 1)
+			require.Len(t, doc.Entries, 1)
+		})
+	}
+}
+
+func TestParse_Directive_BraceInBlockComment(t *testing.T) {
+	in := `@d X {
+  /* nested } and { braces */
+  name = "value"
+}
+string_field = "ok"`
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	require.Len(t, doc.Entries, 1)
+}
+
+func TestParse_Directive_TripleQuotedBody(t *testing.T) {
+	in := `@d X {
+  body = """
+  this } has } braces
+  and { too }
+  """
+}
+string_field = "ok"`
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	assert.Contains(t, string(doc.Directives[0].Body), `"""`)
+	require.Len(t, doc.Entries, 1)
+}
+
+func TestParse_Directive_BytesLiteralInBody(t *testing.T) {
+	in := `@d X {
+  blob = b"aGVsbG8="
+}
+string_field = "ok"`
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	require.Len(t, doc.Directives, 1)
+	assert.Contains(t, string(doc.Directives[0].Body), `b"aGVsbG8="`)
+}
+
+func TestParse_Directive_Errors(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"unterminated_block", "@d X {\n  id = \"x\"\n"},
+		{"unterminated_string", `@d X { name = "open`},
+		{"unterminated_triple", `@d X { name = """open`},
+		{"unterminated_block_comment", "@d X { /* open\n  id = 1\n"},
+		{"unterminated_bytes", "@d X { blob = b\"abcd\n"},
+		{"bare_at_sign", "@\nstring_field = \"x\""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := pxf.Parse([]byte(c.in))
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
 // --- UnmarshalFull: Result.Directives() coverage ---
 
 func TestUnmarshalFull_RecordsDirectives(t *testing.T) {
@@ -170,6 +247,47 @@ string_field = "after"`)
 	assert.Equal(t, "after", cfg.Get(fd).String(),
 		"body parses unaffected by leading directive")
 	assert.Len(t, res.Directives(), 1)
+}
+
+func TestUnmarshalFull_DirectiveErrors(t *testing.T) {
+	cfg := dynamicpb.NewMessage(msgDesc(t, "AllTypes"))
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"unterminated_block", "@d X {\n  k = \"v\"\n"},
+		{"unterminated_string", `@d X { name = "open`},
+		{"unterminated_block_comment", "@d X { /* open\nk = 1\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := pxf.UnmarshalFull([]byte(c.in), cfg)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestUnmarshalFull_DirectiveBodyTokenizationVariants(t *testing.T) {
+	cfg := dynamicpb.NewMessage(msgDesc(t, "AllTypes"))
+	// Each case exercises a different tokenization branch inside the
+	// decoder's brace matcher.
+	cases := []string{
+		`@d X { name = "with } brace" }` + "\nstring_field = \"x\"",
+		"@d X { # line comment with } in it\n  name = \"v\" }\nstring_field = \"x\"",
+		"@d X { // also // a } comment\n  name = \"v\" }\nstring_field = \"x\"",
+		"@d X { /* block } comment { */\n  name = \"v\" }\nstring_field = \"x\"",
+		`@d X { blob = b"aGk=" }` + "\nstring_field = \"x\"",
+		`@d X { body = """has } braces""" }` + "\nstring_field = \"x\"",
+	}
+	for i, in := range cases {
+		t.Run(fmt.Sprintf("variant_%d", i), func(t *testing.T) {
+			res, err := pxf.UnmarshalFull([]byte(in), cfg)
+			require.NoError(t, err)
+			require.Len(t, res.Directives(), 1)
+		})
+	}
 }
 
 // Position.Offset is populated.
