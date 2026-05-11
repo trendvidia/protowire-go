@@ -150,7 +150,6 @@ func (p *parser) parseTableDirective() (*TableDirective, int, error) {
 		Pos:             atPos,
 		LeadingComments: leading,
 	}
-	endOffset := atPos.Offset + len("@table")
 	p.advance() // consume @table
 
 	// Required: row message type (dotted identifier).
@@ -158,7 +157,6 @@ func (p *parser) parseTableDirective() (*TableDirective, int, error) {
 		return nil, 0, errorf(p.current.Pos, "expected row message type after @table, got %s", p.current.Kind)
 	}
 	tbl.Type = p.current.Value
-	endOffset = p.current.Pos.Offset + len(p.current.Value)
 	p.advance()
 
 	// Required: column list in `( ... )`. At least one column.
@@ -191,8 +189,8 @@ func (p *parser) parseTableDirective() (*TableDirective, int, error) {
 		}
 		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @table column list, got %s", p.current.Kind)
 	}
-	endOffset = p.current.Pos.Offset + 1 // past `)`
-	p.advance()                          // consume )
+	endOffset := p.current.Pos.Offset + 1 // past `)`
+	p.advance()                           // consume )
 
 	// Zero or more rows.
 	for p.current.Kind == LPAREN {

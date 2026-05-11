@@ -75,7 +75,7 @@ type TableRow struct {
 // the directive has no inline block.
 type Directive struct {
 	Pos      Position
-	Name     string // e.g. "header"; never "type" (those go to Document.TypeURL)
+	Name     string   // e.g. "header"; never "type" (those go to Document.TypeURL)
 	Prefixes []string // identifiers between @<name> and the optional `{ ... }`, in source order
 	// Type is preserved for v0.72.0-era consumers: when exactly one
 	// prefix identifier was supplied, Type holds it (matching the
