@@ -11,6 +11,15 @@ format changes.
 
 ## [Unreleased]
 
+## [0.75.0] — 2026-05-12
+
+Per-row binding release. Adds `TableReader.Scan(proto.Message)` and
+the standalone `pxf.BindRow` helper — the convenience sugar promised
+in v0.74's PR body that turns the streaming row API into a one-liner
+loop over decoded proto messages. Wire format unchanged. No new
+spec content; the existing §3.4.4 "Streaming consumption" framing
+already permits this shape.
+
 ### Added
 
 - **`TableReader.Scan(proto.Message)` + `pxf.BindRow` helper.** The
