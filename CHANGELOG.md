@@ -11,6 +11,64 @@ format changes.
 
 ## [Unreleased]
 
+## [0.77.0] — 2026-05-12
+
+Block-form Secret decode hook. Closes the residual plaintext-in-heap
+window for `pxf.Secret` block-form assignments. v0.76.0 routed
+scalar shorthand (`pw = "x"`, repeated `["a","b"]`, map values
+`{"k":"v"}`) through `OnSecretField` so plaintext never landed on
+`Secret.value` as a Go string; the documented limitation was that
+block form (`pw { value = "x", hint = "h" }`) still rode the
+generic message-block decoder and left plaintext transiently on the
+proto message until the downstream walker ran. v0.77.0 closes that
+gap: block-form `value` now routes through the hook in all four
+contexts (top-level, nested, repeated, map).
+
+Wire format unchanged. Hook stays opt-in; the nil-hook code path is
+byte-for-byte identical to v0.76.0.
+
+### Changed
+
+- **`UnmarshalOptions.OnSecretField` now fires for block-form
+  `pxf.Secret` assignments too.** Previously documented as a
+  scalar-shorthand-only hook with block form deferred to a follow-
+  up. Implemented via a small custom block parser
+  (`decodeSecretBlockInto`) wired into three call sites: the
+  `decodeFields` LBRACE case for top-level and nested scalar-
+  message Secret blocks, `consumeListMsg` for `repeated pxf.Secret`
+  block elements, and `decodeMapInline` for `map<*, pxf.Secret>`
+  block values.
+
+  Behavior of the block parser:
+
+  - Consumes `value` / `hint` / `fingerprint` subfields in any
+    order; any may be absent.
+  - Routes `value` through `d.onSecret` with the same dotted-path
+    scheme as scalar shorthand. `Secret.value` on the proto message
+    is left empty.
+  - Assigns `hint` and `fingerprint` to the message normally — they
+    are diagnostic, not sensitive.
+  - Validates UTF-8 on every string subfield before any assignment
+    or hook call.
+  - Marks presence on `<path>.value` / `.hint` / `.fingerprint` so
+    `UnmarshalFull`'s `Result` records the supplied subfields.
+  - Rejects unknown subfields. `pxf.Secret` is closed-shape;
+    tolerating extras would mask schema drift.
+  - Honors `MaxNestingDepth`.
+
+- **The `pxf.Secret`-handling comment in `decodeMsgValue`** updated
+  to reflect that block form is no longer the "falls through to the
+  generic decoder" case — both shorthand and block form are
+  intercepted when `OnSecretField` is set.
+
+### Coordination
+
+- Pairs with the chameleon-side adoption (a go.mod bump to v0.77.0
+  + a README note recording that the residual best-effort window
+  is now closed). Chameleon's `parse.MoveInto` walker becomes a
+  defensive sanity check rather than load-bearing for block-form
+  Secret residency.
+
 ## [0.76.0] — 2026-05-12
 
 Memguard-direct decode release. Adds `UnmarshalOptions.OnSecretField`
