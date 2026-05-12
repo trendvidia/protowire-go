@@ -506,6 +506,96 @@ func TestOnSecretField_BlockFormPresenceMarked(t *testing.T) {
 	assert.False(t, result.IsSet("db_password.fingerprint"))
 }
 
+// TestOnSecretField_BlockFormEmptyBlock — `pw {}` is a valid Secret
+// declaration with no subfields. No hook call, no metadata on the
+// message, no error.
+func TestOnSecretField_BlockFormEmptyBlock(t *testing.T) {
+	desc := secretDemoDesc(t)
+	called := false
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { called = true; return nil },
+	}
+	_, err := opts.UnmarshalDescriptor([]byte(`db_password {}`), desc)
+	require.NoError(t, err)
+	assert.False(t, called, "empty block should not fire the hook")
+}
+
+// TestOnSecretField_BlockFormErrors — table of malformed block-form
+// inputs. Exercises every error branch inside decodeSecretBlockInto:
+// missing '=', non-string value, non-IDENT subfield name, EOF in
+// mid-block.
+func TestOnSecretField_BlockFormErrors(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return nil },
+	}
+	cases := []struct {
+		name   string
+		input  string
+		errSub string
+	}{
+		{
+			name:   "missing_equals",
+			input:  `db_password { value "x" }`,
+			errSub: "expected '='",
+		},
+		{
+			name:   "non_string_value",
+			input:  `db_password { value = 42 }`,
+			errSub: "expected string",
+		},
+		{
+			name:   "non_ident_subfield",
+			input:  `db_password { 42 = "x" }`,
+			errSub: "expected pxf.Secret field name",
+		},
+		{
+			name:   "eof_mid_block",
+			input:  `db_password { value = "x"`,
+			errSub: "EOF",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := opts.UnmarshalDescriptor([]byte(c.input), desc)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.errSub, "err: %v", err)
+		})
+	}
+}
+
+// TestOnSecretField_BlockFormHookErrorRepeated — hook error during
+// block-form decode inside a repeated element propagates with the
+// indexed path. Covers the err-return branch in consumeListMsg's
+// new Secret-block intercept.
+func TestOnSecretField_BlockFormHookErrorRepeated(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return errors.New("vault denied") },
+	}
+	input := `backup_keys = [{ value = "k0" }]`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vault denied")
+	assert.Contains(t, err.Error(), "backup_keys[0]")
+}
+
+// TestOnSecretField_BlockFormHookErrorMap — hook error during
+// block-form decode inside a map value propagates with the quoted-
+// key path. Covers the err-return branch in decodeMapInline's new
+// Secret-block intercept.
+func TestOnSecretField_BlockFormHookErrorMap(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return errors.New("kms unreachable") },
+	}
+	input := `tenant_keys = { "acme": { value = "k1" } }`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kms unreachable")
+	assert.Contains(t, err.Error(), "acme")
+}
+
 // --- helpers ---
 
 // compileNestedDesc compiles nestedSecretProtoSrc against the same
