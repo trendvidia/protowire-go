@@ -11,6 +11,61 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`TableReader.Scan(proto.Message)` + `pxf.BindRow` helper.** The
+  per-row binding sugar promised in v0.74's PR body. Reads the next
+  row via `Next()` and binds its cells to the message fields by
+  column name:
+
+  ```go
+  tr, err := pxf.NewTableReader(r)
+  for {
+      msg := dynamicpb.NewMessage(desc)
+      if err := tr.Scan(msg); errors.Is(err, io.EOF) {
+          break
+      }
+      // msg is now populated; process it.
+  }
+  ```
+
+  Cell-state semantics match the spec (§3.4.4): an empty cell leaves
+  the field absent and runs the existing pxf.default / pxf.required
+  pass; `null` clears wrappers / optional / oneof per §3.9; any other
+  value sets the field. Enum names, RFC3339 timestamps, Go-style
+  durations, and proto3 wrappers all bind correctly because the
+  implementation reuses the existing Unmarshal pipeline (see
+  "Implementation" below).
+
+  `BindRow(msg, columns, row)` is also exported standalone so
+  callers iterating the materializing path's `Result.Tables()[i].Rows`
+  can use the same binding logic.
+
+  Implementation: instead of growing a parallel Value-to-FieldDescriptor
+  switch with ~50 arms (one per AST value type × field kind), the
+  helper renders each non-nil cell back to its PXF text form
+  (`<column> = <value>\n`) and runs the synthetic body through
+  `UnmarshalOptions{SkipValidate: true}.Unmarshal`. That reuses every
+  branch of the existing decoder — WKT timestamps and durations,
+  wrapper-type nullability, enum-by-name resolution, defaults,
+  required, oneof — for zero new switch arms. Cost: an extra
+  format-and-reparse step per row. That's an acceptable trade for a
+  streaming convenience API; consumers needing the absolute minimum
+  per-row cost can keep iterating `Next()` and binding cells
+  themselves.
+
+  Tests: happy-path scan across `AllTypes`, empty-cell leaves
+  field at zero, `null` clears a wrapper, WKT timestamps and
+  durations bind, all scalar variants round-trip through
+  format+reparse, strings with escapes preserve content, sticky
+  EOF after exhaustion, `BindRow` against the materializing path,
+  arity-mismatch rejection, and an equivalence check that
+  streaming `Scan` and materializing `BindRow` produce identical
+  wire bytes for the same input.
+
+  Public API additions: `pxf.TableReader.Scan(proto.Message)`,
+  `pxf.BindRow(proto.Message, []string, TableRow)`. Non-breaking.
+
 ## [0.74.0] — 2026-05-12
 
 Streaming `@table` release. Adds `pxf.TableReader` over `io.Reader`
