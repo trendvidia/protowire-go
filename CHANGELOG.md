@@ -11,6 +11,72 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`pxf.TableReader` — streaming `@table` consumption.** Companion to
+  the upstream §3.4.4 "Streaming consumption" spec note. Reads rows
+  one at a time from an `io.Reader` with working-set memory bounded
+  by the size of the largest single row — not by the size of the row
+  sequence. The shape consumers asked for the moment they saw the
+  v0.73 materializing-only API:
+
+  ```go
+  tr, err := pxf.NewTableReader(r)        // reads through leading
+                                          // directives + @table header
+  cols := tr.Columns()
+  for {
+      row, err := tr.Next()
+      if errors.Is(err, io.EOF) { break }
+      if err != nil { return err }
+      process(row)
+  }
+  ```
+
+  Multi-table documents chain via `tr.Tail()`, which exposes any
+  bytes the reader buffered but didn't consume followed by the
+  remaining source. `tr.Directives()` exposes side-channel
+  directives (`@<name>` / `@entry`) seen before the `@table` header,
+  so consumers can attach per-table metadata via a preceding
+  `@header` block (chameleon's pattern).
+
+  Implementation: a byte-level row-boundary scanner pulls bytes from
+  the underlying `io.Reader` on demand and slices one `( ... )` row
+  range at a time, which is then handed to the existing
+  `parser.parseTableRow` for cell decoding. Row-boundary scanning is
+  string / bytes-literal / line-comment / block-comment aware so
+  embedded parens don't trip the scan. Per-row arity and v1
+  cell-grammar (no list / no block cells) errors surface as soon as
+  the offending row is consumed — not deferred — per the spec
+  requirement.
+
+  Header parsing reuses `Parse()` against the buffered header prefix
+  (everything up through the closing `)` of the column list), so the
+  standalone constraint (no `@type` alongside `@table`, no body
+  fields) and the dotted-column rejection get the same enforcement
+  the materializing path uses. The header byte budget caps at 64 KiB
+  — a fail-fast bound against a `TableReader` pointed at a giant
+  body-only document with no `@table` ever.
+
+  Tests cover the basic flow, all three cell states, side-channel
+  directives before the header, sticky-error semantics, list / block
+  cells rejected mid-stream, strings / triple-quoted strings / bytes
+  literals / line + block comments with embedded parens or `)`,
+  blank lines between rows, byte-at-a-time `io.Reader` (every
+  buffer-boundary case), multi-table chaining via `Tail()`,
+  equivalence with the materializing path (byte-identical cell
+  type/value sequence per the spec's "MUST produce byte-identical
+  row sequences" requirement), oversized-header rejection, and a
+  `bytes.Buffer` smoke test.
+
+  Public API additions: `pxf.TableReader`, `pxf.NewTableReader`,
+  `pxf.ErrNoTable`. Method set: `Type()`, `Columns()`,
+  `Directives()`, `Tail()`, `Next()`.
+
+  Deferred to v0.75: `TableReader.Scan(proto.Message)` for direct
+  proto binding (today consumers iterate `Next()` and bind via
+  `pxf.UnmarshalDescriptor` or their own walker). The streaming
+  contract is stable; the binding sugar can land non-breaking.
+
 ## [0.73.0] — 2026-05-11
 
 Companion release to `protowire` v0.73.0. Three additive PXF text-
