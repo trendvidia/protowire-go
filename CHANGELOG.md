@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+## [0.74.0] — 2026-05-12
+
+Streaming `@table` release. Adds `pxf.TableReader` over `io.Reader`
+— the row-by-row API for the CSV-replacement workload that v0.73's
+materializing-only path couldn't serve. Working-set memory bounded
+by the size of the largest single row, not by the size of the row
+sequence. Wire format unchanged. Spec-side counterpart:
+[trendvidia/protowire#22] (draft §3.4.4 "Streaming consumption"
+note).
+
 ### Added
 
 - **`pxf.TableReader` — streaming `@table` consumption.** Companion to
