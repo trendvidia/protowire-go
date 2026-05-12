@@ -83,6 +83,109 @@ output := pxf.FormatDocument(doc)
 - **Fast path** (`Unmarshal`): fused single-pass lexer+decoder, zero-copy token strings, no AST allocation. Writes directly to the `proto.Message`.
 - **AST path** (`Parse` + `FormatDocument`): recursive-descent parser that attaches comments to AST entries. Use this when you need to round-trip a document with its comments preserved.
 
+### Directives and `@table` (Result accessors)
+
+PXF documents can carry [`@<name>` directives, `@entry` bundles, and `@table` rows](https://github.com/trendvidia/protowire#directives) at the document root alongside (or instead of) a message body. `UnmarshalFull` captures all three on `Result`:
+
+```go
+result, err := pxf.UnmarshalFull(data, msg)
+
+for _, d := range result.Directives() {
+    // d.Name, d.Prefixes (zero-or-more), d.Type (back-compat: populated
+    // when len(Prefixes)==1), d.Body []byte (raw inner bytes of `{ ... }`)
+    // — typically handed back to pxf.UnmarshalFull against a chosen
+    // message, chameleon's @header pattern.
+}
+
+for _, t := range result.Tables() {
+    // t.Type, t.Columns, t.Rows []TableRow.
+    // Each row.Cells[i] is:
+    //   nil       — empty cell (field absent, pxf.default applies)
+    //   *NullVal  — explicit null (field cleared per §3.9)
+    //   any other — field set to that value
+}
+```
+
+`Result.Directives()` excludes `@type` and `@table` (those have their own accessors). Order is preserved.
+
+### `TableReader`: streaming `@table` consumption
+
+For datasets too large to materialize, read rows from an `io.Reader` with working-set memory bounded by the size of the largest single row — not by the row sequence:
+
+```go
+tr, err := pxf.NewTableReader(r)
+if err != nil { /* errors.Is(err, pxf.ErrNoTable) for "no @table" */ }
+
+cols := tr.Columns()
+typ  := tr.Type()
+hdrs := tr.Directives()    // side-channel directives before the @table header
+
+for {
+    row, err := tr.Next()
+    if errors.Is(err, io.EOF) { break }
+    if err != nil { return err }
+    // row.Cells: []Value with the three-state mapping above.
+}
+```
+
+Multi-table documents chain via `tr.Tail()`, which yields the buffered-but-unconsumed bytes followed by the remaining source:
+
+```go
+tr1, _ := pxf.NewTableReader(src)
+// ... iterate tr1.Next() to io.EOF ...
+tr2, err := pxf.NewTableReader(tr1.Tail())
+```
+
+Per-row arity and v1 cell-grammar errors (`[...]` / `{...}` cells, dotted columns) surface as the offending row is consumed, not deferred to end-of-input — see the [Streaming consumption](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) note in draft §3.4.4.
+
+### `Scan` and `BindRow`: per-row binding
+
+`Scan` reads the next row and binds its cells to a proto message by column name:
+
+```go
+for {
+    var t trades.Trade
+    if err := tr.Scan(&t); errors.Is(err, io.EOF) { break } else if err != nil { return err }
+    process(&t)
+}
+```
+
+`BindRow` is the same logic exposed standalone, for callers iterating `Result.Tables()[i].Rows` on the materializing path:
+
+```go
+doc, _ := pxf.Parse(data)
+for _, tbl := range doc.Tables {
+    for _, row := range tbl.Rows {
+        var t trades.Trade
+        if err := pxf.BindRow(&t, tbl.Columns, row); err != nil { return err }
+        process(&t)
+    }
+}
+```
+
+Both honor the three-state cell semantics (empty / `null` / value), bind WKT timestamps and durations, resolve enums by name, and clear wrappers / optional / oneof on a `null` cell — the implementation routes through the existing `Unmarshal` pipeline so every decoder branch is exercised. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
+
+### Schema reserved-name check
+
+A protobuf schema bound for PXF use MUST NOT declare a field, oneof, or enum value named `null`, `true`, or `false` — those identifiers lex as PXF value keywords and produce silently-unreachable bindings. The check runs by default at the top of every `Unmarshal*` call:
+
+```go
+// Decoder rejects with a clear error if the schema is non-conformant.
+err := pxf.Unmarshal(data, &msg)
+
+// Inspect / pre-validate explicitly:
+violations := pxf.ValidateFile(fd)      // or pxf.ValidateDescriptor(desc)
+for _, v := range violations {
+    fmt.Println(v.String())  // "file: enum value \"trades.v1.Side.null\" uses PXF-reserved name \"null\""
+}
+
+// Bypass per-call validation (advanced — for callers who pre-validated):
+opts := pxf.UnmarshalOptions{SkipValidate: true}
+err := opts.Unmarshal(data, &msg)
+```
+
+The check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the rule.
+
 ## Struct binary marshaling (`encoding/pb`)
 
 Marshal any Go struct to/from protobuf binary using `protowire:"N"` struct tags — no `.proto` files, no code generation.
