@@ -529,6 +529,19 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			if d.result != nil {
 				d.result.markPresent(d.pathPrefix + string(fd.Name()))
 			}
+			// pxf.Secret block form with hook: route `value` through
+			// d.onSecret the same way scalar shorthand does, leaving
+			// Secret.value empty on the proto message. Hint and
+			// fingerprint subfields are assigned normally — they are
+			// diagnostic, not sensitive.
+			if d.onSecret != nil && isSecret(fd.Message()) {
+				sub := msg.Mutable(fd).Message()
+				path := d.pathPrefix + string(fd.Name())
+				if err := d.decodeSecretBlockInto(sub, path); err != nil {
+					return err
+				}
+				continue
+			}
 			// Any with block syntax: name { @type = "..." ... }
 			if isAny(fd.Message()) && d.resolver != nil && d.current.Kind == AT_TYPE {
 				if err := d.decodeAnyBlock(msg, fd); err != nil {
@@ -679,10 +692,12 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		d.advance()
 		return nil
 	}
-	// pxf.Secret: scalar shorthand `pw = "x"`. Block form falls through
-	// to the generic message decoder below, which handles
-	// `pw { value = "x", hint = "h" }` correctly via the underlying
-	// proto descriptor.
+	// pxf.Secret: scalar shorthand `pw = "x"`. Block form is intercepted
+	// in decodeFields' LBRACE case (and for repeated/map elements in
+	// consumeListMsg / decodeMapInline) — when OnSecretField is set,
+	// the inner `value` assignment routes through the hook the same
+	// way scalar shorthand does, closing the plaintext-in-heap window
+	// for both surface forms.
 	if isSecret(mdesc) && d.current.Kind == STRING {
 		innerFd := mdesc.Fields().ByName("value")
 		if d.onSecret != nil {
@@ -884,7 +899,9 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	}
 	// pxf.Secret in repeated context: accept scalar shorthand (a list
 	// of plain strings), otherwise fall through to the generic
-	// block-form path.
+	// block-form path. With OnSecretField set, both forms route the
+	// inner value through the hook; scalar shorthand here, block
+	// form via decodeSecretBlockInto below.
 	if isSecret(mdesc) && d.current.Kind == STRING {
 		innerFd := mdesc.Fields().ByName("value")
 		if d.onSecret != nil {
@@ -907,6 +924,17 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		}
 		sub := list.NewElement().Message()
 		fastSet(sub, innerFd, v)
+		return protoreflect.ValueOfMessage(sub), nil
+	}
+	// pxf.Secret block form in repeated context — route value
+	// through the hook the same way scalar shorthand does.
+	if d.onSecret != nil && isSecret(mdesc) && d.current.Kind == LBRACE {
+		path := fmt.Sprintf("%s%s[%d]", d.pathPrefix, fd.Name(), list.Len())
+		d.advance() // consume {
+		sub := list.NewElement().Message()
+		if err := d.decodeSecretBlockInto(sub, path); err != nil {
+			return protoreflect.Value{}, err
+		}
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 
@@ -1059,6 +1087,18 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
 				continue
 			}
+			// pxf.Secret block form in map-value context — route value
+			// through the hook so plaintext never lands on Secret.value.
+			if d.onSecret != nil && isSecret(mdesc) && d.current.Kind == LBRACE {
+				path := fmt.Sprintf("%s%s[%s]", d.pathPrefix, fd.Name(), formatMapKeyForPath(k))
+				d.advance() // consume {
+				sub := m.NewValue().Message()
+				if err := d.decodeSecretBlockInto(sub, path); err != nil {
+					return err
+				}
+				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+				continue
+			}
 
 			if d.current.Kind != LBRACE {
 				return errorf(d.current.Pos, "expected '{' for map message value")
@@ -1202,6 +1242,85 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	default:
 		return protoreflect.Value{}, errorf(pos, "unsupported kind %s for field %q", fd.Kind(), fd.Name())
+	}
+}
+
+// decodeSecretBlockInto parses a `{ value = "x", hint = "h",
+// fingerprint = "f" }` block into the given pxf.Secret-typed message
+// sub. Routes the `value` subfield through d.onSecret (which must be
+// non-nil — callers gate on this); assigns hint and fingerprint to
+// sub normally. Presence is marked on each subfield supplied by the
+// source.
+//
+// The opening `{` MUST have been consumed by the caller. The closing
+// `}` is consumed before returning.
+//
+// Subfield order isn't significant; any of value/hint/fingerprint may
+// be absent. Unknown subfields are an error — pxf.Secret is a closed
+// shape and tolerating extras would mask schema drift.
+//
+// This is the block-form counterpart to the scalar-shorthand routing
+// in decodeMsgValue, consumeListMsg, and decodeMapInline. Together
+// they close the plaintext-in-heap window for both Secret surface
+// forms (chameleon's pre-v0.9.0 best-effort residual).
+func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path string) error {
+	d.depth++
+	if d.depth > MaxNestingDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+	}
+	defer func() { d.depth-- }()
+
+	desc := sub.Descriptor()
+	hintFd := desc.Fields().ByName("hint")
+	fingerprintFd := desc.Fields().ByName("fingerprint")
+
+	for {
+		switch d.current.Kind {
+		case RBRACE:
+			d.advance()
+			return nil
+		case EOF:
+			return errorf(d.current.Pos, "expected '}' to close pxf.Secret block, got EOF")
+		case IDENT:
+			// fall through to handle named subfield
+		default:
+			return errorf(d.current.Pos, "expected pxf.Secret field name (value/hint/fingerprint), got %s", d.current.Kind)
+		}
+		name := d.current.Value
+		namePos := d.current.Pos
+		d.advance()
+		if d.current.Kind != EQUALS {
+			return errorf(d.current.Pos, "expected '=' after pxf.Secret field %q, got %s", name, d.current.Kind)
+		}
+		d.advance()
+		if d.current.Kind != STRING {
+			return errorf(d.current.Pos, "expected string value for pxf.Secret %s, got %s", name, d.current.Kind)
+		}
+		if !utf8.ValidString(d.current.Value) {
+			return errorf(d.current.Pos, "invalid UTF-8 in pxf.Secret %s", name)
+		}
+		switch name {
+		case "value":
+			if err := d.onSecret(path, d.current.Value); err != nil {
+				return errorf(d.current.Pos, "pxf.Secret hook for %q: %v", path, err)
+			}
+			if d.result != nil {
+				d.result.markPresent(path + ".value")
+			}
+		case "hint":
+			fastSet(sub, hintFd, protoreflect.ValueOfString(d.current.Value))
+			if d.result != nil {
+				d.result.markPresent(path + ".hint")
+			}
+		case "fingerprint":
+			fastSet(sub, fingerprintFd, protoreflect.ValueOfString(d.current.Value))
+			if d.result != nil {
+				d.result.markPresent(path + ".fingerprint")
+			}
+		default:
+			return errorf(namePos, "unknown pxf.Secret field %q (expected value/hint/fingerprint)", name)
+		}
+		d.advance()
 	}
 }
 

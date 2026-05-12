@@ -166,10 +166,12 @@ func TestOnSecretField_HookNotSet_BackwardCompatible(t *testing.T) {
 	assert.Equal(t, "supersecret", value)
 }
 
-// TestOnSecretField_BlockFormDoesNotFireHook — `pw { value = "x" }`
-// goes through the generic message-block decoder; the hook does NOT
-// fire (documented limitation). Value lands on Secret.value.
-func TestOnSecretField_BlockFormDoesNotFireHook(t *testing.T) {
+// TestOnSecretField_BlockFormFiresHook — `pw { value = "x" }` now
+// routes value through the hook the same way scalar shorthand does
+// (since the block-form heap-window closure shipped). The proto
+// message's Secret.value is left empty; hint and fingerprint are
+// assigned to the Secret message normally.
+func TestOnSecretField_BlockFormFiresHook(t *testing.T) {
 	desc := secretDemoDesc(t)
 	var got []recordedSecret
 	opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
@@ -181,16 +183,20 @@ func TestOnSecretField_BlockFormDoesNotFireHook(t *testing.T) {
 	msg, err := opts.UnmarshalDescriptor([]byte(input), desc)
 	require.NoError(t, err)
 
-	assert.Empty(t, got, "block form must not invoke the hook in this release")
+	require.Len(t, got, 1, "block form should fire the hook once for the value subfield")
+	assert.Equal(t, "db_password", got[0].path)
+	assert.Equal(t, "supersecret", got[0].value)
+
 	value, hint, _ := readSecretField(msg.ProtoReflect(), "db_password")
-	assert.Equal(t, "supersecret", value, "block-form value still lands on Secret.value")
-	assert.Equal(t, "Postgres primary", hint)
+	assert.Empty(t, value, "block-form value should NOT land on Secret.value when hook took it")
+	assert.Equal(t, "Postgres primary", hint, "hint is diagnostic; still assigned normally")
 }
 
-// TestOnSecretField_MixedFormsInOneDocument — shorthand fires the hook
-// while block form coexists and writes through to Secret.value. Both
-// behaviors stand in the same document.
-func TestOnSecretField_MixedFormsInOneDocument(t *testing.T) {
+// TestOnSecretField_MixedFormsBothFireHook — shorthand AND block form
+// both fire the hook now. Two hook calls for the two Secret fields,
+// neither lands on Secret.value, hint remains accessible on the
+// block-form Secret's message.
+func TestOnSecretField_MixedFormsBothFireHook(t *testing.T) {
 	desc := secretDemoDesc(t)
 	var got []recordedSecret
 	opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
@@ -203,15 +209,18 @@ api_token {
 	msg, err := opts.UnmarshalDescriptor([]byte(input), desc)
 	require.NoError(t, err)
 
-	require.Len(t, got, 1)
-	assert.Equal(t, "db_password", got[0].path)
-	assert.Equal(t, "p1", got[0].value)
+	got = sortByPath(got)
+	require.Len(t, got, 2, "both forms should fire the hook")
+	assert.Equal(t, "api_token", got[0].path)
+	assert.Equal(t, "t1", got[0].value)
+	assert.Equal(t, "db_password", got[1].path)
+	assert.Equal(t, "p1", got[1].value)
 
 	pwVal, _, _ := readSecretField(msg.ProtoReflect(), "db_password")
 	assert.Empty(t, pwVal, "shorthand was routed through hook")
 	tokVal, tokHint, _ := readSecretField(msg.ProtoReflect(), "api_token")
-	assert.Equal(t, "t1", tokVal, "block form bypasses hook")
-	assert.Equal(t, "external API", tokHint)
+	assert.Empty(t, tokVal, "block-form value was also routed through hook")
+	assert.Equal(t, "external API", tokHint, "hint still assigned to message")
 }
 
 // TestOnSecretField_PresenceMarkedOnFullUnmarshal — UnmarshalFull
@@ -322,6 +331,269 @@ func TestOnSecretField_MapInvalidUTF8Rejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "UTF-8")
 	assert.False(t, called)
+}
+
+// TestOnSecretField_BlockFormNested — block-form Secret nested in a
+// scalar user-message field (DB.password { value = "..." } via the
+// nested fixture) routes through the hook with the dotted path.
+func TestOnSecretField_BlockFormNested(t *testing.T) {
+	desc := compileNestedDesc(t)
+	var got []recordedSecret
+	opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
+
+	input := `db {
+  password {
+    value = "rootpw"
+    hint = "root account"
+  }
+}`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+
+	require.Len(t, got, 1)
+	assert.Equal(t, "db.password", got[0].path)
+	assert.Equal(t, "rootpw", got[0].value)
+}
+
+// TestOnSecretField_BlockFormRepeated — block-form Secrets inside a
+// repeated pxf.Secret field route through the hook with indexed
+// paths.
+func TestOnSecretField_BlockFormRepeated(t *testing.T) {
+	desc := secretDemoDesc(t)
+	var got []recordedSecret
+	opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
+
+	input := `backup_keys = [
+  { value = "k0" hint = "first" }
+  { value = "k1" }
+]`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+
+	got = sortByPath(got)
+	require.Len(t, got, 2)
+	assert.Equal(t, "backup_keys[0]", got[0].path)
+	assert.Equal(t, "k0", got[0].value)
+	assert.Equal(t, "backup_keys[1]", got[1].path)
+	assert.Equal(t, "k1", got[1].value)
+}
+
+// TestOnSecretField_BlockFormMap — block-form Secrets as map values
+// route through the hook with quoted-key paths.
+func TestOnSecretField_BlockFormMap(t *testing.T) {
+	desc := secretDemoDesc(t)
+	var got []recordedSecret
+	opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
+
+	input := `tenant_keys = {
+  "acme": { value = "k1" hint = "acme prod" }
+  "globex": { value = "k2" }
+}`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+
+	got = sortByPath(got)
+	require.Len(t, got, 2)
+	assert.Equal(t, `tenant_keys["acme"]`, got[0].path)
+	assert.Equal(t, "k1", got[0].value)
+	assert.Equal(t, `tenant_keys["globex"]`, got[1].path)
+	assert.Equal(t, "k2", got[1].value)
+}
+
+// TestOnSecretField_BlockFormHintFingerprintWithoutValue — a Secret
+// block carrying only hint / fingerprint (no value) does NOT fire
+// the hook. Hint / fingerprint are still assigned to the message.
+func TestOnSecretField_BlockFormHintFingerprintWithoutValue(t *testing.T) {
+	desc := secretDemoDesc(t)
+	var got []recordedSecret
+	opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
+
+	input := `db_password {
+  hint = "rotated 2026"
+  fingerprint = "sha256:abc"
+}`
+	msg, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+
+	assert.Empty(t, got, "no value subfield → no hook call")
+	value, hint, fp := readSecretField(msg.ProtoReflect(), "db_password")
+	assert.Empty(t, value)
+	assert.Equal(t, "rotated 2026", hint)
+	assert.Equal(t, "sha256:abc", fp)
+}
+
+// TestOnSecretField_BlockFormHookErrorAborts — error from the hook
+// during block-form decode aborts and propagates with the path.
+func TestOnSecretField_BlockFormHookErrorAborts(t *testing.T) {
+	desc := secretDemoDesc(t)
+	wantErr := errors.New("vault denied")
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return wantErr },
+	}
+
+	input := `db_password {
+  value = "x"
+  hint = "h"
+}`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vault denied")
+	assert.Contains(t, err.Error(), "db_password")
+}
+
+// TestOnSecretField_BlockFormInvalidUTF8 — invalid UTF-8 in any of
+// value / hint / fingerprint is rejected before the hook fires.
+func TestOnSecretField_BlockFormInvalidUTF8(t *testing.T) {
+	desc := secretDemoDesc(t)
+	for _, field := range []string{"value", "hint", "fingerprint"} {
+		t.Run(field, func(t *testing.T) {
+			called := false
+			opts := pxf.UnmarshalOptions{
+				OnSecretField: func(path, value string) error { called = true; return nil },
+			}
+			input := `db_password { ` + field + ` = "\xff\xfe" }`
+			_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "UTF-8")
+			assert.False(t, called, "hook should not fire for invalid UTF-8 inputs")
+		})
+	}
+}
+
+// TestOnSecretField_BlockFormUnknownSubfield — pxf.Secret is a closed
+// shape (value/hint/fingerprint). Unknown subfields error out so
+// schema drift can't hide.
+func TestOnSecretField_BlockFormUnknownSubfield(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return nil },
+	}
+	input := `db_password { value = "x" rotation = "P30D" }`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rotation")
+}
+
+// TestOnSecretField_BlockFormNotInvokedWithoutHook — when the hook is
+// nil, block-form decoding still works via the generic field
+// decoder and `value` lands on Secret.value as before. Backward
+// compat for callers that don't opt into OnSecretField.
+func TestOnSecretField_BlockFormNotInvokedWithoutHook(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{} // hook nil
+	input := `db_password { value = "x" hint = "h" }`
+	msg, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+	value, hint, _ := readSecretField(msg.ProtoReflect(), "db_password")
+	assert.Equal(t, "x", value)
+	assert.Equal(t, "h", hint)
+}
+
+// TestOnSecretField_BlockFormPresenceMarked — UnmarshalFull's Result
+// records presence on the block-form Secret's value / hint /
+// fingerprint subfields, same as the scalar-shorthand path.
+func TestOnSecretField_BlockFormPresenceMarked(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField:  func(path, value string) error { return nil },
+		SkipPostDecode: true,
+	}
+	input := `db_password { value = "x" hint = "h" }`
+	_, result, err := opts.UnmarshalFullDescriptor([]byte(input), desc)
+	require.NoError(t, err)
+	assert.True(t, result.IsSet("db_password.value"))
+	assert.True(t, result.IsSet("db_password.hint"))
+	assert.False(t, result.IsSet("db_password.fingerprint"))
+}
+
+// TestOnSecretField_BlockFormEmptyBlock — `pw {}` is a valid Secret
+// declaration with no subfields. No hook call, no metadata on the
+// message, no error.
+func TestOnSecretField_BlockFormEmptyBlock(t *testing.T) {
+	desc := secretDemoDesc(t)
+	called := false
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { called = true; return nil },
+	}
+	_, err := opts.UnmarshalDescriptor([]byte(`db_password {}`), desc)
+	require.NoError(t, err)
+	assert.False(t, called, "empty block should not fire the hook")
+}
+
+// TestOnSecretField_BlockFormErrors — table of malformed block-form
+// inputs. Exercises every error branch inside decodeSecretBlockInto:
+// missing '=', non-string value, non-IDENT subfield name, EOF in
+// mid-block.
+func TestOnSecretField_BlockFormErrors(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return nil },
+	}
+	cases := []struct {
+		name   string
+		input  string
+		errSub string
+	}{
+		{
+			name:   "missing_equals",
+			input:  `db_password { value "x" }`,
+			errSub: "expected '='",
+		},
+		{
+			name:   "non_string_value",
+			input:  `db_password { value = 42 }`,
+			errSub: "expected string",
+		},
+		{
+			name:   "non_ident_subfield",
+			input:  `db_password { 42 = "x" }`,
+			errSub: "expected pxf.Secret field name",
+		},
+		{
+			name:   "eof_mid_block",
+			input:  `db_password { value = "x"`,
+			errSub: "EOF",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := opts.UnmarshalDescriptor([]byte(c.input), desc)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), c.errSub, "err: %v", err)
+		})
+	}
+}
+
+// TestOnSecretField_BlockFormHookErrorRepeated — hook error during
+// block-form decode inside a repeated element propagates with the
+// indexed path. Covers the err-return branch in consumeListMsg's
+// new Secret-block intercept.
+func TestOnSecretField_BlockFormHookErrorRepeated(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return errors.New("vault denied") },
+	}
+	input := `backup_keys = [{ value = "k0" }]`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vault denied")
+	assert.Contains(t, err.Error(), "backup_keys[0]")
+}
+
+// TestOnSecretField_BlockFormHookErrorMap — hook error during
+// block-form decode inside a map value propagates with the quoted-
+// key path. Covers the err-return branch in decodeMapInline's new
+// Secret-block intercept.
+func TestOnSecretField_BlockFormHookErrorMap(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { return errors.New("kms unreachable") },
+	}
+	input := `tenant_keys = { "acme": { value = "k1" } }`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kms unreachable")
+	assert.Contains(t, err.Error(), "acme")
 }
 
 // --- helpers ---
