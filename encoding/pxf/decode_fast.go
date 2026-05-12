@@ -80,12 +80,12 @@ type directDecoder struct {
 	current        Token
 	resolver       TypeResolver
 	discardUnknown bool
-	depth          int                                  // nesting depth, capped at MaxNestingDepth
-	result         *Result                              // nil for plain Unmarshal, non-nil for UnmarshalFull
-	rootMsg        protoreflect.Message                 // top-level message (for _null FieldMask writes)
-	nullMaskFd     protoreflect.FieldDescriptor         // cached _null field, may be nil
-	pathPrefix     string                               // dotted path prefix for nested messages
-	onSecret       func(path, value string) error      // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
+	depth          int                            // nesting depth, capped at MaxNestingDepth
+	result         *Result                        // nil for plain Unmarshal, non-nil for UnmarshalFull
+	rootMsg        protoreflect.Message           // top-level message (for _null FieldMask writes)
+	nullMaskFd     protoreflect.FieldDescriptor   // cached _null field, may be nil
+	pathPrefix     string                         // dotted path prefix for nested messages
+	onSecret       func(path, value string) error // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
 }
 
 func (d *directDecoder) advance() {
