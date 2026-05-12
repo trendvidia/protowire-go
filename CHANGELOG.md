@@ -11,6 +11,65 @@ format changes.
 
 ## [Unreleased]
 
+## [0.76.0] — 2026-05-12
+
+Memguard-direct decode release. Adds `UnmarshalOptions.OnSecretField`
+— an opt-in callback the PXF decoder fires for every `pxf.Secret`-typed
+field supplied via scalar shorthand. Consumers (notably chameleon)
+use it to route secret bytes into mlock'd `memguard.Enclave`s during
+decode, closing the plaintext-in-heap window that previously existed
+between PXF parse and the post-decode walker. Wire format unchanged;
+hook is fully opt-in and the nil-hook code path is byte-for-byte
+identical to v0.75.0.
+
+### Added
+
+- **`UnmarshalOptions.OnSecretField` callback.** When set, fires for
+  every `pxf.Secret`-typed field assigned via scalar shorthand. The
+  decoder hands the value string to the hook and skips the standard
+  assignment to the inner `value` field on the Secret message —
+  presence tracking still marks the field as set so `UnmarshalFull`'s
+  required-field validation behaves identically.
+
+  ```go
+  opts := pxf.UnmarshalOptions{
+      OnSecretField: func(path, value string) error {
+          return enclaveStore.Seal(path, value)
+      },
+  }
+  _, err := opts.UnmarshalFull(data, msg)
+  ```
+
+  Path scheme matches chameleon's `internal/pathfmt` byte-for-byte
+  so `secret.Map` lookup keys come out identical regardless of which
+  side built them:
+
+  | PXF surface                       | path                      |
+  |-----------------------------------|---------------------------|
+  | `pw = "x"`                        | `pw`                      |
+  | `db { password = "x" }`           | `db.password`             |
+  | `backup_keys = ["a", "b"]`        | `backup_keys[0..1]`       |
+  | `tenant_keys = { "acme": "k" }`   | `tenant_keys["acme"]`     |
+
+  Fires for top-level fields, repeated-list elements, and map values.
+  Block-form Secrets (`pw { value = "x", hint = "h" }`) recurse
+  through the generic field decoder and the value lands on
+  `Secret.value` as before — documented release limitation; consumers
+  needing a closed memory window for block form should post-process
+  the message (e.g. chameleon's `parse.Move` walker) or normalize
+  their PXF to scalar shorthand. Hint and fingerprint metadata are
+  always assigned to the proto message; they are diagnostic, not
+  sensitive. Invalid UTF-8 in the value is rejected before the hook
+  fires (same hardening rule as the standard string-field path).
+
+### Coordination
+
+- Pairs with chameleon's adoption PR closing `chameleon#7` (the
+  plaintext-in-heap window meta-issue). Chameleon's `parse.Move`
+  remains the canonical post-decode walker; with this hook wired,
+  it walks an already-empty `Secret.value` for scalar-shorthand
+  secrets and only acts on the residual block-form cases.
+
 ## [0.75.0] — 2026-05-12
 
 Per-row binding release. Adds `TableReader.Scan(proto.Message)` and

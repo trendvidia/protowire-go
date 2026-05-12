@@ -247,6 +247,83 @@ func TestOnSecretField_InvalidUTF8Rejected(t *testing.T) {
 	assert.False(t, called, "hook must not fire for invalid UTF-8 values")
 }
 
+// TestOnSecretField_RepeatedHookErrorAborts — hook error in the
+// repeated-list context propagates with the indexed path so the
+// caller can pinpoint which element failed.
+func TestOnSecretField_RepeatedHookErrorAborts(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error {
+			if value == "b" {
+				return errors.New("vault rejected key")
+			}
+			return nil
+		},
+	}
+
+	_, err := opts.UnmarshalDescriptor([]byte(`backup_keys = ["a", "b", "c"]`), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vault rejected key")
+	assert.Contains(t, err.Error(), "backup_keys[1]")
+}
+
+// TestOnSecretField_RepeatedInvalidUTF8Rejected — invalid UTF-8 in a
+// repeated-list element is caught before the hook fires.
+func TestOnSecretField_RepeatedInvalidUTF8Rejected(t *testing.T) {
+	desc := secretDemoDesc(t)
+	called := false
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { called = true; return nil },
+	}
+
+	_, err := opts.UnmarshalDescriptor([]byte(`backup_keys = ["\xff\xfe"]`), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UTF-8")
+	assert.False(t, called)
+}
+
+// TestOnSecretField_MapHookErrorAborts — hook error in the map-value
+// context propagates with the quoted-key path.
+func TestOnSecretField_MapHookErrorAborts(t *testing.T) {
+	desc := secretDemoDesc(t)
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error {
+			return errors.New("kms unreachable")
+		},
+	}
+
+	input := `tenant_keys = {
+  "acme": "k1"
+}`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "kms unreachable")
+	// %q-quoting the path in the wrapping error message escapes the
+	// inner quotes around "acme", so the literal bytes carry
+	// `tenant_keys[\"acme\"]`. Match on the unambiguous unquoted
+	// substring instead.
+	assert.Contains(t, err.Error(), "tenant_keys[")
+	assert.Contains(t, err.Error(), "acme")
+}
+
+// TestOnSecretField_MapInvalidUTF8Rejected — invalid UTF-8 in a map
+// value is caught before the hook fires.
+func TestOnSecretField_MapInvalidUTF8Rejected(t *testing.T) {
+	desc := secretDemoDesc(t)
+	called := false
+	opts := pxf.UnmarshalOptions{
+		OnSecretField: func(path, value string) error { called = true; return nil },
+	}
+
+	input := `tenant_keys = {
+  "acme": "\xff\xfe"
+}`
+	_, err := opts.UnmarshalDescriptor([]byte(input), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UTF-8")
+	assert.False(t, called)
+}
+
 // --- helpers ---
 
 // compileNestedDesc compiles nestedSecretProtoSrc against the same
