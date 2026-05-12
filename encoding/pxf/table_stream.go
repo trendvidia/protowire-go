@@ -256,7 +256,10 @@ func scanHeaderEnd(input []byte) (int, bool, error) {
 		return 0, false, nil
 	}
 	// Find the matching `)`.
-	end, ok := findMatchingParenSafe(input, lparen)
+	end, ok, err := findMatchingParenSafe(input, lparen)
+	if err != nil {
+		return 0, false, err
+	}
 	if !ok {
 		return 0, false, nil
 	}
@@ -421,22 +424,26 @@ func skipBlockComment(input []byte, from int) (int, error) {
 }
 
 // findMatchingParenSafe finds the index of the `)` matching the `(`
-// at openIdx. Returns (index, true) on success, (0, false) if the
-// matching paren isn't in the buffer yet (caller should pull more
-// bytes). String / bytes-literal / comment aware.
-func findMatchingParenSafe(input []byte, openIdx int) (int, bool) {
+// at openIdx. Returns:
+//   - (index, true, nil) on success.
+//   - (0, false, nil) if the matching paren isn't in the buffer yet
+//     (caller should pull more bytes).
+//   - (0, false, err) on a malformed string / bytes / comment inside
+//     the parens (unrecoverable — surfaces to the caller).
+//
+// String / bytes-literal / comment aware.
+func findMatchingParenSafe(input []byte, openIdx int) (int, bool, error) {
 	depth := 1
 	i := openIdx + 1
 	for i < len(input) {
 		// Try to skip past any string/bytes/comment construct.
 		j, err := skipStringOrComment(input, i)
 		if err != nil {
-			// Malformed construct; surface upstream via the parser.
-			return 0, false
+			return 0, false, err
 		}
 		if j == -1 {
-			// Incomplete — pull more.
-			return 0, false
+			// Incomplete construct — pull more bytes.
+			return 0, false, nil
 		}
 		if j != i {
 			i = j
@@ -449,14 +456,14 @@ func findMatchingParenSafe(input []byte, openIdx int) (int, bool) {
 		case ')':
 			depth--
 			if depth == 0 {
-				return i, true
+				return i, true, nil
 			}
 			i++
 		default:
 			i++
 		}
 	}
-	return 0, false
+	return 0, false, nil
 }
 
 // findNextRow finds the next `( ... )` row in input, skipping leading
@@ -501,7 +508,10 @@ func findNextRow(input []byte) (int, int, bool, error) {
 		// Not a row — end of stream.
 		return 0, 0, false, nil
 	}
-	end, ok := findMatchingParenSafe(input, i)
+	end, ok, err := findMatchingParenSafe(input, i)
+	if err != nil {
+		return 0, 0, false, err
+	}
 	if !ok {
 		return 0, 0, false, nil
 	}
