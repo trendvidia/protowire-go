@@ -332,3 +332,37 @@ func TestTableReader_AtTableWithoutOpenParen_ReportsHeaderTooLarge(t *testing.T)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, pxf.ErrNoTable)
 }
+
+// --- Unterminated string AFTER @table but BEFORE `(`. Covers the
+// findNextChar error-propagation path in scanHeaderEnd (the previous
+// "leading directive" test triggers the findAtTable error path, not
+// findNextChar's).
+
+func TestTableReader_UnterminatedStringBetweenAtTableAndLParen(t *testing.T) {
+	// The `"open\n` sits between the `@table` keyword and the column
+	// list's `(`. findNextChar walks past `T` looking for `(`, hits the
+	// `"`, descends into skipSimpleString, and errors on the embedded
+	// newline.
+	in := "@table T \"open\n (a)\n(\"x\")"
+	_, err := pxf.NewTableReader(strings.NewReader(in))
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, pxf.ErrNoTable)
+}
+
+// --- Malformed string BETWEEN rows. Covers findNextRow's error
+// propagation: the leading-whitespace/comment skip loop encounters
+// an unterminated string before the next `(`.
+
+func TestTableReader_UnterminatedStringBetweenRows(t *testing.T) {
+	// First row reads cleanly. Second "row" position starts with a
+	// `"` that's unterminated by a newline — findNextRow's whitespace/
+	// comment skip loop hits skipStringOrComment which errors.
+	in := "@table T (a)\n(\"x\")\n\"open\n(\"y\")"
+	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	require.NoError(t, err)
+	_, err = tr.Next()
+	require.NoError(t, err)
+	_, err = tr.Next()
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, io.EOF)
+}
