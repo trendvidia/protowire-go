@@ -80,11 +80,12 @@ type directDecoder struct {
 	current        Token
 	resolver       TypeResolver
 	discardUnknown bool
-	depth          int                          // nesting depth, capped at MaxNestingDepth
-	result         *Result                      // nil for plain Unmarshal, non-nil for UnmarshalFull
-	rootMsg        protoreflect.Message         // top-level message (for _null FieldMask writes)
-	nullMaskFd     protoreflect.FieldDescriptor // cached _null field, may be nil
-	pathPrefix     string                       // dotted path prefix for nested messages
+	depth          int                                  // nesting depth, capped at MaxNestingDepth
+	result         *Result                              // nil for plain Unmarshal, non-nil for UnmarshalFull
+	rootMsg        protoreflect.Message                 // top-level message (for _null FieldMask writes)
+	nullMaskFd     protoreflect.FieldDescriptor         // cached _null field, may be nil
+	pathPrefix     string                               // dotted path prefix for nested messages
+	onSecret       func(path, value string) error      // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
 }
 
 func (d *directDecoder) advance() {
@@ -109,11 +110,12 @@ func (d *directDecoder) peekKind() TokenKind {
 	return next
 }
 
-func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown bool) error {
+func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown bool, onSecret func(path, value string) error) error {
 	var d directDecoder
 	d.lex = lexer{input: data, line: 1, col: 1}
 	d.resolver = resolver
 	d.discardUnknown = discardUnknown
+	d.onSecret = onSecret
 	d.advance()
 
 	if err := d.consumeDirectives(nil); err != nil {
@@ -123,11 +125,12 @@ func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolve
 	return d.decodeFields(msg, false)
 }
 
-func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown, skipPostDecode bool) (*Result, error) {
+func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown, skipPostDecode bool, onSecret func(path, value string) error) (*Result, error) {
 	var d directDecoder
 	d.lex = lexer{input: data, line: 1, col: 1}
 	d.resolver = resolver
 	d.discardUnknown = discardUnknown
+	d.onSecret = onSecret
 	d.result = newResult()
 	d.rootMsg = msg
 	d.nullMaskFd = findNullMaskField(msg.Descriptor())
@@ -682,6 +685,23 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 	// proto descriptor.
 	if isSecret(mdesc) && d.current.Kind == STRING {
 		innerFd := mdesc.Fields().ByName("value")
+		if d.onSecret != nil {
+			pos := d.current.Pos
+			value := d.current.Value
+			if !utf8.ValidString(value) {
+				return errorf(pos, "invalid UTF-8 in pxf.Secret value for field %q", fd.Name())
+			}
+			path := d.pathPrefix + string(fd.Name())
+			if err := d.onSecret(path, value); err != nil {
+				return errorf(pos, "pxf.Secret hook for %q: %v", path, err)
+			}
+			d.advance()
+			// Mutate the message so presence reporting / hint+fingerprint
+			// access still work, but leave the inner `value` field unset.
+			msg.Mutable(fd).Message()
+			d.markInnerPresent(fd, "value")
+			return nil
+		}
 		v, err := d.consumeScalar(innerFd)
 		if err != nil {
 			return err
@@ -867,6 +887,20 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	// block-form path.
 	if isSecret(mdesc) && d.current.Kind == STRING {
 		innerFd := mdesc.Fields().ByName("value")
+		if d.onSecret != nil {
+			pos := d.current.Pos
+			value := d.current.Value
+			if !utf8.ValidString(value) {
+				return protoreflect.Value{}, errorf(pos, "invalid UTF-8 in pxf.Secret value for field %q", fd.Name())
+			}
+			path := fmt.Sprintf("%s%s[%d]", d.pathPrefix, fd.Name(), list.Len())
+			if err := d.onSecret(path, value); err != nil {
+				return protoreflect.Value{}, errorf(pos, "pxf.Secret hook for %q: %v", path, err)
+			}
+			d.advance()
+			sub := list.NewElement().Message()
+			return protoreflect.ValueOfMessage(sub), nil
+		}
 		v, err := d.consumeScalar(innerFd)
 		if err != nil {
 			return protoreflect.Value{}, err
@@ -1001,6 +1035,21 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			}
 			if isSecret(mdesc) && d.current.Kind == STRING {
 				innerFd := mdesc.Fields().ByName("value")
+				if d.onSecret != nil {
+					pos := d.current.Pos
+					value := d.current.Value
+					if !utf8.ValidString(value) {
+						return errorf(pos, "invalid UTF-8 in pxf.Secret value for field %q", fd.Name())
+					}
+					path := fmt.Sprintf("%s%s[%s]", d.pathPrefix, fd.Name(), formatMapKeyForPath(k))
+					if err := d.onSecret(path, value); err != nil {
+						return errorf(pos, "pxf.Secret hook for %q: %v", path, err)
+					}
+					d.advance()
+					sub := m.NewValue().Message()
+					fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
+					continue
+				}
 				v, err := d.consumeScalar(innerFd)
 				if err != nil {
 					return err
@@ -1153,6 +1202,33 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	default:
 		return protoreflect.Value{}, errorf(pos, "unsupported kind %s for field %q", fd.Kind(), fd.Name())
+	}
+}
+
+// formatMapKeyForPath renders a protoreflect.MapKey into the string
+// fragment used inside `field[<here>]` for the OnSecretField path.
+// Mirrors chameleon's internal/pathfmt.MapKey byte-for-byte: string
+// keys are double-quoted (so `tenant_keys[acme]` actually renders as
+// `tenant_keys["acme"]`); numeric and bool keys appear bare. The two
+// implementations must agree exactly — chameleon's secret.Map lookup
+// keys are produced by the same scheme and any drift would silently
+// break Get() on map-valued secrets.
+func formatMapKeyForPath(k protoreflect.MapKey) string {
+	switch v := k.Interface().(type) {
+	case string:
+		return strconv.Quote(v)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case bool:
+		return strconv.FormatBool(v)
+	default:
+		return fmt.Sprintf("%v", v)
 	}
 }
 
