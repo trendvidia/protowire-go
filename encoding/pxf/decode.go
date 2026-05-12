@@ -36,7 +36,7 @@ func (o UnmarshalOptions) Unmarshal(data []byte, msg proto.Message) error {
 			return err
 		}
 	}
-	return unmarshalDirect(data, r, o.TypeResolver, o.DiscardUnknown)
+	return unmarshalDirect(data, r, o.TypeResolver, o.DiscardUnknown, o.OnSecretField)
 }
 
 // UnmarshalDescriptor parses PXF data using the given message descriptor.
@@ -47,7 +47,7 @@ func (o UnmarshalOptions) UnmarshalDescriptor(data []byte, desc protoreflect.Mes
 		}
 	}
 	msg := dynamicpb.NewMessage(desc)
-	if err := unmarshalDirect(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown); err != nil {
+	if err := unmarshalDirect(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.OnSecretField); err != nil {
 		return nil, err
 	}
 	return msg, nil
@@ -62,7 +62,7 @@ func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect
 		}
 	}
 	msg := dynamicpb.NewMessage(desc)
-	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
+	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode, o.OnSecretField)
 	if err != nil {
 		return nil, nil, err
 	}

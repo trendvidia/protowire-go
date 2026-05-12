@@ -47,6 +47,36 @@ type UnmarshalOptions struct {
 	// recheck. Validate explicitly via [ValidateDescriptor] when
 	// pre-screening.
 	SkipValidate bool
+
+	// OnSecretField, if non-nil, is called for each pxf.Secret-typed
+	// field whose value is supplied via scalar shorthand (the common
+	// form: `pw = "x"`, list element `["a", "b"]`, map value
+	// `{ "acme": "k" }`). The hook receives the dotted field path and
+	// the value string. When the hook returns nil, the decoder skips
+	// the standard assignment to the inner `value` field on the Secret
+	// message — the caller is responsible for routing the value to
+	// whatever destination honors its own memory-management contract
+	// (e.g. a memguard Enclave). Presence tracking on `value` is still
+	// updated so Result.IsSet reports the field as set.
+	//
+	// Path scheme:
+	//
+	//   pw = "x"                           → "pw"
+	//   db { password = "x" }              → "db.password"
+	//   backup_keys = ["a", "b"]           → "backup_keys[0]", "backup_keys[1]"
+	//   tenant_keys = { "acme": "k" }      → "tenant_keys[acme]"
+	//
+	// Block-form Secrets — `pw { value = "x", hint = "h" }` — are NOT
+	// routed through this hook in this release; their value still lands
+	// on Secret.Value via the standard string-field path. Callers that
+	// need a closed memory window for block-form secrets should
+	// post-process the message (e.g. chameleon's parse.Move walker) or
+	// normalize their PXF to scalar shorthand. Hint and fingerprint
+	// metadata are always assigned to the proto message; they are
+	// diagnostic, not sensitive.
+	//
+	// Errors from the hook abort the decode and propagate.
+	OnSecretField func(path, value string) error
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -64,5 +94,5 @@ func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result
 			return nil, err
 		}
 	}
-	return unmarshalDirectFull(data, r, o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode)
+	return unmarshalDirectFull(data, r, o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode, o.OnSecretField)
 }
