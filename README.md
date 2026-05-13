@@ -83,9 +83,9 @@ output := pxf.FormatDocument(doc)
 - **Fast path** (`Unmarshal`): fused single-pass lexer+decoder, zero-copy token strings, no AST allocation. Writes directly to the `proto.Message`.
 - **AST path** (`Parse` + `FormatDocument`): recursive-descent parser that attaches comments to AST entries. Use this when you need to round-trip a document with its comments preserved.
 
-### Directives and `@table` (Result accessors)
+### Directives and `@dataset` (Result accessors)
 
-PXF documents can carry [`@<name>` directives, `@entry` bundles, and `@table` rows](https://github.com/trendvidia/protowire#directives) at the document root alongside (or instead of) a message body. `UnmarshalFull` captures all three on `Result`:
+PXF documents can carry [`@<name>` directives, `@entry` bundles, and `@dataset` rows](https://github.com/trendvidia/protowire#directives) at the document root alongside (or instead of) a message body. `UnmarshalFull` captures all three on `Result`:
 
 ```go
 result, err := pxf.UnmarshalFull(data, msg)
@@ -97,8 +97,8 @@ for _, d := range result.Directives() {
     // message, chameleon's @header pattern.
 }
 
-for _, t := range result.Tables() {
-    // t.Type, t.Columns, t.Rows []TableRow.
+for _, t := range result.Datasets() {
+    // t.Type, t.Columns, t.Rows []DatasetRow.
     // Each row.Cells[i] is:
     //   nil       — empty cell (field absent, pxf.default applies)
     //   *NullVal  — explicit null (field cleared per §3.9)
@@ -106,19 +106,19 @@ for _, t := range result.Tables() {
 }
 ```
 
-`Result.Directives()` excludes `@type` and `@table` (those have their own accessors). Order is preserved.
+`Result.Directives()` excludes `@type` and `@dataset` (those have their own accessors). Order is preserved.
 
-### `TableReader`: streaming `@table` consumption
+### `DatasetReader`: streaming `@dataset` consumption
 
 For datasets too large to materialize, read rows from an `io.Reader` with working-set memory bounded by the size of the largest single row — not by the row sequence:
 
 ```go
-tr, err := pxf.NewTableReader(r)
-if err != nil { /* errors.Is(err, pxf.ErrNoTable) for "no @table" */ }
+tr, err := pxf.NewDatasetReader(r)
+if err != nil { /* errors.Is(err, pxf.ErrNoDataset) for "no @dataset" */ }
 
 cols := tr.Columns()
 typ  := tr.Type()
-hdrs := tr.Directives()    // side-channel directives before the @table header
+hdrs := tr.Directives()    // side-channel directives before the @dataset header
 
 for {
     row, err := tr.Next()
@@ -131,9 +131,9 @@ for {
 Multi-table documents chain via `tr.Tail()`, which yields the buffered-but-unconsumed bytes followed by the remaining source:
 
 ```go
-tr1, _ := pxf.NewTableReader(src)
+tr1, _ := pxf.NewDatasetReader(src)
 // ... iterate tr1.Next() to io.EOF ...
-tr2, err := pxf.NewTableReader(tr1.Tail())
+tr2, err := pxf.NewDatasetReader(tr1.Tail())
 ```
 
 Per-row arity and v1 cell-grammar errors (`[...]` / `{...}` cells, dotted columns) surface as the offending row is consumed, not deferred to end-of-input — see the [Streaming consumption](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) note in draft §3.4.4.
@@ -150,7 +150,7 @@ for {
 }
 ```
 
-`BindRow` is the same logic exposed standalone, for callers iterating `Result.Tables()[i].Rows` on the materializing path:
+`BindRow` is the same logic exposed standalone, for callers iterating `Result.Datasets()[i].Rows` on the materializing path:
 
 ```go
 doc, _ := pxf.Parse(data)

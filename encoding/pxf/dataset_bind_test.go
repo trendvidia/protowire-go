@@ -23,11 +23,11 @@ import (
 
 func TestTableReader_Scan_HappyPath(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, int32_field, bool_field, enum_field)
+	in := `@dataset test.v1.AllTypes (string_field, int32_field, bool_field, enum_field)
 ("alpha", 1, true, STATUS_ACTIVE)
 ("beta", 2, false, STATUS_INACTIVE)
 ("gamma", 3, true, STATUS_UNSPECIFIED)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	var got []map[string]any
@@ -57,11 +57,11 @@ func TestTableReader_Scan_HappyPath(t *testing.T) {
 
 func TestTableReader_Scan_EmptyCell_FieldUnset(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, int32_field)
+	in := `@dataset test.v1.AllTypes (string_field, int32_field)
 ("present", 7)
 (, 99)
 ("set", )`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	stringFd := allTypes.Fields().ByName("string_field")
@@ -88,10 +88,10 @@ func TestTableReader_Scan_EmptyCell_FieldUnset(t *testing.T) {
 
 func TestTableReader_Scan_NullOnWrapper(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, nullable_int)
+	in := `@dataset test.v1.AllTypes (string_field, nullable_int)
 ("with-value", 42)
 ("nullified", null)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	nullableIntFd := allTypes.Fields().ByName("nullable_int")
@@ -112,10 +112,10 @@ func TestTableReader_Scan_NullOnWrapper(t *testing.T) {
 
 func TestTableReader_Scan_WellKnownTypes(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, ts_field, dur_field)
+	in := `@dataset test.v1.AllTypes (string_field, ts_field, dur_field)
 ("first",  2026-05-12T10:30:00Z, 1h30m)
 ("second", 2026-05-12T10:30:01Z, 500ms)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	tsFd := allTypes.Fields().ByName("ts_field")
@@ -141,9 +141,9 @@ func TestTableReader_Scan_WellKnownTypes(t *testing.T) {
 
 func TestTableReader_Scan_AllScalarVariants(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, int32_field, int64_field, uint32_field, uint64_field, float_field, double_field, bool_field, bytes_field, enum_field)
+	in := `@dataset test.v1.AllTypes (string_field, int32_field, int64_field, uint32_field, uint64_field, float_field, double_field, bool_field, bytes_field, enum_field)
 ("hi", -42, 1234567890, 100, 999999999, 3.14, 2.718281828, true, b"aGVsbG8=", STATUS_ACTIVE)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 	msg := dynamicpb.NewMessage(allTypes)
 	require.NoError(t, tr.Scan(msg))
@@ -166,9 +166,9 @@ func TestTableReader_Scan_AllScalarVariants(t *testing.T) {
 
 func TestTableReader_Scan_StringWithSpecialChars(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field)
+	in := `@dataset test.v1.AllTypes (string_field)
 ("has \"quotes\" and \\ backslashes and a newline\nat the end")`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 	msg := dynamicpb.NewMessage(allTypes)
 	require.NoError(t, tr.Scan(msg))
@@ -180,7 +180,7 @@ func TestTableReader_Scan_StringWithSpecialChars(t *testing.T) {
 
 func TestTableReader_Scan_EmptyTable_ReturnsEOF(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	tr, err := pxf.NewTableReader(strings.NewReader(`@table test.v1.AllTypes (string_field)`))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(`@dataset test.v1.AllTypes (string_field)`))
 	require.NoError(t, err)
 	msg := dynamicpb.NewMessage(allTypes)
 	err = tr.Scan(msg)
@@ -191,7 +191,7 @@ func TestTableReader_Scan_EmptyTable_ReturnsEOF(t *testing.T) {
 
 func TestTableReader_Scan_StickyEOF(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	tr, err := pxf.NewTableReader(strings.NewReader(`@table test.v1.AllTypes (string_field)
+	tr, err := pxf.NewDatasetReader(strings.NewReader(`@dataset test.v1.AllTypes (string_field)
 ("x")`))
 	require.NoError(t, err)
 	m1 := dynamicpb.NewMessage(allTypes)
@@ -206,17 +206,17 @@ func TestTableReader_Scan_StickyEOF(t *testing.T) {
 
 func TestBindRow_AgainstMaterializingPath(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, int32_field)
+	in := `@dataset test.v1.AllTypes (string_field, int32_field)
 ("alpha", 1)
 ("beta", 2)`
 	doc, err := pxf.Parse([]byte(in))
 	require.NoError(t, err)
-	require.Len(t, doc.Tables, 1)
+	require.Len(t, doc.Datasets, 1)
 
-	tbl := doc.Tables[0]
-	for i, row := range tbl.Rows {
+	ds := doc.Datasets[0]
+	for i, row := range ds.Rows {
 		msg := dynamicpb.NewMessage(allTypes)
-		require.NoErrorf(t, pxf.BindRow(msg, tbl.Columns, row), "row %d", i)
+		require.NoErrorf(t, pxf.BindRow(msg, ds.Columns, row), "row %d", i)
 	}
 }
 
@@ -225,7 +225,7 @@ func TestBindRow_AgainstMaterializingPath(t *testing.T) {
 func TestBindRow_ArityMismatch_Rejects(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	msg := dynamicpb.NewMessage(allTypes)
-	row := pxf.TableRow{Cells: []pxf.Value{&pxf.StringVal{Value: "x"}}}
+	row := pxf.DatasetRow{Cells: []pxf.Value{&pxf.StringVal{Value: "x"}}}
 	err := pxf.BindRow(msg, []string{"a", "b"}, row)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "columns vs")
@@ -233,15 +233,15 @@ func TestBindRow_ArityMismatch_Rejects(t *testing.T) {
 
 // --- BindRow: hand-constructed row with a non-leaf cell value
 // surfaces the "unexpected cell value type" defensive error.
-// The parser rejects list/block cells in @table rows, so this branch
-// is only reachable by callers that construct a TableRow manually
+// The parser rejects list/block cells in @dataset rows, so this branch
+// is only reachable by callers that construct a DatasetRow manually
 // (e.g. wiring BindRow into a non-PXF pipeline). Worth covering for
 // the error message itself.
 
 func TestBindRow_NonLeafCellValue_Rejects(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	msg := dynamicpb.NewMessage(allTypes)
-	row := pxf.TableRow{
+	row := pxf.DatasetRow{
 		Cells: []pxf.Value{
 			&pxf.ListVal{Elements: []pxf.Value{&pxf.StringVal{Value: "x"}}},
 		},
@@ -255,13 +255,13 @@ func TestBindRow_NonLeafCellValue_Rejects(t *testing.T) {
 
 func TestTableReader_Scan_EquivalentToMaterializingBind(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
-	in := `@table test.v1.AllTypes (string_field, int32_field, enum_field, ts_field, nullable_int)
+	in := `@dataset test.v1.AllTypes (string_field, int32_field, enum_field, ts_field, nullable_int)
 ("alpha", 1, STATUS_ACTIVE, 2026-05-12T10:00:00Z, 42)
 ("beta",  2, STATUS_INACTIVE, 2026-05-12T10:00:01Z, null)
 ( ,       3, STATUS_ACTIVE, 2026-05-12T10:00:02Z, )`
 
 	// Streaming: Scan into N messages.
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 	var stream []*dynamicpb.Message
 	for {
@@ -277,12 +277,12 @@ func TestTableReader_Scan_EquivalentToMaterializingBind(t *testing.T) {
 	// Materializing: Parse the table, BindRow each into N messages.
 	doc, err := pxf.Parse([]byte(in))
 	require.NoError(t, err)
-	require.Len(t, doc.Tables, 1)
-	tbl := doc.Tables[0]
+	require.Len(t, doc.Datasets, 1)
+	ds := doc.Datasets[0]
 	var mat []*dynamicpb.Message
-	for _, row := range tbl.Rows {
+	for _, row := range ds.Rows {
 		m := dynamicpb.NewMessage(allTypes)
-		require.NoError(t, pxf.BindRow(m, tbl.Columns, row))
+		require.NoError(t, pxf.BindRow(m, ds.Columns, row))
 		mat = append(mat, m)
 	}
 

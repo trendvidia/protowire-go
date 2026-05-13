@@ -3,7 +3,10 @@
 
 package pxf
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Comment represents a comment in source text.
 type Comment struct {
@@ -13,43 +16,108 @@ type Comment struct {
 
 // Document is the root AST node of a PXF file.
 type Document struct {
-	TypeURL         string           // from @type directive, may be empty
-	Directives      []Directive      // @<name> *(prefix) [{ ... }] entries before the body, in source order; excludes @type and @table
-	Tables          []TableDirective // @table directives in source order; per draft §3.4.4 a document with any @table MUST NOT have @type or body entries
-	BodyOffset      int              // byte offset in the input where the schema-typed body begins (after all leading directives)
+	TypeURL         string             // from @type directive, may be empty
+	Directives      []Directive        // @<name> *(prefix) [{ ... }] entries before the body, in source order; excludes spec-defined directives
+	Datasets        []DatasetDirective // @dataset directives in source order; per draft §3.4.4 a document with any @dataset MUST NOT have @type or body entries
+	Protos          []ProtoDirective   // @proto directives in source order (draft §3.4.5)
+	BodyOffset      int                // byte offset in the input where the schema-typed body begins (after all leading directives)
 	Entries         []Entry
 	LeadingComments []Comment // comments before the first entry (or after @type)
 }
 
-// TableDirective is a `@table <type> ( col1, col2, ... ) row*` entry
-// at document root (draft §3.4.4). It carries many instances of one
-// message type in a single document — the protowire-native CSV.
+// DatasetDirective is a `@dataset <type> ( col1, col2, ... ) row*`
+// entry at document root (draft §3.4.4). It carries many instances of
+// one message type in a single document — the protowire-native CSV.
 //
 // Cells are scalar-shaped in v1: list ('[ ... ]') and block ('{ ... }')
 // values are not permitted in cells. An empty cell (no value between
 // commas) denotes an absent field; a `null` literal denotes a present-
 // but-null field; any other value denotes a present field with that
-// value. See [TableRow] for cell representation.
+// value. See [DatasetRow] for cell representation.
 //
-// A document with any TableDirective MUST NOT have a @type directive
-// or any top-level field entries: the @table header IS the document's
+// A document with any DatasetDirective MUST NOT have a @type directive
+// or any top-level field entries: the @dataset header IS the document's
 // type declaration. Decoders enforce this in [Parse].
-type TableDirective struct {
+//
+// Type MAY be empty when an anonymous @proto directive (draft §3.4.5)
+// precedes the @dataset in document order; the anonymous schema is
+// consumed as the row message type.
+type DatasetDirective struct {
 	Pos             Position
-	Type            string     // row message type, e.g. "trades.v1.Trade"
-	Columns         []string   // top-level field names on Type; len(Columns) >= 1
-	Rows            []TableRow // zero or more rows
+	Type            string       // row message type, e.g. "trades.v1.Trade"; empty if bound to a preceding anonymous @proto
+	Columns         []string     // top-level field names on Type; len(Columns) >= 1
+	Rows            []DatasetRow // zero or more rows
 	LeadingComments []Comment
 }
 
-// TableRow is one parenthesized cell tuple in a @table directive.
-// Cells is the same length as the containing TableDirective.Columns.
+// DatasetRow is one parenthesized cell tuple in a @dataset directive.
+// Cells is the same length as the containing DatasetDirective.Columns.
 // A nil Value in Cells denotes an absent field (the "empty cell"
 // between two commas); a *NullVal denotes a present-but-null field;
 // any other Value denotes a present field with that value.
-type TableRow struct {
+type DatasetRow struct {
 	Pos   Position
-	Cells []Value // nil entries denote absent fields; len == len(table.Columns)
+	Cells []Value // nil entries denote absent fields; len == len(dataset.Columns)
+}
+
+// ProtoShape distinguishes the four body shapes of a @proto directive
+// (draft §3.4.5).
+type ProtoShape int
+
+const (
+	// ProtoAnonymous is `@proto { <message-body> }` — defines an
+	// unnamed message used by the next typed directive in document
+	// order that does not carry an explicit type name.
+	ProtoAnonymous ProtoShape = iota
+	// ProtoNamed is `@proto <dotted-name> { <message-body> }` — sugar
+	// for a single named message; TypeName carries the dotted name.
+	ProtoNamed
+	// ProtoSource is `@proto """<proto-source>"""` — a complete
+	// Protocol Buffers source file.
+	ProtoSource
+	// ProtoDescriptor is `@proto b"<base64-FileDescriptorSet>"` —
+	// a base64-encoded google.protobuf.FileDescriptorSet.
+	ProtoDescriptor
+)
+
+func (s ProtoShape) String() string {
+	switch s {
+	case ProtoAnonymous:
+		return "anonymous"
+	case ProtoNamed:
+		return "named"
+	case ProtoSource:
+		return "source"
+	case ProtoDescriptor:
+		return "descriptor"
+	default:
+		return fmt.Sprintf("ProtoShape(%d)", int(s))
+	}
+}
+
+// ProtoDirective is a `@proto <body>` entry at document root
+// (draft §3.4.5). It carries an embedded protobuf schema, making the
+// PXF document self-describing.
+//
+// The Shape field distinguishes the four lexically-determined body
+// forms (anonymous, named, source, descriptor). Body holds the raw
+// bytes of the body, interpreted per Shape:
+//
+//   - ProtoAnonymous, ProtoNamed: the bytes between the opening `{`
+//     and matching `}` (both exclusive). The bytes are protobuf
+//     message-body source (field declarations and nested types) and
+//     must be compiled by a downstream consumer.
+//   - ProtoSource: the contents of the triple-quoted string (with
+//     leading-LF stripping and common-prefix dedent already applied).
+//     The bytes are a complete .proto source file.
+//   - ProtoDescriptor: the base64-decoded bytes of the bytes literal.
+//     The bytes are a serialised google.protobuf.FileDescriptorSet.
+type ProtoDirective struct {
+	Pos             Position
+	Shape           ProtoShape
+	TypeName        string // dotted message type name; non-empty only when Shape == ProtoNamed
+	Body            []byte
+	LeadingComments []Comment
 }
 
 // Directive is a top-of-document `@<name> *(<prefix-id>) [{ ... }]`

@@ -282,9 +282,15 @@ func (l *lexer) lexBytes(pos Position) Token {
 		if ch == '"' {
 			raw := string(l.input[start:l.pos])
 			l.advance() // closing "
-			if _, err := base64.StdEncoding.DecodeString(raw); err != nil {
-				if _, err2 := base64.RawStdEncoding.DecodeString(raw); err2 != nil {
-					return Token{Kind: ILLEGAL, Value: "invalid base64 in bytes literal", Pos: pos}
+			// Accept both standard and URL-safe base64, with or without
+			// padding, per RFC 4648 §5 (referenced by draft §3.7).
+			if _, e1 := base64.StdEncoding.DecodeString(raw); e1 != nil {
+				if _, e2 := base64.RawStdEncoding.DecodeString(raw); e2 != nil {
+					if _, e3 := base64.URLEncoding.DecodeString(raw); e3 != nil {
+						if _, e4 := base64.RawURLEncoding.DecodeString(raw); e4 != nil {
+							return Token{Kind: ILLEGAL, Value: "invalid base64 in bytes literal", Pos: pos}
+						}
+					}
 				}
 			}
 			return Token{Kind: BYTES, Value: raw, Pos: pos}
@@ -310,8 +316,11 @@ func (l *lexer) lexDirective(pos Position) Token {
 	if name == "type" {
 		return Token{Kind: AT_TYPE, Value: "@type", Pos: pos}
 	}
-	if name == "table" {
-		return Token{Kind: AT_TABLE, Value: "@table", Pos: pos}
+	if name == "dataset" {
+		return Token{Kind: AT_DATASET, Value: "@dataset", Pos: pos}
+	}
+	if name == "proto" {
+		return Token{Kind: AT_PROTO, Value: "@proto", Pos: pos}
 	}
 	return Token{Kind: AT_DIRECTIVE, Value: name, Pos: pos}
 }

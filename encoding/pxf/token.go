@@ -28,15 +28,16 @@ const (
 	RBRACE   // }
 	LBRACKET // [
 	RBRACKET // ]
-	LPAREN   // (   used by @table column list and row tuples
+	LPAREN   // (   used by @dataset column list and row tuples
 	RPAREN   // )
 	EQUALS   // =
 	COLON    // :
 	COMMA    // ,
 
 	AT_TYPE      // @type — body's message type, no inline block
-	AT_TABLE     // @table — bulk-row directive (draft §3.4.4)
-	AT_DIRECTIVE // @<name> for name != "type"/"table" — Value holds the name (without @)
+	AT_DATASET   // @dataset — row-oriented bulk-data directive (draft §3.4.4)
+	AT_PROTO     // @proto — embedded protobuf schema (draft §3.4.5)
+	AT_DIRECTIVE // @<name> for any non-reserved name — Value holds the name (without @)
 )
 
 var tokenNames = map[TokenKind]string{
@@ -45,7 +46,7 @@ var tokenNames = map[TokenKind]string{
 	BOOL: "bool", NULL: "null", BYTES: "bytes", TIMESTAMP: "timestamp", DURATION: "duration",
 	LBRACE: "{", RBRACE: "}", LBRACKET: "[", RBRACKET: "]", LPAREN: "(", RPAREN: ")",
 	EQUALS: "=", COLON: ":", COMMA: ",",
-	AT_TYPE: "@type", AT_TABLE: "@table", AT_DIRECTIVE: "@directive",
+	AT_TYPE: "@type", AT_DATASET: "@dataset", AT_PROTO: "@proto", AT_DIRECTIVE: "@directive",
 }
 
 func (k TokenKind) String() string {

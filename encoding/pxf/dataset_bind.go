@@ -3,10 +3,10 @@
 
 package pxf
 
-// Per-row proto binding for @table rows. Sits atop the streaming
-// TableReader (TableReader.Scan) and is also exported as a standalone
+// Per-row proto binding for @dataset rows. Sits atop the streaming
+// DatasetReader (DatasetReader.Scan) and is also exported as a standalone
 // helper (BindRow) for callers that iterate the materializing path's
-// Result.Tables()[i].Rows.
+// Result.Datasets()[i].Rows.
 //
 // Implementation strategy: convert each non-nil cell back to its PXF
 // text representation, concatenate as a `<column> = <value>\n` body,
@@ -30,11 +30,11 @@ import (
 
 // Scan reads the next row and binds its cells to the matching fields
 // of msg by column name. Returns [io.EOF] when the row sequence is
-// exhausted; returns the same sticky error as [TableReader.Next] on
+// exhausted; returns the same sticky error as [DatasetReader.Next] on
 // any read or parse failure.
 //
 // msg's descriptor MUST resolve the field names this reader's
-// Columns() list refers to. Type compatibility against the @table
+// Columns() list refers to. Type compatibility against the @dataset
 // header's declared type is the caller's responsibility — a row
 // whose columns don't match msg's fields surfaces as a per-field
 // "field not found" or type-mismatch error from the underlying
@@ -48,7 +48,7 @@ import (
 //   - *NullVal — field cleared, per §3.9 (clears optional /
 //     wrapper / oneof; rejects on non-nullable scalars).
 //   - any other Value — field set to that value.
-func (tr *TableReader) Scan(msg proto.Message) error {
+func (tr *DatasetReader) Scan(msg proto.Message) error {
 	row, err := tr.Next()
 	if err != nil {
 		return err
@@ -61,9 +61,9 @@ func (tr *TableReader) Scan(msg proto.Message) error {
 // a programmer error and panics.
 //
 // Exported so callers iterating the materializing path's
-// Result.Tables()[i].Rows can reuse the same logic. Same cell-state
-// semantics as [TableReader.Scan].
-func BindRow(msg proto.Message, columns []string, row TableRow) error {
+// Result.Datasets()[i].Rows can reuse the same logic. Same cell-state
+// semantics as [DatasetReader.Scan].
+func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	if len(columns) != len(row.Cells) {
 		return fmt.Errorf("pxf: BindRow: %d columns vs %d cells", len(columns), len(row.Cells))
 	}
@@ -73,7 +73,7 @@ func BindRow(msg proto.Message, columns []string, row TableRow) error {
 	}
 	// Run the synthetic body through the standard unmarshal pipeline.
 	// SkipValidate avoids re-running the reserved-name check per row
-	// (TableReader's NewTableReader / the materializing UnmarshalFull
+	// (DatasetReader's NewDatasetReader / the materializing UnmarshalFull
 	// already validated the descriptor once at bind time).
 	return UnmarshalOptions{SkipValidate: true}.Unmarshal(body, msg)
 }
@@ -81,7 +81,7 @@ func BindRow(msg proto.Message, columns []string, row TableRow) error {
 // rowToPXFBody renders a row as a PXF body: one `<column> = <value>`
 // entry per non-nil cell, in column order. Empty cells produce no
 // entry (the field stays absent from the decoder's perspective).
-func rowToPXFBody(columns []string, row TableRow) ([]byte, error) {
+func rowToPXFBody(columns []string, row DatasetRow) ([]byte, error) {
 	var buf bytes.Buffer
 	for i, cell := range row.Cells {
 		if cell == nil {
@@ -97,10 +97,10 @@ func rowToPXFBody(columns []string, row TableRow) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// writeCellValue formats a single cell value as PXF text. v1 @table
+// writeCellValue formats a single cell value as PXF text. v1 @dataset
 // cells are scalar-shaped (no list, no block), so we only handle the
 // leaf-value variants — list and block AST nodes are unreachable here
-// because parseTableRow / consumeRowCell rejects them before the
+// because parseDatasetRow / consumeRowCell rejects them before the
 // streaming reader hands them to BindRow.
 func writeCellValue(buf *bytes.Buffer, v Value) error {
 	switch v := v.(type) {
@@ -129,7 +129,7 @@ func writeCellValue(buf *bytes.Buffer, v Value) error {
 	case *DurationVal:
 		buf.WriteString(v.Raw)
 	default:
-		return fmt.Errorf("pxf: BindRow: unexpected cell value type %T (v1 @table cells are scalar-shaped)", v)
+		return fmt.Errorf("pxf: BindRow: unexpected cell value type %T (v1 @dataset cells are scalar-shaped)", v)
 	}
 	return nil
 }

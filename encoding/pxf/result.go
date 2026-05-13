@@ -11,29 +11,38 @@ type Result struct {
 	nullFields    map[string]struct{}
 	presentFields map[string]struct{}
 	directives    []Directive
-	tables        []TableDirective
+	datasets      []DatasetDirective
+	protos        []ProtoDirective
 }
 
 // Directives returns the `@<name> *(prefix) [{ ... }]` blocks the
 // decoder saw at the document root, in source order. Excludes the
-// `@type` and `@table` directives (which have their own accessors).
-// Callers typically iterate and call UnmarshalFull on each
-// Directive.Body against their chosen message.
+// spec-defined directives (`@type`, `@dataset`, `@proto`, `@entry`),
+// which have their own accessors. Callers typically iterate and call
+// UnmarshalFull on each Directive.Body against their chosen message.
 func (r *Result) Directives() []Directive {
 	return r.directives
 }
 
-// Tables returns the `@table` directives the decoder saw at the
-// document root, in source order. Each TableDirective carries a row
+// Datasets returns the `@dataset` directives the decoder saw at the
+// document root, in source order. Each DatasetDirective carries a row
 // message type, a column list, and a sequence of row tuples. See
 // draft §3.4.4 for cell-state semantics.
 //
-// A document that uses `@table` will have an empty body — the rows
+// A document that uses `@dataset` will have an empty body — the rows
 // are the document's payload, not the bound message. Callers walk
-// each TableDirective.Rows and bind each row's cells to a fresh
-// instance of TableDirective.Type via the consumer-supplied schema.
-func (r *Result) Tables() []TableDirective {
-	return r.tables
+// each DatasetDirective.Rows and bind each row's cells to a fresh
+// instance of DatasetDirective.Type via the consumer-supplied schema.
+func (r *Result) Datasets() []DatasetDirective {
+	return r.datasets
+}
+
+// Protos returns the `@proto` directives the decoder saw at the
+// document root, in source order. Each ProtoDirective carries one of
+// four body shapes (anonymous, named, source, descriptor) per draft
+// §3.4.5; callers inspect Shape and decode Body accordingly.
+func (r *Result) Protos() []ProtoDirective {
+	return r.protos
 }
 
 func newResult() *Result {
