@@ -20,18 +20,18 @@ import (
 // --- Happy path ---
 
 func TestTableReader_BasicStreaming(t *testing.T) {
-	in := `@table trades.v1.Trade (symbol, price, qty)
+	in := `@dataset trades.v1.Trade (symbol, price, qty)
 ("AAPL", 192.34, 100)
 ("MSFT", 410.10, 50)
 ("GOOG", 142.00, 25)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	assert.Equal(t, "trades.v1.Trade", tr.Type())
 	assert.Equal(t, []string{"symbol", "price", "qty"}, tr.Columns())
 	assert.Empty(t, tr.Directives())
 
-	var rows []pxf.TableRow
+	var rows []pxf.DatasetRow
 	for {
 		row, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -50,8 +50,8 @@ func TestTableReader_BasicStreaming(t *testing.T) {
 }
 
 func TestTableReader_EmptyTable(t *testing.T) {
-	in := `@table trades.v1.Trade (symbol, price)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	in := `@dataset trades.v1.Trade (symbol, price)`
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	_, err = tr.Next()
@@ -65,11 +65,11 @@ func TestTableReader_EmptyTable(t *testing.T) {
 // --- Three cell states ---
 
 func TestTableReader_CellStates(t *testing.T) {
-	in := `@table t.T (a, b, c)
+	in := `@dataset t.T (a, b, c)
 ("x", 1, true)
 (null, , 3)
 (, "y", null)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	row1, err := tr.Next()
@@ -108,10 +108,10 @@ func TestTableReader_CellStates(t *testing.T) {
 
 func TestTableReader_SideChannelDirectivesBeforeHeader(t *testing.T) {
 	in := `@header meta.v1.H { generated_at = 2026-05-11T10:00:00Z }
-@table trades.v1.Trade (symbol)
+@dataset trades.v1.Trade (symbol)
 ("AAPL")
 ("MSFT")`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	require.Len(t, tr.Directives(), 1)
@@ -134,33 +134,33 @@ func TestTableReader_SideChannelDirectivesBeforeHeader(t *testing.T) {
 
 func TestTableReader_RejectsAtTypeWithAtTable(t *testing.T) {
 	in := `@type some.Other
-@table trades.v1.Trade (symbol)
+@dataset trades.v1.Trade (symbol)
 ("AAPL")`
-	_, err := pxf.NewTableReader(strings.NewReader(in))
+	_, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "@type")
 }
 
-// --- Missing @table ---
+// --- Missing @dataset ---
 
 func TestTableReader_NoTableInStream(t *testing.T) {
 	in := `string_field = "x"`
-	_, err := pxf.NewTableReader(strings.NewReader(in))
-	require.ErrorIs(t, err, pxf.ErrNoTable)
+	_, err := pxf.NewDatasetReader(strings.NewReader(in))
+	require.ErrorIs(t, err, pxf.ErrNoDataset)
 }
 
 func TestTableReader_EmptyInput(t *testing.T) {
-	_, err := pxf.NewTableReader(strings.NewReader(""))
-	require.ErrorIs(t, err, pxf.ErrNoTable)
+	_, err := pxf.NewDatasetReader(strings.NewReader(""))
+	require.ErrorIs(t, err, pxf.ErrNoDataset)
 }
 
 // --- Error mid-stream ---
 
 func TestTableReader_ErrorsAreSticky(t *testing.T) {
-	in := `@table T (a, b, c)
+	in := `@dataset T (a, b, c)
 ("x", 1, 2)
 ("y", 1)` // arity mismatch
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	_, err = tr.Next()
@@ -176,10 +176,10 @@ func TestTableReader_ErrorsAreSticky(t *testing.T) {
 }
 
 func TestTableReader_RejectsListCellMidStream(t *testing.T) {
-	in := `@table T (a, b)
+	in := `@dataset T (a, b)
 ("ok", 1)
 ("bad", [1, 2])`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	_, err = tr.Next()
@@ -191,10 +191,10 @@ func TestTableReader_RejectsListCellMidStream(t *testing.T) {
 }
 
 func TestTableReader_RejectsBlockCellMidStream(t *testing.T) {
-	in := `@table T (a, b)
+	in := `@dataset T (a, b)
 ("ok", 1)
 ("bad", { x = 1 })`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	_, err = tr.Next()
@@ -208,10 +208,10 @@ func TestTableReader_RejectsBlockCellMidStream(t *testing.T) {
 // --- Strings / comments inside cells don't trip the row-boundary scanner ---
 
 func TestTableReader_StringWithParens(t *testing.T) {
-	in := `@table T (note, n)
+	in := `@dataset T (note, n)
 ("contains (paren) inside", 1)
 ("normal", 2)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	r1, err := tr.Next()
@@ -226,10 +226,10 @@ func TestTableReader_StringWithParens(t *testing.T) {
 }
 
 func TestTableReader_TripleQuotedStringWithParens(t *testing.T) {
-	in := `@table T (note)
+	in := `@dataset T (note)
 ("""multi
 line ) with paren""")`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
 	row, err := tr.Next()
@@ -241,9 +241,9 @@ line ) with paren""")`
 func TestTableReader_BytesLiteralWithParens(t *testing.T) {
 	// `b"..."` content is base64 — no parens possible in valid input,
 	// but the byte scanner mustn't fall over on `b"` opening.
-	in := `@table T (blob, n)
+	in := `@dataset T (blob, n)
 (b"aGVsbG8=", 1)`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 	row, err := tr.Next()
 	require.NoError(t, err)
@@ -253,13 +253,13 @@ func TestTableReader_BytesLiteralWithParens(t *testing.T) {
 }
 
 func TestTableReader_CommentBetweenRows(t *testing.T) {
-	in := `@table T (a)
+	in := `@dataset T (a)
 ("x")
 # this is a comment, with ( a paren ) inside
 ("y")
 // another comment ) here
 ("z")`
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 	count := 0
 	for {
@@ -276,7 +276,7 @@ func TestTableReader_CommentBetweenRows(t *testing.T) {
 // --- Whitespace / blank lines between rows ---
 
 func TestTableReader_BlankLinesBetweenRows(t *testing.T) {
-	in := `@table T (a)
+	in := `@dataset T (a)
 
 
 ("x")
@@ -285,7 +285,7 @@ func TestTableReader_BlankLinesBetweenRows(t *testing.T) {
 
 ("y")
 `
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 	for i := 0; i < 2; i++ {
 		_, err := tr.Next()
@@ -314,11 +314,11 @@ func (cr *chunkedReader) Read(p []byte) (int, error) {
 }
 
 func TestTableReader_HandlesByteAtATimeReader(t *testing.T) {
-	in := `@table T (a, b, c)
+	in := `@dataset T (a, b, c)
 ("hello", 42, true)
 ("world", 99, false)
 ("end", 0, null)`
-	tr, err := pxf.NewTableReader(&chunkedReader{data: []byte(in)})
+	tr, err := pxf.NewDatasetReader(&chunkedReader{data: []byte(in)})
 	require.NoError(t, err)
 
 	count := 0
@@ -336,14 +336,14 @@ func TestTableReader_HandlesByteAtATimeReader(t *testing.T) {
 // --- Multi-table documents: consecutive readers ---
 
 func TestTableReader_MultipleTablesViaReuse(t *testing.T) {
-	in := `@table events.v1.Created (id, ts)
+	in := `@dataset events.v1.Created (id, ts)
 ("e-1", 2026-05-11T10:00:00Z)
 ("e-2", 2026-05-11T10:00:01Z)
-@table events.v1.Deleted (id, ts)
+@dataset events.v1.Deleted (id, ts)
 ("e-9", 2026-05-11T10:00:02Z)`
 	br := strings.NewReader(in)
 
-	tr1, err := pxf.NewTableReader(br)
+	tr1, err := pxf.NewDatasetReader(br)
 	require.NoError(t, err)
 	assert.Equal(t, "events.v1.Created", tr1.Type())
 	c1 := 0
@@ -359,7 +359,7 @@ func TestTableReader_MultipleTablesViaReuse(t *testing.T) {
 
 	// Multi-table: chain via Tail() so the second reader picks up
 	// the bytes the first reader buffered but didn't consume.
-	tr2, err := pxf.NewTableReader(tr1.Tail())
+	tr2, err := pxf.NewDatasetReader(tr1.Tail())
 	require.NoError(t, err)
 	assert.Equal(t, "events.v1.Deleted", tr2.Type())
 	c2 := 0
@@ -382,7 +382,7 @@ func TestTableReader_MultipleTablesViaReuse(t *testing.T) {
 // that differs), but cell *Val types and values must match exactly.
 
 func TestTableReader_EquivalentToMaterializingPath(t *testing.T) {
-	in := `@table t.T (a, b, c)
+	in := `@dataset t.T (a, b, c)
 ("alpha", 1, true)
 ("beta", null, false)
 (, , )
@@ -391,13 +391,13 @@ func TestTableReader_EquivalentToMaterializingPath(t *testing.T) {
 	// Materializing path.
 	doc, err := pxf.Parse([]byte(in))
 	require.NoError(t, err)
-	require.Len(t, doc.Tables, 1)
-	mat := doc.Tables[0].Rows
+	require.Len(t, doc.Datasets, 1)
+	mat := doc.Datasets[0].Rows
 
 	// Streaming path.
-	tr, err := pxf.NewTableReader(strings.NewReader(in))
+	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
-	var stream []pxf.TableRow
+	var stream []pxf.DatasetRow
 	for {
 		row, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -423,8 +423,8 @@ func TestTableReader_EquivalentToMaterializingPath(t *testing.T) {
 func TestTableReader_RejectsOversizedHeader(t *testing.T) {
 	// Construct a header with an absurdly long type name (> 64 KiB).
 	long := strings.Repeat("a", 70*1024)
-	in := "@table " + long + ".T (col)\n(1)"
-	_, err := pxf.NewTableReader(strings.NewReader(in))
+	in := "@dataset " + long + ".T (col)\n(1)"
+	_, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "header exceeds")
 }
@@ -433,10 +433,10 @@ func TestTableReader_RejectsOversizedHeader(t *testing.T) {
 
 func TestTableReader_BytesBufferSource(t *testing.T) {
 	var buf bytes.Buffer
-	buf.WriteString(`@table T (a)
+	buf.WriteString(`@dataset T (a)
 ("x")
 ("y")`)
-	tr, err := pxf.NewTableReader(&buf)
+	tr, err := pxf.NewDatasetReader(&buf)
 	require.NoError(t, err)
 	count := 0
 	for {

@@ -11,6 +11,42 @@ format changes.
 
 ## [Unreleased]
 
+### v1.0 spec changes
+
+Three one-time spec changes from the protowire v1.0 freeze line.
+**Breaking** — there is no alias period; v1.0 is itself the major bump.
+
+- `@table` directive renamed to `@dataset` (draft §3.4.4). Public API
+  surface follows: `TableDirective` → `DatasetDirective`, `TableRow`
+  → `DatasetRow`, `TableReader` → `DatasetReader`, `NewTableReader`
+  → `NewDatasetReader`, `ErrNoTable` → `ErrNoDataset`, `Document.Tables`
+  → `Document.Datasets`, `Result.Tables()` → `Result.Datasets()`. Source
+  files `table_*.go` renamed to `dataset_*.go`. Decoder semantics
+  unchanged.
+
+- `@proto` directive added (draft §3.4.5). New `ProtoDirective` AST node
+  with `Shape` (one of `ProtoAnonymous`, `ProtoNamed`, `ProtoSource`,
+  `ProtoDescriptor`), `TypeName`, and `Body`. Four body shapes
+  distinguished lexically:
+  - `@proto { ... }` (anonymous; body is protobuf message-body source)
+  - `@proto pkg.Type { ... }` (named)
+  - `@proto """..."""` (source-form .proto file)
+  - `@proto b"..."` (base64-encoded `FileDescriptorSet`)
+  Exposed at `Document.Protos` and `Result.Protos()`. The descriptor
+  form is the MUST-support shape; the other three are QoI in this port
+  (all four are supported here).
+
+- Reserved directive names expanded from 5 to 13 (draft §3.4.6). v1
+  decoders now reject `@table`, `@datasource`, `@view`, `@procedure`,
+  `@function`, and `@permissions` as spec-reserved (future-allocated)
+  directive names. The existing schema-level reservation (`null` /
+  `true` / `false` for field/oneof/enum names; draft §3.13) is
+  unchanged.
+
+`@dataset`'s row message type is now optional in the AST. When
+omitted, the directive consumes the typed binding of a preceding
+anonymous `@proto` per draft §3.4.4 Anonymous binding.
+
 ## [0.77.0] — 2026-05-12
 
 Block-form Secret decode hook. Closes the residual plaintext-in-heap

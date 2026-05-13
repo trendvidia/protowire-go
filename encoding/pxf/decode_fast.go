@@ -151,22 +151,22 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeRes
 	return d.result, nil
 }
 
-// consumeDirectives drains any leading `@type` / `@<name>` / `@table`
-// directives, recording @<name> and @table entries on result (if
+// consumeDirectives drains any leading `@type` / `@<name>` / `@dataset`
+// directives, recording @<name> and @dataset entries on result (if
 // non-nil). Returns when the current token is the first body token.
 //
-// Enforces the @table standalone constraint (draft §3.4.4): a document
-// containing any @table directive MUST NOT also carry @type or any
+// Enforces the @dataset standalone constraint (draft §3.4.4): a document
+// containing any @dataset directive MUST NOT also carry @type or any
 // top-level field entries.
 func (d *directDecoder) consumeDirectives(result *Result) error {
 	sawType := false
-	var firstTablePos Position
-	hasTable := false
+	var firstDatasetPos Position
+	hasDataset := false
 	for {
 		switch d.current.Kind {
 		case AT_TYPE:
-			if hasTable {
-				return errorf(d.current.Pos, "@table directive cannot coexist with @type (draft §3.4.4)")
+			if hasDataset {
+				return errorf(d.current.Pos, "@dataset directive cannot coexist with @type (draft §3.4.4)")
 			}
 			sawType = true
 			d.advance()
@@ -182,60 +182,144 @@ func (d *directDecoder) consumeDirectives(result *Result) error {
 			if result != nil {
 				result.directives = append(result.directives, dir)
 			}
-		case AT_TABLE:
+		case AT_DATASET:
 			if sawType {
-				return errorf(d.current.Pos, "@table directive cannot coexist with @type (draft §3.4.4)")
+				return errorf(d.current.Pos, "@dataset directive cannot coexist with @type (draft §3.4.4)")
 			}
-			tbl, err := d.consumeTableDirective()
+			ds, err := d.consumeDatasetDirective()
 			if err != nil {
 				return err
 			}
-			if !hasTable {
-				firstTablePos = tbl.Pos
-				hasTable = true
+			if !hasDataset {
+				firstDatasetPos = ds.Pos
+				hasDataset = true
 			}
 			if result != nil {
-				result.tables = append(result.tables, tbl)
+				result.datasets = append(result.datasets, ds)
+			}
+		case AT_PROTO:
+			pd, err := d.consumeProtoDirective()
+			if err != nil {
+				return err
+			}
+			if result != nil {
+				result.protos = append(result.protos, pd)
 			}
 		default:
-			if hasTable && d.current.Kind != EOF {
-				return errorf(firstTablePos,
-					"@table directive cannot coexist with top-level field entries (draft §3.4.4)")
+			if hasDataset && d.current.Kind != EOF {
+				return errorf(firstDatasetPos,
+					"@dataset directive cannot coexist with top-level field entries (draft §3.4.4)")
 			}
 			return nil
 		}
 	}
 }
 
-// consumeTableDirective mirrors parser.parseTableDirective for the
-// direct-decode path. AT_TABLE is current on entry.
-func (d *directDecoder) consumeTableDirective() (TableDirective, error) {
-	tbl := TableDirective{Pos: d.current.Pos}
-	d.advance() // consume @table
+// consumeProtoDirective mirrors parser.parseProtoDirective for the
+// direct-decode path. AT_PROTO is current on entry. Handles all four
+// body shapes (anonymous, named, source, descriptor) per draft §3.4.5.
+func (d *directDecoder) consumeProtoDirective() (ProtoDirective, error) {
+	pd := ProtoDirective{Pos: d.current.Pos}
+	d.advance() // consume @proto
 
-	if d.current.Kind != IDENT {
-		return tbl, errorf(d.current.Pos, "expected row message type after @table, got %s", d.current.Kind)
+	switch d.current.Kind {
+	case LBRACE:
+		pd.Shape = ProtoAnonymous
+		body, err := d.captureBraceBody("@proto (anonymous form)")
+		if err != nil {
+			return pd, err
+		}
+		pd.Body = body
+		return pd, nil
+
+	case IDENT:
+		pd.Shape = ProtoNamed
+		pd.TypeName = d.current.Value
+		d.advance()
+		if d.current.Kind != LBRACE {
+			return pd, errorf(d.current.Pos, "expected '{' after @proto %s, got %s", pd.TypeName, d.current.Kind)
+		}
+		body, err := d.captureBraceBody("@proto " + pd.TypeName)
+		if err != nil {
+			return pd, err
+		}
+		pd.Body = body
+		return pd, nil
+
+	case STRING:
+		pd.Shape = ProtoSource
+		pd.Body = []byte(d.current.Value)
+		d.advance()
+		return pd, nil
+
+	case BYTES:
+		pd.Shape = ProtoDescriptor
+		raw := d.current.Value
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			decoded, err = base64.URLEncoding.DecodeString(raw)
+			if err != nil {
+				return pd, errorf(d.current.Pos, "@proto descriptor body: invalid base64: %v", err)
+			}
+		}
+		pd.Body = decoded
+		d.advance()
+		return pd, nil
+
+	default:
+		return pd, errorf(d.current.Pos,
+			"expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto, got %s",
+			d.current.Kind)
 	}
-	tbl.Type = d.current.Value
+}
+
+// captureBraceBody slices the raw bytes between `{` and the matching
+// `}` for the direct-decode path; mirrors parser.captureBraceBody.
+// LBRACE is current on entry.
+func (d *directDecoder) captureBraceBody(label string) ([]byte, error) {
+	open := d.current.Pos.Offset
+	close := findMatchingBrace(d.lex.input, open)
+	if close < 0 {
+		return nil, errorf(d.current.Pos, "%s: unmatched '{'", label)
+	}
+	body := d.lex.input[open+1 : close]
+	for d.lex.pos <= close {
+		d.lex.advance()
+	}
 	d.advance()
+	return body, nil
+}
+
+// consumeDatasetDirective mirrors parser.parseDatasetDirective for the
+// direct-decode path. AT_DATASET is current on entry.
+func (d *directDecoder) consumeDatasetDirective() (DatasetDirective, error) {
+	ds := DatasetDirective{Pos: d.current.Pos}
+	d.advance() // consume @dataset
+
+	// Optional row message type; may be omitted when an anonymous
+	// @proto precedes the @dataset in document order (draft §3.4.4).
+	if d.current.Kind == IDENT {
+		ds.Type = d.current.Value
+		d.advance()
+	}
 
 	if d.current.Kind != LPAREN {
-		return tbl, errorf(d.current.Pos, "expected '(' to start @table column list, got %s", d.current.Kind)
+		return ds, errorf(d.current.Pos, "expected '(' to start @dataset column list, got %s", d.current.Kind)
 	}
 	d.advance()
 
 	if d.current.Kind != IDENT {
-		return tbl, errorf(d.current.Pos, "@table column list must contain at least one field name, got %s", d.current.Kind)
+		return ds, errorf(d.current.Pos, "@dataset column list must contain at least one field name, got %s", d.current.Kind)
 	}
 	for {
 		if d.current.Kind != IDENT {
-			return tbl, errorf(d.current.Pos, "expected column field name, got %s", d.current.Kind)
+			return ds, errorf(d.current.Pos, "expected column field name, got %s", d.current.Kind)
 		}
 		colName := d.current.Value
 		if containsDot(colName) {
-			return tbl, errorf(d.current.Pos, "@table column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
+			return ds, errorf(d.current.Pos, "@dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
 		}
-		tbl.Columns = append(tbl.Columns, colName)
+		ds.Columns = append(ds.Columns, colName)
 		d.advance()
 		if d.current.Kind == COMMA {
 			d.advance()
@@ -244,30 +328,30 @@ func (d *directDecoder) consumeTableDirective() (TableDirective, error) {
 		if d.current.Kind == RPAREN {
 			break
 		}
-		return tbl, errorf(d.current.Pos, "expected ',' or ')' in @table column list, got %s", d.current.Kind)
+		return ds, errorf(d.current.Pos, "expected ',' or ')' in @dataset column list, got %s", d.current.Kind)
 	}
 	d.advance() // consume )
 
 	for d.current.Kind == LPAREN {
-		row, err := d.consumeTableRow(len(tbl.Columns))
+		row, err := d.consumeDatasetRow(len(ds.Columns))
 		if err != nil {
-			return tbl, err
+			return ds, err
 		}
-		tbl.Rows = append(tbl.Rows, row)
+		ds.Rows = append(ds.Rows, row)
 	}
-	return tbl, nil
+	return ds, nil
 }
 
-// consumeTableRow mirrors parser.parseTableRow. The fast-path decoder
+// consumeDatasetRow mirrors parser.parseDatasetRow. The fast-path decoder
 // re-uses the AST-tier parser internally for cell values; this keeps
 // the direct-decode entry point complete (and lets UnmarshalFull
-// expose rows via Result.Tables()) while reserving an inline-bind
+// expose rows via Result.Datasets()) while reserving an inline-bind
 // optimization for a future change. LPAREN is current on entry.
-func (d *directDecoder) consumeTableRow(expected int) (TableRow, error) {
+func (d *directDecoder) consumeDatasetRow(expected int) (DatasetRow, error) {
 	pos := d.current.Pos
 	d.advance() // consume (
 
-	row := TableRow{Pos: pos, Cells: make([]Value, 0, expected)}
+	row := DatasetRow{Pos: pos, Cells: make([]Value, 0, expected)}
 	cell, err := d.consumeRowCell()
 	if err != nil {
 		return row, err
@@ -282,16 +366,16 @@ func (d *directDecoder) consumeTableRow(expected int) (TableRow, error) {
 		row.Cells = append(row.Cells, cell)
 	}
 	if d.current.Kind != RPAREN {
-		return row, errorf(d.current.Pos, "expected ',' or ')' in @table row, got %s", d.current.Kind)
+		return row, errorf(d.current.Pos, "expected ',' or ')' in @dataset row, got %s", d.current.Kind)
 	}
 	d.advance()
 	if len(row.Cells) != expected {
-		return row, errorf(pos, "@table row has %d cells, expected %d (column count)", len(row.Cells), expected)
+		return row, errorf(pos, "@dataset row has %d cells, expected %d (column count)", len(row.Cells), expected)
 	}
 	return row, nil
 }
 
-// consumeRowCell consumes one cell of a @table row. Returns nil for
+// consumeRowCell consumes one cell of a @dataset row. Returns nil for
 // an empty cell (no value between commas, or at row start/end).
 // Rejects list / block values per v1 cell-grammar.
 func (d *directDecoder) consumeRowCell() (Value, error) {
@@ -299,9 +383,9 @@ func (d *directDecoder) consumeRowCell() (Value, error) {
 	case COMMA, RPAREN:
 		return nil, nil
 	case LBRACKET:
-		return nil, errorf(d.current.Pos, "@table cells cannot contain list values in v1 (draft §3.4.4)")
+		return nil, errorf(d.current.Pos, "@dataset cells cannot contain list values in v1 (draft §3.4.4)")
 	case LBRACE:
-		return nil, errorf(d.current.Pos, "@table cells cannot contain block values in v1 (draft §3.4.4)")
+		return nil, errorf(d.current.Pos, "@dataset cells cannot contain block values in v1 (draft §3.4.4)")
 	}
 	// Re-use the AST-tier value parser by handing off to a small inline
 	// reader. We construct a one-shot parser around the current lexer
@@ -311,7 +395,7 @@ func (d *directDecoder) consumeRowCell() (Value, error) {
 
 // consumeValue parses one PXF value at the current decoder position,
 // covering the same shapes as parser.parseValue but using the
-// directDecoder's state. Used by @table row cells.
+// directDecoder's state. Used by @dataset row cells.
 func (d *directDecoder) consumeValue() (Value, error) {
 	pos := d.current.Pos
 	switch d.current.Kind {
@@ -381,6 +465,9 @@ func (d *directDecoder) consumeValue() (Value, error) {
 // with the single-prefix case populating the legacy Type field for
 // v0.72.0 back-compat.
 func (d *directDecoder) consumeDirective() (Directive, error) {
+	if _, reserved := futureReservedDirectives[d.current.Value]; reserved {
+		return Directive{}, errorf(d.current.Pos, "@%s is a spec-reserved directive name with no v1 semantics (draft §3.4.6)", d.current.Value)
+	}
 	dir := Directive{
 		Pos:  d.current.Pos,
 		Name: d.current.Value,

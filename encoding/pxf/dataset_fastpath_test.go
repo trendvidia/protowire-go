@@ -3,7 +3,7 @@
 
 package pxf_test
 
-// Coverage of the direct-decode mirror in decode_fast.go for @table.
+// Coverage of the direct-decode mirror in decode_fast.go for @dataset.
 // The AST-tier tests in table_test.go cover Parse(); these drive
 // UnmarshalFull() to exercise the parallel implementation that has to
 // stay in sync.
@@ -24,12 +24,12 @@ func TestUnmarshalFull_Table_AllCellVariants(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	msg := dynamicpb.NewMessage(allTypes)
 
-	in := []byte(`@table t.T (s, i, f, b, by, ts, d, e, n)
+	in := []byte(`@dataset t.T (s, i, f, b, by, ts, d, e, n)
 ("hi", 42, 3.14, true, b"aGVsbG8=", 2026-05-11T10:00:00Z, 1h30m, ENUM_VAL, null)`)
 	res, err := pxf.UnmarshalFull(in, msg)
 	require.NoError(t, err)
-	require.Len(t, res.Tables(), 1)
-	cells := res.Tables()[0].Rows[0].Cells
+	require.Len(t, res.Datasets(), 1)
+	cells := res.Datasets()[0].Rows[0].Cells
 
 	_, ok := cells[0].(*pxf.StringVal)
 	assert.True(t, ok, "cell 0: StringVal")
@@ -58,17 +58,17 @@ func TestUnmarshalFull_Table_RawBase64Bytes(t *testing.T) {
 	msg := dynamicpb.NewMessage(allTypes)
 
 	// `aGVsbG8` is "hello" base64-encoded without padding.
-	in := []byte(`@table t.T (blob)
+	in := []byte(`@dataset t.T (blob)
 (b"aGVsbG8")`)
 	res, err := pxf.UnmarshalFull(in, msg)
 	require.NoError(t, err)
-	require.Len(t, res.Tables()[0].Rows, 1)
-	bv, ok := res.Tables()[0].Rows[0].Cells[0].(*pxf.BytesVal)
+	require.Len(t, res.Datasets()[0].Rows, 1)
+	bv, ok := res.Datasets()[0].Rows[0].Cells[0].(*pxf.BytesVal)
 	require.True(t, ok)
 	assert.Equal(t, []byte("hello"), bv.Value)
 }
 
-// --- consumeTableDirective error paths via UnmarshalFull ---
+// --- consumeDatasetDirective error paths via UnmarshalFull ---
 
 func TestUnmarshalFull_Table_ErrorPaths(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
@@ -77,36 +77,36 @@ func TestUnmarshalFull_Table_ErrorPaths(t *testing.T) {
 		in     string
 		errSub string
 	}{
-		{"missing_type", `@table ( col )
-( "x" )`, "expected row message type"},
-		{"missing_lparen", `@table T col )
+		// missing_type without a preceding anonymous @proto is now a
+		// permissive parser case (binding-time validation handles it).
+		{"missing_lparen", `@dataset T col )
 ( "x" )`, "expected '('"},
-		{"empty_column_list", `@table T ( )`, "at least one field name"},
-		{"dotted_column", `@table T ( a.b )
+		{"empty_column_list", `@dataset T ( )`, "at least one field name"},
+		{"dotted_column", `@dataset T ( a.b )
 ( "x" )`, "dotted column paths"},
-		{"bad_column_separator", `@table T ( a b )`, "expected ',' or ')'"},
-		{"row_arity_short", `@table T ( a, b, c )
+		{"bad_column_separator", `@dataset T ( a b )`, "expected ',' or ')'"},
+		{"row_arity_short", `@dataset T ( a, b, c )
 ( "x", "y" )`, "2 cells, expected 3"},
-		{"row_arity_long", `@table T ( a, b )
+		{"row_arity_long", `@dataset T ( a, b )
 ( "x", "y", "z" )`, "3 cells, expected 2"},
-		{"row_unterminated", `@table T ( a )
+		{"row_unterminated", `@dataset T ( a )
 ( "x"`, "expected ',' or ')'"},
-		{"list_cell", `@table T ( a, b )
+		{"list_cell", `@dataset T ( a, b )
 ( "x", ["y", "z"] )`, "list values"},
-		{"block_cell", `@table T ( a, b )
+		{"block_cell", `@dataset T ( a, b )
 ( "x", { y = 1 } )`, "block values"},
 		{"at_type_then_at_table", `@type X
-@table T ( a )
+@dataset T ( a )
 ( "x" )`, "@type"},
-		{"at_table_then_at_type", `@table T ( a )
+		{"at_table_then_at_type", `@dataset T ( a )
 ( "x" )
 @type X`, "@type"},
-		{"table_with_body_field", `@table T ( a )
+		{"table_with_body_field", `@dataset T ( a )
 ( "x" )
 extra = "stray"`, "top-level field entries"},
-		{"invalid_bytes_cell", `@table T ( a )
+		{"invalid_bytes_cell", `@dataset T ( a )
 ( b"!!!not-base64!!!" )`, "invalid base64"},
-		{"invalid_duration_cell", `@table T ( a )
+		{"invalid_duration_cell", `@dataset T ( a )
 ( 9999999999999999999999h )`, "invalid duration"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -124,12 +124,12 @@ func TestUnmarshalFull_Table_EmptyCellsViaFastPath(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	msg := dynamicpb.NewMessage(allTypes)
 
-	in := []byte(`@table t.T (a, b, c)
+	in := []byte(`@dataset t.T (a, b, c)
 (, "x", )
 ("y", , "z")`)
 	res, err := pxf.UnmarshalFull(in, msg)
 	require.NoError(t, err)
-	rows := res.Tables()[0].Rows
+	rows := res.Datasets()[0].Rows
 	require.Len(t, rows, 2)
 	// Row 1: empty / "x" / empty
 	assert.Nil(t, rows[0].Cells[0])
@@ -197,13 +197,13 @@ string_field = "x"`)
 }
 
 // Column list with a trailing comma (`(a,)`) lands on the inner "expected
-// column field name" guard at the top of consumeTableDirective's loop —
+// column field name" guard at the top of consumeDatasetDirective's loop —
 // the comma advances past, then the next token is RPAREN, which isn't
 // IDENT.
 func TestUnmarshalFull_Table_TrailingCommaInColumnList(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	msg := dynamicpb.NewMessage(allTypes)
-	_, err := pxf.UnmarshalFull([]byte(`@table T (a,)`), msg)
+	_, err := pxf.UnmarshalFull([]byte(`@dataset T (a,)`), msg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expected column field name")
 }

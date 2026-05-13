@@ -310,8 +310,11 @@ func (l *lexer) lexDirective(pos Position) Token {
 	if name == "type" {
 		return Token{Kind: AT_TYPE, Value: "@type", Pos: pos}
 	}
-	if name == "table" {
-		return Token{Kind: AT_TABLE, Value: "@table", Pos: pos}
+	if name == "dataset" {
+		return Token{Kind: AT_DATASET, Value: "@dataset", Pos: pos}
+	}
+	if name == "proto" {
+		return Token{Kind: AT_PROTO, Value: "@proto", Pos: pos}
 	}
 	return Token{Kind: AT_DIRECTIVE, Value: name, Pos: pos}
 }

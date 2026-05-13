@@ -24,11 +24,34 @@ import (
 )
 
 // reservedNames is the case-sensitive set of names that PXF reserves as
-// value keywords and therefore forbids as schema element names.
+// value keywords and therefore forbids as schema element names
+// (draft §3.13). The full reserved-directive-name set lives elsewhere
+// (draft §3.4.6) and is enforced at the parser layer, not here:
+// schema-element name collisions with directive names (e.g. a field
+// literally named "dataset") are not problematic because field names
+// and directive names live in disjoint lexical contexts.
 var reservedNames = map[string]struct{}{
 	"null":  {},
 	"true":  {},
 	"false": {},
+}
+
+// futureReservedDirectives is the set of directive names the spec
+// reserves for future allocation (draft §3.4.6). v1 decoders MUST
+// reject these as unknown reserved directives so applications cannot
+// squat the names before the spec allocates semantics to them.
+//
+// The names with their own production (`type`, `dataset`, `proto`)
+// don't appear here — they're handled directly by the lexer. The
+// spec-registered `entry` doesn't appear either — it's a valid
+// named_directive with documented shape (draft §3.4.3).
+var futureReservedDirectives = map[string]struct{}{
+	"table":       {},
+	"datasource":  {},
+	"view":        {},
+	"procedure":   {},
+	"function":    {},
+	"permissions": {},
 }
 
 // ViolationKind identifies which kind of schema element collides with a

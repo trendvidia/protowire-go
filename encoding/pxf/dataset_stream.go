@@ -3,21 +3,21 @@
 
 package pxf
 
-// Streaming consumption for the `@table` directive (draft §3.4.4).
+// Streaming consumption for the `@dataset` directive (draft §3.4.4).
 //
 // The materializing path (pxf.UnmarshalFull / pxf.Parse) reads an
-// entire document into memory and produces a full TableDirective with
+// entire document into memory and produces a full DatasetDirective with
 // all rows resident. That works for small datasets and breaks for the
-// CSV-replacement workload @table was designed to serve. TableReader
+// CSV-replacement workload @dataset was designed to serve. DatasetReader
 // provides the streaming alternative: it pulls bytes from an io.Reader
-// on demand and yields one TableRow per Next() call, with working-set
+// on demand and yields one DatasetRow per Next() call, with working-set
 // memory bounded by the size of the largest single row.
 //
 // Per the spec: a streaming API MUST enforce per-row arity and the v1
 // cell-grammar rule on each row as it is consumed (not deferred to
 // end-of-input), and MUST yield rows in source order. Both invariants
 // fall out of the implementation here: the row-boundary scanner
-// produces one (...) slice at a time, and the same parseTableRow used
+// produces one (...) slice at a time, and the same parseDatasetRow used
 // by Parse() decodes it.
 
 import (
@@ -27,11 +27,11 @@ import (
 	"io"
 )
 
-// defaultHeaderMaxBytes caps the byte budget for the @table header
-// (leading directives + `@table TYPE (col1, col2, ...)`). Real headers
+// defaultHeaderMaxBytes caps the byte budget for the @dataset header
+// (leading directives + `@dataset TYPE (col1, col2, ...)`). Real headers
 // are tiny — a few hundred bytes at most. The cap exists to fail-fast
-// on misuse: a TableReader pointed at a multi-gigabyte document with
-// no `@table` directive shouldn't OOM trying to find one.
+// on misuse: a DatasetReader pointed at a multi-gigabyte document with
+// no `@dataset` directive shouldn't OOM trying to find one.
 const defaultHeaderMaxBytes = 64 * 1024
 
 // streamPullSize is the chunk size for io.Reader pulls. Larger reduces
@@ -39,25 +39,25 @@ const defaultHeaderMaxBytes = 64 * 1024
 // matches bufio.Reader's default and is generous for typical row sizes.
 const streamPullSize = 4096
 
-// ErrNoTable is returned by NewTableReader when the input contains no
-// @table directive before EOF. Inspect with errors.Is.
-var ErrNoTable = errors.New("pxf: no @table directive in stream")
+// ErrNoDataset is returned by NewDatasetReader when the input contains no
+// @dataset directive before EOF. Inspect with errors.Is.
+var ErrNoDataset = errors.New("pxf: no @dataset directive in stream")
 
-// TableReader streams rows of a single `@table` directive from an
+// DatasetReader streams rows of a single `@dataset` directive from an
 // io.Reader (draft §3.4.4 "Streaming consumption"). Use it for
 // datasets too large to materialize via [Parse] / [UnmarshalFull].
 //
-// A TableReader is positioned at the first row after [NewTableReader]
-// returns. Call [TableReader.Next] in a loop until it returns
+// A DatasetReader is positioned at the first row after [NewDatasetReader]
+// returns. Call [DatasetReader.Next] in a loop until it returns
 // [io.EOF]; the table's row sequence is exhausted at that point.
 //
-// For documents containing multiple `@table` directives, call
-// NewTableReader again on the same underlying io.Reader to read the
+// For documents containing multiple `@dataset` directives, call
+// NewDatasetReader again on the same underlying io.Reader to read the
 // next table — the previous reader leaves the underlying reader
 // positioned just past its last row.
 //
-// A TableReader is NOT safe for concurrent use.
-type TableReader struct {
+// A DatasetReader is NOT safe for concurrent use.
+type DatasetReader struct {
 	src      io.Reader
 	pending  []byte // bytes pulled from src but not yet consumed
 	srcEOF   bool   // src.Read has returned io.EOF
@@ -68,54 +68,54 @@ type TableReader struct {
 	err      error // sticky error
 }
 
-// NewTableReader consumes any leading directives (`@type`, `@<name>`,
-// etc.) and the `@table TYPE ( cols )` header, returning a reader
+// NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
+// etc.) and the `@dataset TYPE ( cols )` header, returning a reader
 // positioned at the first row.
 //
-// Returns [ErrNoTable] if the input ends before any `@table` directive
+// Returns [ErrNoDataset] if the input ends before any `@dataset` directive
 // is seen. Returns a wrapped parse/IO error otherwise.
 //
 // The header (everything from the start of the input up through and
 // including the `)` of the column list) must fit in 64 KiB. This is a
 // fail-fast bound — real headers are tiny.
-func NewTableReader(r io.Reader) (*TableReader, error) {
-	tr := &TableReader{src: r}
+func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
+	tr := &DatasetReader{src: r}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
 	}
 	return tr, nil
 }
 
-// Type returns the row message type declared by the @table header
+// Type returns the row message type declared by the @dataset header
 // (e.g. "trades.v1.Trade").
-func (tr *TableReader) Type() string { return tr.typ }
+func (tr *DatasetReader) Type() string { return tr.typ }
 
-// Columns returns the column field names declared by the @table
+// Columns returns the column field names declared by the @dataset
 // header, in source order.
-func (tr *TableReader) Columns() []string { return tr.columns }
+func (tr *DatasetReader) Columns() []string { return tr.columns }
 
 // Directives returns the side-channel directives (`@<name>` /
-// `@entry` / etc., NOT `@type` or `@table`) that appeared before the
-// `@table` header. The slice is stable for the lifetime of the
+// `@entry` / etc., NOT `@type` or `@dataset`) that appeared before the
+// `@dataset` header. The slice is stable for the lifetime of the
 // reader. Useful for consumers that attach per-table metadata via a
 // preceding directive.
-func (tr *TableReader) Directives() []Directive { return tr.dirs }
+func (tr *DatasetReader) Directives() []Directive { return tr.dirs }
 
-// Tail returns an [io.Reader] that yields the bytes the TableReader
+// Tail returns an [io.Reader] that yields the bytes the DatasetReader
 // has buffered but not consumed, followed by any remaining bytes from
-// the underlying source. Use it to chain a second [NewTableReader]
-// call for documents containing multiple `@table` directives:
+// the underlying source. Use it to chain a second [NewDatasetReader]
+// call for documents containing multiple `@dataset` directives:
 //
-//	tr1, err := pxf.NewTableReader(src)
+//	tr1, err := pxf.NewDatasetReader(src)
 //	// ... iterate tr1.Next() to io.EOF ...
-//	tr2, err := pxf.NewTableReader(tr1.Tail())
+//	tr2, err := pxf.NewDatasetReader(tr1.Tail())
 //
 // Tail MUST only be called after Next has returned [io.EOF]. Calling
 // it earlier returns bytes the current reader still intends to
 // consume, which will desync the next reader. The returned io.Reader
 // is unbuffered; consumers needing bufio semantics should wrap it
 // themselves.
-func (tr *TableReader) Tail() io.Reader {
+func (tr *DatasetReader) Tail() io.Reader {
 	if len(tr.pending) == 0 {
 		return tr.src
 	}
@@ -126,29 +126,29 @@ func (tr *TableReader) Tail() io.Reader {
 // sequence is exhausted. After EOF (or any other error), all
 // subsequent calls return the same error.
 //
-// The returned TableRow's Cells slice is freshly allocated and owned
+// The returned DatasetRow's Cells slice is freshly allocated and owned
 // by the caller; reading the next row does not invalidate it.
-func (tr *TableReader) Next() (TableRow, error) {
+func (tr *DatasetReader) Next() (DatasetRow, error) {
 	if tr.err != nil {
-		return TableRow{}, tr.err
+		return DatasetRow{}, tr.err
 	}
 	if tr.finished {
-		return TableRow{}, io.EOF
+		return DatasetRow{}, io.EOF
 	}
 	for {
 		start, end, found, err := findNextRow(tr.pending)
 		if err != nil {
 			tr.err = err
-			return TableRow{}, err
+			return DatasetRow{}, err
 		}
 		if found {
 			rowBytes := tr.pending[start : end+1]
 			p := newParser(rowBytes)
-			row, _, perr := p.parseTableRow(len(tr.columns))
+			row, _, perr := p.parseDatasetRow(len(tr.columns))
 			tr.pending = tr.pending[end+1:]
 			if perr != nil {
 				tr.err = perr
-				return TableRow{}, perr
+				return DatasetRow{}, perr
 			}
 			return *row, nil
 		}
@@ -156,11 +156,11 @@ func (tr *TableReader) Next() (TableRow, error) {
 		// is over.
 		if tr.srcEOF {
 			tr.finished = true
-			return TableRow{}, io.EOF
+			return DatasetRow{}, io.EOF
 		}
 		if perr := tr.pull(streamPullSize); perr != nil {
 			tr.err = perr
-			return TableRow{}, perr
+			return DatasetRow{}, perr
 		}
 	}
 }
@@ -168,7 +168,7 @@ func (tr *TableReader) Next() (TableRow, error) {
 // pull reads up to n bytes from src into pending. Sets srcEOF when
 // src is exhausted. Returns nil on success (including EOF reached);
 // returns a non-nil error only on a non-EOF read failure.
-func (tr *TableReader) pull(n int) error {
+func (tr *DatasetReader) pull(n int) error {
 	if tr.srcEOF {
 		return nil
 	}
@@ -185,9 +185,9 @@ func (tr *TableReader) pull(n int) error {
 }
 
 // readHeader pulls bytes until it finds the closing `)` of the
-// @table column list, then uses the existing parser to extract typ,
+// @dataset column list, then uses the existing parser to extract typ,
 // columns, and any preceding side-channel directives.
-func (tr *TableReader) readHeader() error {
+func (tr *DatasetReader) readHeader() error {
 	for {
 		headerEnd, found, err := scanHeaderEnd(tr.pending)
 		if err != nil {
@@ -195,31 +195,31 @@ func (tr *TableReader) readHeader() error {
 		}
 		if found {
 			// Parse the header prefix as a (rowless) PXF document.
-			// parseDocument is happy with an @table directive that has
+			// parseDocument is happy with an @dataset directive that has
 			// no rows yet, and validates everything we care about
-			// (leading-directive shape, @type / @table conflict,
+			// (leading-directive shape, @type / @dataset conflict,
 			// dotted columns, etc.).
 			doc, perr := Parse(tr.pending[:headerEnd+1])
 			if perr != nil {
 				return perr
 			}
-			if len(doc.Tables) == 0 {
-				// Should not happen — scanHeaderEnd found an @table,
+			if len(doc.Datasets) == 0 {
+				// Should not happen — scanHeaderEnd found an @dataset,
 				// but defensive.
-				return ErrNoTable
+				return ErrNoDataset
 			}
-			tbl := doc.Tables[0]
-			tr.typ = tbl.Type
-			tr.columns = tbl.Columns
+			ds := doc.Datasets[0]
+			tr.typ = ds.Type
+			tr.columns = ds.Columns
 			tr.dirs = doc.Directives
 			tr.pending = tr.pending[headerEnd+1:]
 			return nil
 		}
 		if tr.srcEOF {
-			return ErrNoTable
+			return ErrNoDataset
 		}
 		if len(tr.pending) >= defaultHeaderMaxBytes {
-			return fmt.Errorf("pxf: @table header exceeds %d bytes; raise the budget or check that the input begins with `@table TYPE (cols)`", defaultHeaderMaxBytes)
+			return fmt.Errorf("pxf: @dataset header exceeds %d bytes; raise the budget or check that the input begins with `@dataset TYPE (cols)`", defaultHeaderMaxBytes)
 		}
 		if err := tr.pull(streamPullSize); err != nil {
 			return err
@@ -227,18 +227,18 @@ func (tr *TableReader) readHeader() error {
 	}
 }
 
-// scanHeaderEnd searches input for the first complete `@table TYPE (
+// scanHeaderEnd searches input for the first complete `@dataset TYPE (
 // cols )` directive and returns the index of the `)` that closes its
 // column list. Returns (0, false, nil) if the input ends before the
 // header is complete (caller should pull more bytes).
 //
 // This is a byte-level scan, not a full parse: it walks the input
-// looking for the literal byte sequence "@table", then for the next
+// looking for the literal byte sequence "@dataset", then for the next
 // `(`, then for the matching `)`, with string / bytes-literal /
-// comment awareness so embedded parens or `@table` substrings inside
+// comment awareness so embedded parens or `@dataset` substrings inside
 // strings or comments don't trip the scan.
 func scanHeaderEnd(input []byte) (int, bool, error) {
-	// Find the start of an `@table` token outside strings/comments.
+	// Find the start of an `@dataset` token outside strings/comments.
 	atIdx, found, err := findAtTable(input)
 	if err != nil {
 		return 0, false, err
@@ -246,9 +246,9 @@ func scanHeaderEnd(input []byte) (int, bool, error) {
 	if !found {
 		return 0, false, nil
 	}
-	// Find the next `(` after the @table keyword (skipping the type
+	// Find the next `(` after the @dataset keyword (skipping the type
 	// identifier and whitespace).
-	lparen, found, err := findNextChar(input, atIdx+len("@table"), '(')
+	lparen, found, err := findNextChar(input, atIdx+len("@dataset"), '(')
 	if err != nil {
 		return 0, false, err
 	}
@@ -266,7 +266,7 @@ func scanHeaderEnd(input []byte) (int, bool, error) {
 	return end, true, nil
 }
 
-// findAtTable returns the byte offset of the next `@table` keyword
+// findAtTable returns the byte offset of the next `@dataset` keyword
 // outside of strings/comments. The match must be followed by a
 // non-identifier byte (so we don't false-match `@tableau`).
 func findAtTable(input []byte) (int, bool, error) {
@@ -284,12 +284,12 @@ func findAtTable(input []byte) (int, bool, error) {
 			i = j
 			continue
 		}
-		if input[i] == '@' && i+len("@table") <= len(input) &&
-			string(input[i:i+len("@table")]) == "@table" {
+		if input[i] == '@' && i+len("@dataset") <= len(input) &&
+			string(input[i:i+len("@dataset")]) == "@dataset" {
 			// Confirm the next char (if present) isn't an ident-part.
-			after := i + len("@table")
+			after := i + len("@dataset")
 			if after == len(input) {
-				// Could be `@table` followed by more bytes we haven't
+				// Could be `@dataset` followed by more bytes we haven't
 				// seen yet — be conservative.
 				return 0, false, nil
 			}

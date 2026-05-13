@@ -98,12 +98,19 @@ directives:
 			}
 			doc.Directives = append(doc.Directives, *d)
 			doc.BodyOffset = end
-		case AT_TABLE:
-			tbl, end, err := p.parseTableDirective()
+		case AT_DATASET:
+			ds, end, err := p.parseDatasetDirective()
 			if err != nil {
 				return nil, err
 			}
-			doc.Tables = append(doc.Tables, *tbl)
+			doc.Datasets = append(doc.Datasets, *ds)
+			doc.BodyOffset = end
+		case AT_PROTO:
+			pd, end, err := p.parseProtoDirective()
+			if err != nil {
+				return nil, err
+			}
+			doc.Protos = append(doc.Protos, *pd)
 			doc.BodyOffset = end
 		default:
 			break directives
@@ -111,16 +118,16 @@ directives:
 	}
 
 	// Standalone constraint (draft §3.4.4): a document containing any
-	// @table directive MUST NOT also carry @type or top-level field
-	// entries — the @table header IS the document's type declaration.
-	if len(doc.Tables) > 0 {
+	// @dataset directive MUST NOT also carry @type or top-level field
+	// entries — the @dataset header IS the document's type declaration.
+	if len(doc.Datasets) > 0 {
 		if doc.TypeURL != "" {
-			return nil, errorf(doc.Tables[0].Pos,
-				"@table directive cannot coexist with @type; the @table header declares the document's type (draft §3.4.4)")
+			return nil, errorf(doc.Datasets[0].Pos,
+				"@dataset directive cannot coexist with @type; the @dataset header declares the document's type (draft §3.4.4)")
 		}
 		if p.current.Kind != EOF {
 			return nil, errorf(p.current.Pos,
-				"@table directive cannot coexist with top-level field entries; the document's payload is the @table rows (draft §3.4.4)")
+				"@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)")
 		}
 	}
 
@@ -138,35 +145,36 @@ directives:
 	return doc, nil
 }
 
-// parseTableDirective reads `@table <type> ( col1, col2, ... ) row*`.
-// AT_TABLE is current on entry. Returns the table plus the byte offset
+// parseDatasetDirective reads `@dataset <type> ( col1, col2, ... ) row*`.
+// AT_DATASET is current on entry. Returns the table plus the byte offset
 // immediately after the directive's last token (the `)` of the last
 // row, the `)` of the column list when there are no rows, or earlier
 // on error). See draft §3.4.4.
-func (p *parser) parseTableDirective() (*TableDirective, int, error) {
+func (p *parser) parseDatasetDirective() (*DatasetDirective, int, error) {
 	leading := p.flushComments()
 	atPos := p.current.Pos
-	tbl := &TableDirective{
+	ds := &DatasetDirective{
 		Pos:             atPos,
 		LeadingComments: leading,
 	}
-	p.advance() // consume @table
+	p.advance() // consume @dataset
 
-	// Required: row message type (dotted identifier).
-	if p.current.Kind != IDENT {
-		return nil, 0, errorf(p.current.Pos, "expected row message type after @table, got %s", p.current.Kind)
+	// Optional: row message type (dotted identifier). Type MAY be
+	// omitted when an anonymous @proto directive precedes the @dataset
+	// in document order (draft §3.4.4 Anonymous binding).
+	if p.current.Kind == IDENT {
+		ds.Type = p.current.Value
+		p.advance()
 	}
-	tbl.Type = p.current.Value
-	p.advance()
 
 	// Required: column list in `( ... )`. At least one column.
 	if p.current.Kind != LPAREN {
-		return nil, 0, errorf(p.current.Pos, "expected '(' to start @table column list, got %s", p.current.Kind)
+		return nil, 0, errorf(p.current.Pos, "expected '(' to start @dataset column list, got %s", p.current.Kind)
 	}
 	p.advance() // consume (
 
 	if p.current.Kind != IDENT {
-		return nil, 0, errorf(p.current.Pos, "@table column list must contain at least one field name, got %s", p.current.Kind)
+		return nil, 0, errorf(p.current.Pos, "@dataset column list must contain at least one field name, got %s", p.current.Kind)
 	}
 	for {
 		if p.current.Kind != IDENT {
@@ -176,9 +184,9 @@ func (p *parser) parseTableDirective() (*TableDirective, int, error) {
 		// v1: column entries are unqualified field names; dotted paths
 		// reserved for a future revision.
 		if containsDot(colName) {
-			return nil, 0, errorf(p.current.Pos, "@table column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
+			return nil, 0, errorf(p.current.Pos, "@dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
 		}
-		tbl.Columns = append(tbl.Columns, colName)
+		ds.Columns = append(ds.Columns, colName)
 		p.advance()
 		if p.current.Kind == COMMA {
 			p.advance()
@@ -187,31 +195,31 @@ func (p *parser) parseTableDirective() (*TableDirective, int, error) {
 		if p.current.Kind == RPAREN {
 			break
 		}
-		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @table column list, got %s", p.current.Kind)
+		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @dataset column list, got %s", p.current.Kind)
 	}
 	endOffset := p.current.Pos.Offset + 1 // past `)`
 	p.advance()                           // consume )
 
 	// Zero or more rows.
 	for p.current.Kind == LPAREN {
-		row, rowEnd, err := p.parseTableRow(len(tbl.Columns))
+		row, rowEnd, err := p.parseDatasetRow(len(ds.Columns))
 		if err != nil {
 			return nil, 0, err
 		}
-		tbl.Rows = append(tbl.Rows, *row)
+		ds.Rows = append(ds.Rows, *row)
 		endOffset = rowEnd
 	}
-	return tbl, endOffset, nil
+	return ds, endOffset, nil
 }
 
-// parseTableRow reads `( cell ( ',' cell )* )` with an arity check
+// parseDatasetRow reads `( cell ( ',' cell )* )` with an arity check
 // against expected. LPAREN is current on entry. Returns the row plus
 // the byte offset immediately past the closing `)`.
-func (p *parser) parseTableRow(expected int) (*TableRow, int, error) {
+func (p *parser) parseDatasetRow(expected int) (*DatasetRow, int, error) {
 	pos := p.current.Pos
 	p.advance() // consume (
 
-	row := &TableRow{Pos: pos, Cells: make([]Value, 0, expected)}
+	row := &DatasetRow{Pos: pos, Cells: make([]Value, 0, expected)}
 	// First cell.
 	cell, err := p.parseRowCell()
 	if err != nil {
@@ -228,18 +236,18 @@ func (p *parser) parseTableRow(expected int) (*TableRow, int, error) {
 		row.Cells = append(row.Cells, cell)
 	}
 	if p.current.Kind != RPAREN {
-		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @table row, got %s", p.current.Kind)
+		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @dataset row, got %s", p.current.Kind)
 	}
 	endOffset := p.current.Pos.Offset + 1
 	p.advance() // consume )
 
 	if len(row.Cells) != expected {
-		return nil, 0, errorf(pos, "@table row has %d cells, expected %d (column count)", len(row.Cells), expected)
+		return nil, 0, errorf(pos, "@dataset row has %d cells, expected %d (column count)", len(row.Cells), expected)
 	}
 	return row, endOffset, nil
 }
 
-// parseRowCell consumes one cell of a @table row. Returns nil for an
+// parseRowCell consumes one cell of a @dataset row. Returns nil for an
 // empty cell (no value between two commas, or at row start/end).
 // Rejects list ('[ ... ]') and block ('{ ... }') values per v1
 // cell-grammar (draft §3.4.4).
@@ -248,11 +256,116 @@ func (p *parser) parseRowCell() (Value, error) {
 	case COMMA, RPAREN:
 		return nil, nil
 	case LBRACKET:
-		return nil, errorf(p.current.Pos, "@table cells cannot contain list values in v1 (draft §3.4.4)")
+		return nil, errorf(p.current.Pos, "@dataset cells cannot contain list values in v1 (draft §3.4.4)")
 	case LBRACE:
-		return nil, errorf(p.current.Pos, "@table cells cannot contain block values in v1 (draft §3.4.4)")
+		return nil, errorf(p.current.Pos, "@dataset cells cannot contain block values in v1 (draft §3.4.4)")
 	}
 	return p.parseValue(0)
+}
+
+// parseProtoDirective reads `@proto <body>` where <body> is one of
+// four lexically-distinguished shapes (draft §3.4.5):
+//
+//   - `{ <message-body> }`                  (anonymous)
+//   - `<dotted-name> { <message-body> }`    (named)
+//   - `"""<proto-source>"""`                (source-form file)
+//   - `b"<base64-FileDescriptorSet>"`       (descriptor)
+//
+// AT_PROTO is current on entry. For the brace-bounded shapes (anonymous
+// and named), the body is captured as raw bytes between `{` and the
+// matching `}` (exclusive); the contents are protobuf source and are
+// NOT decoded as PXF entries. Returns the directive plus the byte
+// offset immediately after the directive's last token.
+func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
+	leading := p.flushComments()
+	atPos := p.current.Pos
+	pd := &ProtoDirective{
+		Pos:             atPos,
+		LeadingComments: leading,
+	}
+	p.advance() // consume @proto
+
+	switch p.current.Kind {
+	case LBRACE:
+		// Anonymous: @proto { <message-body> }
+		pd.Shape = ProtoAnonymous
+		body, end, err := p.captureBraceBody("@proto (anonymous form)")
+		if err != nil {
+			return nil, 0, err
+		}
+		pd.Body = body
+		return pd, end, nil
+
+	case IDENT:
+		// Named: @proto <dotted-name> { <message-body> }
+		pd.Shape = ProtoNamed
+		pd.TypeName = p.current.Value
+		p.advance()
+		if p.current.Kind != LBRACE {
+			return nil, 0, errorf(p.current.Pos, "expected '{' after @proto %s, got %s", pd.TypeName, p.current.Kind)
+		}
+		body, end, err := p.captureBraceBody("@proto " + pd.TypeName)
+		if err != nil {
+			return nil, 0, err
+		}
+		pd.Body = body
+		return pd, end, nil
+
+	case STRING:
+		// Source: @proto """<proto-source>""" (triple-quoted) or "<...>"
+		// (simple-quoted, accepted lenient v1). The lexer's STRING token
+		// Value already has the unescaped content with delimiters
+		// stripped and (for triple-quoted) leading-LF / dedent applied.
+		pd.Shape = ProtoSource
+		pd.Body = []byte(p.current.Value)
+		endOffset := p.lex.pos
+		p.advance()
+		return pd, endOffset, nil
+
+	case BYTES:
+		// Descriptor: @proto b"<base64-FileDescriptorSet>"
+		pd.Shape = ProtoDescriptor
+		raw := p.current.Value
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			// Try URL-safe alphabet (allowed per draft §3.7).
+			decoded, err = base64.URLEncoding.DecodeString(raw)
+			if err != nil {
+				return nil, 0, errorf(p.current.Pos, "@proto descriptor body: invalid base64: %v", err)
+			}
+		}
+		pd.Body = decoded
+		endOffset := p.lex.pos
+		p.advance()
+		return pd, endOffset, nil
+
+	default:
+		return nil, 0, errorf(p.current.Pos,
+			"expected '{', dotted identifier, triple-quoted string, or b\"...\" after @proto, got %s",
+			p.current.Kind)
+	}
+}
+
+// captureBraceBody slices the raw bytes between `{` and the matching
+// `}` (both exclusive) without decoding the contents as PXF. The
+// parser's current token must be LBRACE on entry. Repositions the
+// lexer to the byte right after the closing `}` and primes the parser
+// to that token. Used by parseProtoDirective for anonymous/named
+// @proto bodies, whose interior is protobuf source rather than PXF.
+func (p *parser) captureBraceBody(label string) ([]byte, int, error) {
+	open := p.current.Pos.Offset
+	close := findMatchingBrace(p.lex.input, open)
+	if close < 0 {
+		return nil, 0, errorf(p.current.Pos, "%s: unmatched '{'", label)
+	}
+	body := p.lex.input[open+1 : close]
+	// Walk the lexer past the closing `}` one byte at a time so line/col
+	// remain accurate for subsequent error messages.
+	for p.lex.pos <= close {
+		p.lex.advance()
+	}
+	p.advance() // prime current token past `}`
+	return body, close + 1, nil
 }
 
 // containsDot reports whether s has a '.' rune. Inlined here so we
@@ -279,6 +392,9 @@ func (p *parser) parseDirective() (*Directive, int, error) {
 	leading := p.flushComments()
 	atPos := p.current.Pos
 	name := p.current.Value
+	if _, reserved := futureReservedDirectives[name]; reserved {
+		return nil, 0, errorf(atPos, "@%s is a spec-reserved directive name with no v1 semantics (draft §3.4.6)", name)
+	}
 	d := &Directive{
 		Pos:             atPos,
 		Name:            name,
