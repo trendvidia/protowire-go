@@ -11,6 +11,14 @@ format changes.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-05-13
+
+First major-version cut. Implements the three one-time spec changes
+from the protowire v1.0 freeze line ([STABILITY.md](https://github.com/trendvidia/protowire/blob/main/STABILITY.md))
+in lockstep with `protowire`, `protowire-java`, and
+`protowire-typescript`. **Breaking** — there is no alias period;
+v1.0 is itself the major bump.
+
 ### v1.0 spec changes
 
 Three one-time spec changes from the protowire v1.0 freeze line.
