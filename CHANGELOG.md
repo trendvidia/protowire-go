@@ -11,6 +11,13 @@ format changes.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-06
+
+The editor-tooling release: the read side (error-tolerant parsing)
+and write side (lossless round-trip rewriting) of machine-editing
+PXF documents that humans also hand-edit. Backward-compatible; no
+wire-format changes.
+
 ### Added
 
 - `encoding/pxf`: `Rewriter` — comment- and format-preserving
