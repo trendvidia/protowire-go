@@ -68,6 +68,15 @@ func (p *parser) soft(err error) error {
 	return nil
 }
 
+// tokenEnd returns the position just past the last byte of the
+// current token. The lexer sits exactly at that byte after producing
+// a token, and the parser's advance() only pre-reads trivia, never the
+// next significant token, so this holds whenever the parser is
+// positioned on p.current.
+func (p *parser) tokenEnd() Position {
+	return p.lex.currentPos()
+}
+
 // tokenErrMsg renders the current token for an error message. ILLEGAL
 // tokens carry the lexer's diagnostic in Value; surface that directly
 // instead of the opaque kind name.
@@ -79,10 +88,11 @@ func (p *parser) tokenErrMsg() string {
 }
 
 // skipBalanced consumes the open token the parser is positioned on
-// together with everything through its matching close token (or EOF).
-// Tolerant-mode recovery for blocks / lists that cannot be descended
-// into (e.g. past MaxNestingDepth).
-func (p *parser) skipBalanced(open, close TokenKind) {
+// together with everything through its matching close token (or EOF),
+// returning the position just past the close token. Tolerant-mode
+// recovery for blocks / lists that cannot be descended into (e.g.
+// past MaxNestingDepth).
+func (p *parser) skipBalanced(open, close TokenKind) Position {
 	depth := 0
 	for {
 		switch p.current.Kind {
@@ -91,11 +101,12 @@ func (p *parser) skipBalanced(open, close TokenKind) {
 		case close:
 			depth--
 			if depth <= 0 {
+				end := p.tokenEnd()
 				p.advance()
-				return
+				return end
 			}
 		case EOF:
-			return
+			return p.current.Pos
 		}
 		p.advance()
 	}
@@ -800,7 +811,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Assignment{Pos: pos, Key: key, Value: val, LeadingComments: leading}, nil
+		return &Assignment{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading}, nil
 
 	case COLON:
 		// Map entry. Only allowed inside a '{ ... }' block, never at
@@ -817,7 +828,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &MapEntry{Pos: pos, Key: key, Value: val, LeadingComments: leading}, nil
+		return &MapEntry{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading}, nil
 
 	case LBRACE:
 		// `{ ... }` denotes a submessage field; same identifier-only rule
@@ -834,15 +845,15 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 				return nil, err
 			}
 			// Too deep to descend; skip the whole block, keep the entry.
-			p.skipBalanced(LBRACE, RBRACE)
-			return &Block{Pos: pos, Name: key, LeadingComments: leading}, nil
+			end := p.skipBalanced(LBRACE, RBRACE)
+			return &Block{Pos: pos, End: end, Name: key, LeadingComments: leading}, nil
 		}
 		p.advance() // consume {
-		entries, err := p.parseBody(depth + 1)
+		entries, bodyEnd, err := p.parseBody(depth + 1)
 		if err != nil {
 			return nil, err
 		}
-		return &Block{Pos: pos, Name: key, Entries: entries, LeadingComments: leading}, nil
+		return &Block{Pos: pos, End: bodyEnd, Name: key, Entries: entries, LeadingComments: leading}, nil
 
 	default:
 		if err := p.soft(errorf(p.current.Pos, "expected '=', ':', or '{' after %q, got %s", key, p.current.Kind)); err != nil {
@@ -853,7 +864,8 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// the key and its position; do not consume the current token,
 		// which is most likely the next entry's key. The BadVal anchors
 		// just past the key, where the missing value belongs.
-		return &Assignment{Pos: pos, Key: key, Value: &BadVal{Pos: p.prevEnd}, LeadingComments: leading}, nil
+		bad := &BadVal{Pos: p.prevEnd, End: p.prevEnd}
+		return &Assignment{Pos: pos, End: bad.End, Key: key, Value: bad, LeadingComments: leading}, nil
 	}
 }
 
@@ -866,27 +878,27 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		// Do not consume it; anchor the placeholder and the error just
 		// past the separator, where the value belongs.
 		p.record(errorf(p.prevEnd, "missing value"))
-		return &BadVal{Pos: p.prevEnd}, nil
+		return &BadVal{Pos: p.prevEnd, End: p.prevEnd}, nil
 	}
 
 	switch p.current.Kind {
 	case STRING:
-		v := &StringVal{Pos: pos, Value: p.current.Value}
+		v := &StringVal{Pos: pos, End: p.tokenEnd(), Value: p.current.Value}
 		p.advance()
 		return v, nil
 
 	case INT:
-		v := &IntVal{Pos: pos, Raw: p.current.Value}
+		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value}
 		p.advance()
 		return v, nil
 
 	case FLOAT:
-		v := &FloatVal{Pos: pos, Raw: p.current.Value}
+		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value}
 		p.advance()
 		return v, nil
 
 	case BOOL:
-		v := &BoolVal{Pos: pos, Value: p.current.Value == "true"}
+		v := &BoolVal{Pos: pos, End: p.tokenEnd(), Value: p.current.Value == "true"}
 		p.advance()
 		return v, nil
 
@@ -897,9 +909,9 @@ func (p *parser) parseValue(depth int) (Value, error) {
 				return nil, err
 			}
 			p.advance()
-			return &BadVal{Pos: pos}, nil
+			return &BadVal{Pos: pos, End: pos}, nil
 		}
-		v := &BytesVal{Pos: pos, Value: decoded}
+		v := &BytesVal{Pos: pos, End: p.tokenEnd(), Value: decoded}
 		p.advance()
 		return v, nil
 
@@ -912,10 +924,10 @@ func (p *parser) parseValue(depth int) (Value, error) {
 					return nil, err
 				}
 				p.advance()
-				return &BadVal{Pos: pos}, nil
+				return &BadVal{Pos: pos, End: pos}, nil
 			}
 		}
-		v := &TimestampVal{Pos: pos, Value: t, Raw: p.current.Value}
+		v := &TimestampVal{Pos: pos, End: p.tokenEnd(), Value: t, Raw: p.current.Value}
 		p.advance()
 		return v, nil
 
@@ -926,19 +938,19 @@ func (p *parser) parseValue(depth int) (Value, error) {
 				return nil, err
 			}
 			p.advance()
-			return &BadVal{Pos: pos}, nil
+			return &BadVal{Pos: pos, End: pos}, nil
 		}
-		v := &DurationVal{Pos: pos, Value: d, Raw: p.current.Value}
+		v := &DurationVal{Pos: pos, End: p.tokenEnd(), Value: d, Raw: p.current.Value}
 		p.advance()
 		return v, nil
 
 	case NULL:
-		v := &NullVal{Pos: pos}
+		v := &NullVal{Pos: pos, End: p.tokenEnd()}
 		p.advance()
 		return v, nil
 
 	case IDENT:
-		v := &IdentVal{Pos: pos, Name: p.current.Value}
+		v := &IdentVal{Pos: pos, End: p.tokenEnd(), Name: p.current.Value}
 		p.advance()
 		return v, nil
 
@@ -959,7 +971,7 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		default:
 			p.advance()
 		}
-		return &BadVal{Pos: pos}, nil
+		return &BadVal{Pos: pos, End: pos}, nil
 	}
 }
 
@@ -969,8 +981,8 @@ func (p *parser) parseList(depth int) (Value, error) {
 			return nil, err
 		}
 		pos := p.current.Pos
-		p.skipBalanced(LBRACKET, RBRACKET)
-		return &ListVal{Pos: pos}, nil
+		end := p.skipBalanced(LBRACKET, RBRACKET)
+		return &ListVal{Pos: pos, End: end}, nil
 	}
 	pos := p.current.Pos
 	p.advance() // consume [
@@ -1002,10 +1014,11 @@ func (p *parser) parseList(depth int) (Value, error) {
 		if err := p.soft(errorf(p.current.Pos, "expected ']', got %s", p.current.Kind)); err != nil {
 			return nil, err
 		}
-		return &ListVal{Pos: pos, Elements: elems}, nil
+		return &ListVal{Pos: pos, End: p.current.Pos, Elements: elems}, nil
 	}
+	listEnd := p.tokenEnd()
 	p.advance()
-	return &ListVal{Pos: pos, Elements: elems}, nil
+	return &ListVal{Pos: pos, End: listEnd, Elements: elems}, nil
 }
 
 func (p *parser) parseBlockVal(depth int) (Value, error) {
@@ -1014,19 +1027,19 @@ func (p *parser) parseBlockVal(depth int) (Value, error) {
 			return nil, err
 		}
 		pos := p.current.Pos
-		p.skipBalanced(LBRACE, RBRACE)
-		return &BlockVal{Pos: pos}, nil
+		end := p.skipBalanced(LBRACE, RBRACE)
+		return &BlockVal{Pos: pos, End: end}, nil
 	}
 	pos := p.current.Pos
 	p.advance() // consume {
-	entries, err := p.parseBody(depth + 1)
+	entries, bodyEnd, err := p.parseBody(depth + 1)
 	if err != nil {
 		return nil, err
 	}
-	return &BlockVal{Pos: pos, Entries: entries}, nil
+	return &BlockVal{Pos: pos, End: bodyEnd, Entries: entries}, nil
 }
 
-func (p *parser) parseBody(depth int) ([]Entry, error) {
+func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 	entries := make([]Entry, 0, 4)
 	for p.current.Kind != RBRACE && p.current.Kind != EOF {
 		// Inside a '{ ... }' block we don't know whether the surrounding
@@ -1034,7 +1047,7 @@ func (p *parser) parseBody(depth int) ([]Entry, error) {
 		// disambiguated by the schema layer.
 		entry, err := p.parseEntry(depth, true)
 		if err != nil {
-			return nil, err
+			return nil, Position{}, err
 		}
 		// Tolerant mode returns (nil, nil) for an entry it skipped past.
 		if entry != nil {
@@ -1043,14 +1056,15 @@ func (p *parser) parseBody(depth int) ([]Entry, error) {
 	}
 	if p.current.Kind != RBRACE {
 		if !p.tolerant {
-			return nil, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
+			return nil, Position{}, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
 		}
 		// Unclosed block: close it at EOF with the entries parsed so far.
 		p.record(errorf(p.current.Pos, "unclosed block: expected '}' before end of input"))
-		return entries, nil
+		return entries, p.current.Pos, nil
 	}
+	end := p.tokenEnd()
 	p.advance()
-	return entries, nil
+	return entries, end, nil
 }
 
 // decodeBase64Lenient decodes a bytes-literal payload accepting both
