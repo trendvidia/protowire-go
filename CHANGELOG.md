@@ -13,6 +13,22 @@ format changes.
 
 ### Added
 
+- `encoding/pxf`: `Rewriter` — comment- and format-preserving
+  document rewriting (#24). `NewRewriter(src)` parses the source and
+  stages targeted edits by dotted path: `Set` (upsert; replaces only
+  the value's byte span, or inserts a new entry with sibling
+  indentation) and `Remove` (deletes the entry's line(s), keeping
+  leading comments). `Bytes()` splices the edits into the original
+  source, so everything outside the edited spans — comments, blank
+  lines, key ordering, indentation, number/string formatting quirks —
+  round-trips byte-for-byte, and reparses the result as a safety net.
+  `FormatDocument` remains the explicit, on-demand normalizer.
+- `encoding/pxf`: AST nodes now record their end position alongside
+  `Pos`: every `Value` and `Entry` carries an exclusive `End`
+  position, and the new `EntrySpan` / `ValueSpan` helpers expose the
+  `[start, end)` span generically. This is the span store the
+  `Rewriter` splices with, and gives editor tooling precise ranges
+  for hover and diagnostics.
 - `encoding/pxf`: `ParseTolerant` — error-tolerant parse mode for
   editor tooling (#27). Recovers at entry/block boundaries instead of
   stopping at the first syntax error, returning a best-effort

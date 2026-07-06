@@ -334,6 +334,27 @@ server {
 	}
 }
 
+// TestParseTolerantDepthRecoverySpan pins that a block or list beyond
+// MaxNestingDepth is skipped with an End just past its own closing
+// token, not at whatever token follows.
+func TestParseTolerantDepthRecoverySpan(t *testing.T) {
+	src := "xs = " + strings.Repeat("[", 101) + "1" + strings.Repeat(" ]", 101) + "\nnext = 1\n"
+	doc, errs := mustTolerant(t, src, 1)
+	v := doc.Entries[0].(*pxf.Assignment).Value
+	for i := 0; i < 100; i++ {
+		v = v.(*pxf.ListVal).Elements[0]
+	}
+	recovered := v.(*pxf.ListVal)
+	_, end := pxf.ValueSpan(recovered)
+	wantEnd := strings.IndexByte(src, ']') + 1
+	if end.Offset != wantEnd {
+		t.Fatalf("recovered list End.Offset = %d, want %d (just past its own ']')", end.Offset, wantEnd)
+	}
+	if !strings.Contains(errs[0].Msg, "MaxNestingDepth") {
+		t.Fatalf("error = %q", errs[0].Msg)
+	}
+}
+
 // TestParseTolerantStrictUnchanged pins that Parse keeps its
 // all-or-nothing contract on the shapes ParseTolerant recovers from.
 func TestParseTolerantStrictUnchanged(t *testing.T) {
