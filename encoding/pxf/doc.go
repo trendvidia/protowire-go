@@ -10,7 +10,7 @@
 //
 // # Choosing a code path
 //
-// Three top-level entry points serve different needs:
+// Five top-level entry points serve different needs:
 //
 //   - [Unmarshal] / [Marshal] — fast path. A fused single-pass
 //     lexer+decoder writes directly into the [google.golang.org/protobuf/proto.Message]
@@ -23,6 +23,16 @@
 //   - [Parse] / [FormatDocument] — AST path. Produces a [Document] with
 //     comments attached to entries. Use when you need to round-trip a
 //     PXF document while preserving its formatting and comments.
+//   - [ParseTolerant] — error-tolerant AST path for editor tooling.
+//     Recovers at entry/block boundaries and returns a best-effort
+//     [Document] plus all positioned errors, so completion and hover
+//     keep working on mid-edit buffers that [Parse] would reject.
+//   - [NewRewriter] — lossless targeted editing. Splices set/remove
+//     edits into the original source by byte span, so machine edits
+//     to a hand-written document leave everything else byte-stable:
+//     comments, blank lines, ordering, indentation, and formatting
+//     quirks. [FormatDocument] remains the explicit, on-demand
+//     normalizer.
 //
 // # Concurrency
 //
