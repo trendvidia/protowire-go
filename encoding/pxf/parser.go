@@ -5,6 +5,8 @@ package pxf
 
 import (
 	"encoding/base64"
+	"fmt"
+	"sort"
 	"time"
 )
 
@@ -12,6 +14,21 @@ type parser struct {
 	lex      *lexer
 	current  Token
 	comments []Comment // pending comments not yet attached to an entry
+
+	// tolerant enables the error-recovering mode behind [ParseTolerant]:
+	// instead of returning the first syntax error, the parser records it
+	// in errs and resynchronizes at the nearest entry or block boundary.
+	// All error-return paths are annotated so that when tolerant is set
+	// they record-and-recover; when clear the strict behavior is
+	// byte-for-byte what it always was.
+	tolerant bool
+	errs     []Error
+
+	// prevEnd is the position just past the last byte of the most
+	// recently consumed significant token. Tolerant recovery anchors
+	// synthesized BadVal placeholders here — the spot where the missing
+	// value would have been typed (e.g. right after a dangling '=').
+	prevEnd Position
 }
 
 func newParser(input []byte) *parser {
@@ -20,10 +37,104 @@ func newParser(input []byte) *parser {
 	return p
 }
 
+func newTolerantParser(input []byte) *parser {
+	p := &parser{lex: newLexer(input), tolerant: true}
+	p.lex.tolerant = true
+	p.lex.onErr = func(pos Position, msg string) {
+		p.errs = append(p.errs, Error{Pos: pos, Msg: msg})
+	}
+	p.advance()
+	return p
+}
+
+// record appends a recoverable syntax error in tolerant mode.
+func (p *parser) record(err error) {
+	if e, ok := err.(*Error); ok {
+		p.errs = append(p.errs, *e)
+		return
+	}
+	p.errs = append(p.errs, Error{Pos: p.current.Pos, Msg: err.Error()})
+}
+
+// soft routes a recoverable syntax error: strict mode returns it to
+// the caller (the first error aborts the parse, preserving Parse's
+// all-or-nothing contract), tolerant mode records it and returns nil
+// so the call site can recover.
+func (p *parser) soft(err error) error {
+	if !p.tolerant {
+		return err
+	}
+	p.record(err)
+	return nil
+}
+
+// tokenErrMsg renders the current token for an error message. ILLEGAL
+// tokens carry the lexer's diagnostic in Value; surface that directly
+// instead of the opaque kind name.
+func (p *parser) tokenErrMsg() string {
+	if p.current.Kind == ILLEGAL {
+		return p.current.Value
+	}
+	return fmt.Sprintf("%s (%q)", p.current.Kind, p.current.Value)
+}
+
+// skipBalanced consumes the open token the parser is positioned on
+// together with everything through its matching close token (or EOF).
+// Tolerant-mode recovery for blocks / lists that cannot be descended
+// into (e.g. past MaxNestingDepth).
+func (p *parser) skipBalanced(open, close TokenKind) {
+	depth := 0
+	for {
+		switch p.current.Kind {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth <= 0 {
+				p.advance()
+				return
+			}
+		case EOF:
+			return
+		}
+		p.advance()
+	}
+}
+
+// currentStartsEntry reports whether the current token looks like the
+// key of a new entry: a key-shaped token (IDENT, STRING, INT) followed
+// by '=', ':', or '{'. Tolerant recovery uses it to decide that a
+// key-shaped token belongs to the NEXT entry rather than to the
+// construct being parsed.
+func (p *parser) currentStartsEntry() bool {
+	switch p.current.Kind {
+	case IDENT, STRING, INT:
+		switch p.peekKind() {
+		case EQUALS, COLON, LBRACE:
+			return true
+		}
+	}
+	return false
+}
+
+// syncTopLevel advances to the next plausible top-of-document
+// construct: a directive, a token that can start a body entry, or EOF.
+// Tolerant-mode recovery after a malformed directive.
+func (p *parser) syncTopLevel() {
+	for {
+		switch p.current.Kind {
+		case EOF, AT_TYPE, AT_DIRECTIVE, AT_DATASET, AT_PROTO, IDENT, STRING, INT:
+			return
+		}
+		p.advance()
+	}
+}
+
 // advance consumes the next token. Comments and newlines are collected
 // into pending comments instead of being skipped, so they can be attached
 // to the following entry.
 func (p *parser) advance() {
+	p.prevEnd = p.lex.currentPos()
 	for {
 		p.current = p.lex.Next()
 		if p.current.Kind == NEWLINE {
@@ -57,18 +168,71 @@ func (p *parser) flushComments() []Comment {
 func (p *parser) peekKind() TokenKind {
 	pos, line, col := p.lex.pos, p.lex.line, p.lex.col
 	saved := p.current
+	savedPrevEnd := p.prevEnd
 	nComments := len(p.comments)
+	nErrs := len(p.errs) // tolerant lexing may report during the peek
 	p.advance()
 	next := p.current.Kind
 	p.lex.pos, p.lex.line, p.lex.col = pos, line, col
 	p.current = saved
+	p.prevEnd = savedPrevEnd
 	p.comments = p.comments[:nComments]
+	p.errs = p.errs[:nErrs]
 	return next
 }
 
 // Parse parses PXF source into an AST Document with comments attached.
 func Parse(input []byte) (*Document, error) {
 	return newParser(input).parseDocument()
+}
+
+// ParseTolerant parses PXF source in error-tolerant mode, for editor
+// tooling that needs structure exactly when the buffer is broken
+// (completion mid-keystroke, hover on a half-typed entry). Instead of
+// stopping at the first syntax error the way [Parse] does, it recovers
+// at entry and block boundaries and returns the best-effort AST
+// together with every positioned error, in source order. The document
+// is never nil; a syntactically valid input yields the same AST as
+// [Parse] and an empty error slice. go/parser's AllErrors mode is the
+// model.
+//
+// Recovery behaviors:
+//
+//   - A missing or malformed value (`key =` at end of line, `key`
+//     alone) is synthesized as a [BadVal] placeholder so the entry —
+//     its key and position — still appears in the AST.
+//   - Unclosed blocks and lists are closed at EOF with their parsed
+//     contents intact.
+//   - An unterminated string ends at the newline (or EOF). Note this
+//     differs from [Parse], which permits a raw newline inside a
+//     simple-quoted string; in tolerant mode the newline is taken as
+//     evidence of a mid-edit literal.
+//   - Unterminated triple-quoted strings, bytes literals, and block
+//     comments end at EOF (bytes literals at the newline).
+//   - A malformed directive is skipped to the next directive or body
+//     entry.
+//
+// The returned AST may contain [BadVal] nodes and is meant for
+// tooling (completion, hover, diagnostics), not for decoding into
+// messages — use [Parse] or [Unmarshal] once the document is valid.
+func ParseTolerant(input []byte) (*Document, []Error) {
+	p := newTolerantParser(input)
+	doc, err := p.parseDocument()
+	if err != nil {
+		// parseDocument never returns an error in tolerant mode;
+		// defensive belt-and-braces.
+		p.record(err)
+	}
+	if doc == nil {
+		doc = &Document{}
+	}
+	// Errors are recorded in parse order, which tracks source order
+	// except when a lexer error surfaces during lookahead; sort so
+	// consumers can rely on positional order.
+	sort.SliceStable(p.errs, func(i, j int) bool {
+		return p.errs[i].Pos.Offset < p.errs[j].Pos.Offset
+	})
+	return doc, p.errs
 }
 
 func (p *parser) parseDocument() (*Document, error) {
@@ -85,8 +249,19 @@ directives:
 		switch p.current.Kind {
 		case AT_TYPE:
 			p.advance() // consume @type
-			if p.current.Kind != IDENT {
-				return nil, errorf(p.current.Pos, "expected type name after @type, got %s", p.current.Kind)
+			missingName := p.current.Kind != IDENT
+			if !missingName && p.tolerant && p.currentStartsEntry() {
+				// A dangling `@type` with the body starting right after:
+				// an IDENT that is itself followed by '=', ':', or '{'
+				// is the first entry's key, not the type name.
+				missingName = true
+			}
+			if missingName {
+				if err := p.soft(errorf(p.current.Pos, "expected type name after @type, got %s", p.current.Kind)); err != nil {
+					return nil, err
+				}
+				p.syncTopLevel()
+				continue
 			}
 			doc.TypeURL = p.current.Value
 			doc.BodyOffset = p.current.Pos.Offset + len(p.current.Value)
@@ -94,21 +269,33 @@ directives:
 		case AT_DIRECTIVE:
 			d, end, err := p.parseDirective()
 			if err != nil {
-				return nil, err
+				if err := p.soft(err); err != nil {
+					return nil, err
+				}
+				p.syncTopLevel()
+				continue
 			}
 			doc.Directives = append(doc.Directives, *d)
 			doc.BodyOffset = end
 		case AT_DATASET:
 			ds, end, err := p.parseDatasetDirective()
 			if err != nil {
-				return nil, err
+				if err := p.soft(err); err != nil {
+					return nil, err
+				}
+				p.syncTopLevel()
+				continue
 			}
 			doc.Datasets = append(doc.Datasets, *ds)
 			doc.BodyOffset = end
 		case AT_PROTO:
 			pd, end, err := p.parseProtoDirective()
 			if err != nil {
-				return nil, err
+				if err := p.soft(err); err != nil {
+					return nil, err
+				}
+				p.syncTopLevel()
+				continue
 			}
 			doc.Protos = append(doc.Protos, *pd)
 			doc.BodyOffset = end
@@ -122,12 +309,16 @@ directives:
 	// entries — the @dataset header IS the document's type declaration.
 	if len(doc.Datasets) > 0 {
 		if doc.TypeURL != "" {
-			return nil, errorf(doc.Datasets[0].Pos,
-				"@dataset directive cannot coexist with @type; the @dataset header declares the document's type (draft §3.4.4)")
+			if err := p.soft(errorf(doc.Datasets[0].Pos,
+				"@dataset directive cannot coexist with @type; the @dataset header declares the document's type (draft §3.4.4)")); err != nil {
+				return nil, err
+			}
 		}
 		if p.current.Kind != EOF {
-			return nil, errorf(p.current.Pos,
-				"@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)")
+			if err := p.soft(errorf(p.current.Pos,
+				"@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)")); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -140,7 +331,11 @@ directives:
 		if err != nil {
 			return nil, err
 		}
-		doc.Entries = append(doc.Entries, entry)
+		// Tolerant mode returns (nil, nil) for an entry it skipped past;
+		// parseEntry has already consumed at least one token.
+		if entry != nil {
+			doc.Entries = append(doc.Entries, entry)
+		}
 	}
 	return doc, nil
 }
@@ -393,7 +588,12 @@ func (p *parser) parseDirective() (*Directive, int, error) {
 	atPos := p.current.Pos
 	name := p.current.Value
 	if _, reserved := futureReservedDirectives[name]; reserved {
-		return nil, 0, errorf(atPos, "@%s is a spec-reserved directive name with no v1 semantics (draft §3.4.6)", name)
+		// In tolerant mode, record but keep parsing the directive with
+		// open-grammar rules, so the rest of the document still gets an
+		// AST.
+		if err := p.soft(errorf(atPos, "@%s is a spec-reserved directive name with no v1 semantics (draft §3.4.6)", name)); err != nil {
+			return nil, 0, err
+		}
 	}
 	d := &Directive{
 		Pos:             atPos,
@@ -567,7 +767,16 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 
 	pos := p.current.Pos
 	if p.current.Kind != IDENT && p.current.Kind != STRING && p.current.Kind != INT {
-		return nil, errorf(pos, "expected identifier, string, or integer, got %s (%q)", p.current.Kind, p.current.Value)
+		if !p.tolerant {
+			return nil, errorf(pos, "expected identifier, string, or integer, got %s (%q)", p.current.Kind, p.current.Value)
+		}
+		// Skip the offending token and let the caller's loop retry at
+		// the next one. Hand the leading comments back so they attach
+		// to the next real entry.
+		p.record(errorf(pos, "expected identifier, string, or integer, got %s", p.tokenErrMsg()))
+		p.comments = append(leading, p.comments...)
+		p.advance()
+		return nil, nil
 	}
 	keyKind := p.current.Kind
 	key := p.current.Value
@@ -579,9 +788,12 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// be an identifier (= proto field name). Map-style keys (string /
 		// integer) are only valid with `:`.
 		if keyKind != IDENT {
-			return nil, errorf(pos,
+			// Tolerant mode records and keeps the entry as an assignment.
+			if err := p.soft(errorf(pos,
 				"field assignment with '=' requires an identifier key, got %s (%q); use ':' for map entries",
-				keyKind, key)
+				keyKind, key)); err != nil {
+				return nil, err
+			}
 		}
 		p.advance()
 		val, err := p.parseValue(depth)
@@ -594,8 +806,11 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// Map entry. Only allowed inside a '{ ... }' block, never at
 		// document top level.
 		if !allowMapEntry {
-			return nil, errorf(pos,
-				"map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")
+			// Tolerant mode records and keeps the entry as a map entry.
+			if err := p.soft(errorf(pos,
+				"map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")); err != nil {
+				return nil, err
+			}
 		}
 		p.advance()
 		val, err := p.parseValue(depth)
@@ -608,12 +823,19 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// `{ ... }` denotes a submessage field; same identifier-only rule
 		// as `=` applies.
 		if keyKind != IDENT {
-			return nil, errorf(pos,
+			if err := p.soft(errorf(pos,
 				"submessage block requires an identifier key, got %s (%q)",
-				keyKind, key)
+				keyKind, key)); err != nil {
+				return nil, err
+			}
 		}
 		if depth+1 > MaxNestingDepth {
-			return nil, errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+			if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)); err != nil {
+				return nil, err
+			}
+			// Too deep to descend; skip the whole block, keep the entry.
+			p.skipBalanced(LBRACE, RBRACE)
+			return &Block{Pos: pos, Name: key, LeadingComments: leading}, nil
 		}
 		p.advance() // consume {
 		entries, err := p.parseBody(depth + 1)
@@ -623,12 +845,29 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		return &Block{Pos: pos, Name: key, Entries: entries, LeadingComments: leading}, nil
 
 	default:
-		return nil, errorf(p.current.Pos, "expected '=', ':', or '{' after %q, got %s", key, p.current.Kind)
+		if err := p.soft(errorf(p.current.Pos, "expected '=', ':', or '{' after %q, got %s", key, p.current.Kind)); err != nil {
+			return nil, err
+		}
+		// A dangling key — the mid-edit shape completion fires on.
+		// Keep it as an assignment with a BadVal so tooling still sees
+		// the key and its position; do not consume the current token,
+		// which is most likely the next entry's key. The BadVal anchors
+		// just past the key, where the missing value belongs.
+		return &Assignment{Pos: pos, Key: key, Value: &BadVal{Pos: p.prevEnd}, LeadingComments: leading}, nil
 	}
 }
 
 func (p *parser) parseValue(depth int) (Value, error) {
 	pos := p.current.Pos
+
+	if p.tolerant && p.currentStartsEntry() {
+		// The current token is the NEXT entry's key, not this value —
+		// the value is missing (the `key =` dangling mid-edit shape).
+		// Do not consume it; anchor the placeholder and the error just
+		// past the separator, where the value belongs.
+		p.record(errorf(p.prevEnd, "missing value"))
+		return &BadVal{Pos: p.prevEnd}, nil
+	}
 
 	switch p.current.Kind {
 	case STRING:
@@ -652,12 +891,13 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return v, nil
 
 	case BYTES:
-		decoded, err := base64.StdEncoding.DecodeString(p.current.Value)
+		decoded, err := decodeBase64Lenient(p.current.Value)
 		if err != nil {
-			decoded, err = base64.RawStdEncoding.DecodeString(p.current.Value)
-			if err != nil {
-				return nil, errorf(pos, "invalid base64: %v", err)
+			if err := p.soft(errorf(pos, "invalid base64: %v", err)); err != nil {
+				return nil, err
 			}
+			p.advance()
+			return &BadVal{Pos: pos}, nil
 		}
 		v := &BytesVal{Pos: pos, Value: decoded}
 		p.advance()
@@ -668,7 +908,11 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		if err != nil {
 			t, err = time.Parse(time.RFC3339, p.current.Value)
 			if err != nil {
-				return nil, errorf(pos, "invalid timestamp %q: %v", p.current.Value, err)
+				if err := p.soft(errorf(pos, "invalid timestamp %q: %v", p.current.Value, err)); err != nil {
+					return nil, err
+				}
+				p.advance()
+				return &BadVal{Pos: pos}, nil
 			}
 		}
 		v := &TimestampVal{Pos: pos, Value: t, Raw: p.current.Value}
@@ -678,7 +922,11 @@ func (p *parser) parseValue(depth int) (Value, error) {
 	case DURATION:
 		d, err := time.ParseDuration(p.current.Value)
 		if err != nil {
-			return nil, errorf(pos, "invalid duration %q: %v", p.current.Value, err)
+			if err := p.soft(errorf(pos, "invalid duration %q: %v", p.current.Value, err)); err != nil {
+				return nil, err
+			}
+			p.advance()
+			return &BadVal{Pos: pos}, nil
 		}
 		v := &DurationVal{Pos: pos, Value: d, Raw: p.current.Value}
 		p.advance()
@@ -701,22 +949,47 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return p.parseBlockVal(depth)
 
 	default:
-		return nil, errorf(pos, "expected value, got %s (%q)", p.current.Kind, p.current.Value)
+		if !p.tolerant {
+			return nil, errorf(pos, "expected value, got %s (%q)", p.current.Kind, p.current.Value)
+		}
+		p.record(errorf(pos, "expected value, got %s", p.tokenErrMsg()))
+		switch p.current.Kind {
+		case EOF, RBRACE, RBRACKET:
+			// Leave closers for the enclosing construct to consume.
+		default:
+			p.advance()
+		}
+		return &BadVal{Pos: pos}, nil
 	}
 }
 
 func (p *parser) parseList(depth int) (Value, error) {
 	if depth+1 > MaxNestingDepth {
-		return nil, errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+		if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)); err != nil {
+			return nil, err
+		}
+		pos := p.current.Pos
+		p.skipBalanced(LBRACKET, RBRACKET)
+		return &ListVal{Pos: pos}, nil
 	}
 	pos := p.current.Pos
 	p.advance() // consume [
 
 	elems := make([]Value, 0, 4)
 	for p.current.Kind != RBRACKET && p.current.Kind != EOF {
+		before := p.current.Pos.Offset
 		elem, err := p.parseValue(depth + 1)
 		if err != nil {
 			return nil, err
+		}
+		if p.tolerant && p.current.Pos.Offset == before {
+			if _, bad := elem.(*BadVal); bad {
+				// parseValue recovered without consuming anything (e.g.
+				// a stray '}' that closes an enclosing block, or a token
+				// that starts the next entry); bail out of the list so
+				// the enclosing construct can resynchronize.
+				break
+			}
 		}
 		elems = append(elems, elem)
 		if p.current.Kind == COMMA {
@@ -724,7 +997,12 @@ func (p *parser) parseList(depth int) (Value, error) {
 		}
 	}
 	if p.current.Kind != RBRACKET {
-		return nil, errorf(p.current.Pos, "expected ']', got %s", p.current.Kind)
+		// Tolerant mode closes the list here, keeping the elements
+		// parsed so far.
+		if err := p.soft(errorf(p.current.Pos, "expected ']', got %s", p.current.Kind)); err != nil {
+			return nil, err
+		}
+		return &ListVal{Pos: pos, Elements: elems}, nil
 	}
 	p.advance()
 	return &ListVal{Pos: pos, Elements: elems}, nil
@@ -732,7 +1010,12 @@ func (p *parser) parseList(depth int) (Value, error) {
 
 func (p *parser) parseBlockVal(depth int) (Value, error) {
 	if depth+1 > MaxNestingDepth {
-		return nil, errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+		if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)); err != nil {
+			return nil, err
+		}
+		pos := p.current.Pos
+		p.skipBalanced(LBRACE, RBRACE)
+		return &BlockVal{Pos: pos}, nil
 	}
 	pos := p.current.Pos
 	p.advance() // consume {
@@ -753,11 +1036,39 @@ func (p *parser) parseBody(depth int) ([]Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		entries = append(entries, entry)
+		// Tolerant mode returns (nil, nil) for an entry it skipped past.
+		if entry != nil {
+			entries = append(entries, entry)
+		}
 	}
 	if p.current.Kind != RBRACE {
-		return nil, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
+		if !p.tolerant {
+			return nil, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
+		}
+		// Unclosed block: close it at EOF with the entries parsed so far.
+		p.record(errorf(p.current.Pos, "unclosed block: expected '}' before end of input"))
+		return entries, nil
 	}
 	p.advance()
 	return entries, nil
+}
+
+// decodeBase64Lenient decodes a bytes-literal payload accepting both
+// standard and URL-safe alphabets, with or without padding, matching
+// the lexer's acceptance rule (RFC 4648 §5, referenced by draft §3.7).
+func decodeBase64Lenient(raw string) ([]byte, error) {
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err == nil {
+		return decoded, nil
+	}
+	if decoded, e := base64.RawStdEncoding.DecodeString(raw); e == nil {
+		return decoded, nil
+	}
+	if decoded, e := base64.URLEncoding.DecodeString(raw); e == nil {
+		return decoded, nil
+	}
+	if decoded, e := base64.RawURLEncoding.DecodeString(raw); e == nil {
+		return decoded, nil
+	}
+	return nil, err
 }

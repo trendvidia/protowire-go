@@ -4,7 +4,6 @@
 package pxf
 
 import (
-	"encoding/base64"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,6 +15,22 @@ type lexer struct {
 	pos   int
 	line  int
 	col   int
+
+	// tolerant enables the error-recovering behaviors used by
+	// [ParseTolerant]: unterminated strings end at the newline (or EOF),
+	// unterminated triple-quoted strings / block comments / bytes
+	// literals end at EOF, invalid escape sequences are kept literally,
+	// and bytes literals skip base64 pre-validation (the parser reports
+	// it instead). Each recovery reports a positioned error via onErr.
+	tolerant bool
+	onErr    func(pos Position, msg string)
+}
+
+// reportErr records a recoverable lexical error in tolerant mode.
+func (l *lexer) reportErr(pos Position, msg string) {
+	if l.onErr != nil {
+		l.onErr(pos, msg)
+	}
 }
 
 func newLexer(input []byte) *lexer {
@@ -159,6 +174,13 @@ func (l *lexer) lexBlockComment(pos Position) Token {
 		}
 		l.advance()
 	}
+	if l.tolerant {
+		for l.pos < len(l.input) {
+			l.advance()
+		}
+		l.reportErr(pos, "unterminated block comment")
+		return Token{Kind: COMMENT, Value: string(l.input[start:l.pos]), Pos: pos}
+	}
 	return Token{Kind: ILLEGAL, Value: "unterminated block comment", Pos: pos}
 }
 
@@ -166,7 +188,16 @@ func (l *lexer) lexString(pos Position) Token {
 	l.advance() // opening "
 	var sb strings.Builder
 	var buf [utf8.UTFMax]byte
+	tolerant := l.tolerant // hoisted: checked once per byte below
 	for l.pos < len(l.input) {
+		if tolerant && l.peek() == '\n' {
+			// Recovery for mid-edit buffers: treat the newline as the
+			// end of the (unterminated) string, leaving the newline for
+			// the next token. Strict mode instead consumes the newline
+			// into the literal and keeps scanning for the closing quote.
+			l.reportErr(pos, "unterminated string: ended at newline")
+			return Token{Kind: STRING, Value: sb.String(), Pos: pos}
+		}
 		ch := l.advance()
 		if ch == '"' {
 			return Token{Kind: STRING, Value: sb.String(), Pos: pos}
@@ -176,7 +207,15 @@ func (l *lexer) lexString(pos Position) Token {
 			continue
 		}
 		if l.pos >= len(l.input) {
+			if tolerant {
+				l.reportErr(pos, "unterminated escape sequence")
+				return Token{Kind: STRING, Value: sb.String(), Pos: pos}
+			}
 			return Token{Kind: ILLEGAL, Value: "unterminated escape sequence", Pos: pos}
+		}
+		var escPos Position
+		if tolerant { // strict mode never reads it; skip the capture
+			escPos = l.currentPos()
 		}
 		esc := l.advance()
 		switch esc {
@@ -199,18 +238,34 @@ func (l *lexer) lexString(pos Position) Token {
 		case 'x':
 			b, ok := l.readHexByte()
 			if !ok {
+				if tolerant {
+					l.reportErr(escPos, `invalid \x escape: expected 2 hex digits`)
+					sb.WriteString(`\x`)
+					continue
+				}
 				return Token{Kind: ILLEGAL, Value: `invalid \x escape: expected 2 hex digits`, Pos: pos}
 			}
 			sb.WriteByte(b)
 		case '0', '1', '2', '3':
 			b, ok := l.readOctRest(esc)
 			if !ok {
+				if tolerant {
+					l.reportErr(escPos, `invalid octal escape: expected 3 octal digits`)
+					sb.WriteByte('\\')
+					sb.WriteByte(esc)
+					continue
+				}
 				return Token{Kind: ILLEGAL, Value: `invalid octal escape: expected 3 octal digits`, Pos: pos}
 			}
 			sb.WriteByte(b)
 		case 'u':
 			r, ok := l.readHexRune(4)
 			if !ok || !utf8.ValidRune(r) {
+				if tolerant {
+					l.reportErr(escPos, `invalid \u escape: expected 4 hex digits forming a valid codepoint`)
+					sb.WriteString(`\u`)
+					continue
+				}
 				return Token{Kind: ILLEGAL, Value: `invalid \u escape: expected 4 hex digits forming a valid codepoint`, Pos: pos}
 			}
 			n := utf8.EncodeRune(buf[:], r)
@@ -218,13 +273,28 @@ func (l *lexer) lexString(pos Position) Token {
 		case 'U':
 			r, ok := l.readHexRune(8)
 			if !ok || !utf8.ValidRune(r) {
+				if tolerant {
+					l.reportErr(escPos, `invalid \U escape: expected 8 hex digits forming a valid codepoint`)
+					sb.WriteString(`\U`)
+					continue
+				}
 				return Token{Kind: ILLEGAL, Value: `invalid \U escape: expected 8 hex digits forming a valid codepoint`, Pos: pos}
 			}
 			n := utf8.EncodeRune(buf[:], r)
 			sb.Write(buf[:n])
 		default:
+			if tolerant {
+				l.reportErr(escPos, `unknown escape sequence \`+string(esc))
+				sb.WriteByte('\\')
+				sb.WriteByte(esc)
+				continue
+			}
 			return Token{Kind: ILLEGAL, Value: `unknown escape sequence \` + string(esc), Pos: pos}
 		}
+	}
+	if tolerant {
+		l.reportErr(pos, "unterminated string")
+		return Token{Kind: STRING, Value: sb.String(), Pos: pos}
 	}
 	return Token{Kind: ILLEGAL, Value: "unterminated string", Pos: pos}
 }
@@ -243,6 +313,13 @@ func (l *lexer) lexTripleString(pos Position) Token {
 			return Token{Kind: STRING, Value: dedent(raw), Pos: pos}
 		}
 		l.advance()
+	}
+	if l.tolerant {
+		for l.pos < len(l.input) {
+			l.advance()
+		}
+		l.reportErr(pos, "unterminated triple-quoted string")
+		return Token{Kind: STRING, Value: dedent(string(l.input[start:l.pos])), Pos: pos}
 	}
 	return Token{Kind: ILLEGAL, Value: "unterminated triple-quoted string", Pos: pos}
 }
@@ -284,21 +361,28 @@ func (l *lexer) lexBytes(pos Position) Token {
 			l.advance() // closing "
 			// Accept both standard and URL-safe base64, with or without
 			// padding, per RFC 4648 §5 (referenced by draft §3.7).
-			if _, e1 := base64.StdEncoding.DecodeString(raw); e1 != nil {
-				if _, e2 := base64.RawStdEncoding.DecodeString(raw); e2 != nil {
-					if _, e3 := base64.URLEncoding.DecodeString(raw); e3 != nil {
-						if _, e4 := base64.RawURLEncoding.DecodeString(raw); e4 != nil {
-							return Token{Kind: ILLEGAL, Value: "invalid base64 in bytes literal", Pos: pos}
-						}
-					}
+			// Tolerant mode defers validation to the parser, which turns
+			// a decode failure into a positioned error plus a BadVal.
+			if !l.tolerant {
+				if _, err := decodeBase64Lenient(raw); err != nil {
+					return Token{Kind: ILLEGAL, Value: "invalid base64 in bytes literal", Pos: pos}
 				}
 			}
 			return Token{Kind: BYTES, Value: raw, Pos: pos}
 		}
 		if ch == '\n' {
+			if l.tolerant {
+				// Leave the newline for the next token.
+				l.reportErr(pos, "unterminated bytes literal: ended at newline")
+				return Token{Kind: BYTES, Value: string(l.input[start:l.pos]), Pos: pos}
+			}
 			return Token{Kind: ILLEGAL, Value: "unterminated bytes literal", Pos: pos}
 		}
 		l.advance()
+	}
+	if l.tolerant {
+		l.reportErr(pos, "unterminated bytes literal")
+		return Token{Kind: BYTES, Value: string(l.input[start:l.pos]), Pos: pos}
 	}
 	return Token{Kind: ILLEGAL, Value: "unterminated bytes literal", Pos: pos}
 }
