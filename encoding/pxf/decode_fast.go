@@ -417,12 +417,9 @@ func (d *directDecoder) consumeValue() (Value, error) {
 		return v, nil
 	case BYTES:
 		raw := d.current.Value
-		decoded, err := base64.StdEncoding.DecodeString(raw)
+		decoded, err := decodeBase64Lenient(raw)
 		if err != nil {
-			decoded, err = base64.RawStdEncoding.DecodeString(raw)
-			if err != nil {
-				return nil, errorf(pos, "invalid base64: %v", err)
-			}
+			return nil, errorf(pos, "invalid base64: %v", err)
 		}
 		v := &BytesVal{Pos: pos, Value: decoded}
 		d.advance()
@@ -1314,12 +1311,9 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 		if d.current.Kind != BYTES {
 			return protoreflect.Value{}, errorf(pos, "expected bytes for field %q", fd.Name())
 		}
-		decoded, err := base64.StdEncoding.DecodeString(d.current.Value)
+		decoded, err := decodeBase64Lenient(d.current.Value)
 		if err != nil {
-			decoded, err = base64.RawStdEncoding.DecodeString(d.current.Value)
-			if err != nil {
-				return protoreflect.Value{}, errorf(pos, "invalid base64 for field %q: %v", fd.Name(), err)
-			}
+			return protoreflect.Value{}, errorf(pos, "invalid base64 for field %q: %v", fd.Name(), err)
 		}
 		d.advance()
 		return protoreflect.ValueOfBytes(decoded), nil
@@ -1606,12 +1600,9 @@ func applyDefaultImpl(msg protoreflect.Message, fd protoreflect.FieldDescriptor,
 		}
 		msg.Set(fd, protoreflect.ValueOfFloat64(f))
 	case protoreflect.BytesKind:
-		decoded, err := base64.StdEncoding.DecodeString(def)
+		decoded, err := decodeBase64Lenient(def)
 		if err != nil {
-			decoded, err = base64.RawStdEncoding.DecodeString(def)
-			if err != nil {
-				return fmt.Errorf("invalid default bytes %q for field %q: %w", def, fd.Name(), err)
-			}
+			return fmt.Errorf("invalid default bytes %q for field %q: %w", def, fd.Name(), err)
 		}
 		msg.Set(fd, protoreflect.ValueOfBytes(decoded))
 	case protoreflect.EnumKind:

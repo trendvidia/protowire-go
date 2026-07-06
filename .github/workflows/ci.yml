@@ -112,3 +112,20 @@ jobs:
             echo "=== $t ==="
             go test -run='^$' -fuzz="^${t}$" -fuzztime=15s ${{ matrix.pkg }}
           done
+
+  # Aggregate gate for branch protection: the "main protection — port" ruleset
+  # requires this single context instead of enumerating matrix job names
+  # (which change with every Go version bump and can never all be listed).
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [test, vuln, staticcheck, fuzz]
+    runs-on: ubuntu-latest
+    steps:
+      - name: all required jobs succeeded
+        run: |
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "needs results: $results"
+          for r in $results; do
+            [ "$r" = "success" ] || { echo "a required job did not succeed"; exit 1; }
+          done

@@ -160,11 +160,13 @@ type Directive struct {
 type Entry interface {
 	entryNode()
 	pos() Position
+	end() Position
 }
 
 // Assignment represents "key = value" (field assignment in message context).
 type Assignment struct {
 	Pos             Position
+	End             Position // just past the value's last byte
 	Key             string
 	Value           Value
 	LeadingComments []Comment // comments on lines before this entry
@@ -173,10 +175,12 @@ type Assignment struct {
 
 func (*Assignment) entryNode()      {}
 func (a *Assignment) pos() Position { return a.Pos }
+func (a *Assignment) end() Position { return a.End }
 
 // MapEntry represents "key: value" (entry in map context).
 type MapEntry struct {
 	Pos             Position
+	End             Position // just past the value's last byte
 	Key             string
 	Value           Value
 	LeadingComments []Comment
@@ -185,10 +189,12 @@ type MapEntry struct {
 
 func (*MapEntry) entryNode()      {}
 func (e *MapEntry) pos() Position { return e.Pos }
+func (e *MapEntry) end() Position { return e.End }
 
 // Block represents "name { entries }" (nested message).
 type Block struct {
 	Pos             Position
+	End             Position // just past the closing '}'
 	Name            string
 	Entries         []Entry
 	LeadingComments []Comment
@@ -196,110 +202,164 @@ type Block struct {
 
 func (*Block) entryNode()      {}
 func (b *Block) pos() Position { return b.Pos }
+func (b *Block) end() Position { return b.End }
 
 // Value is an expression on the right side of = or :.
 type Value interface {
 	valueNode()
 	pos() Position
+	end() Position
 }
 
 // StringVal is a quoted string literal.
 type StringVal struct {
 	Pos   Position
+	End   Position // just past the closing quote
 	Value string
 }
 
 func (*StringVal) valueNode()      {}
 func (v *StringVal) pos() Position { return v.Pos }
+func (v *StringVal) end() Position { return v.End }
 
 // IntVal is an integer literal (raw text, decoded later by schema).
 type IntVal struct {
 	Pos Position
+	End Position // just past the literal's last byte
 	Raw string
 }
 
 func (*IntVal) valueNode()      {}
 func (v *IntVal) pos() Position { return v.Pos }
+func (v *IntVal) end() Position { return v.End }
 
 // FloatVal is a floating-point literal.
 type FloatVal struct {
 	Pos Position
+	End Position // just past the literal's last byte
 	Raw string
 }
 
 func (*FloatVal) valueNode()      {}
 func (v *FloatVal) pos() Position { return v.Pos }
+func (v *FloatVal) end() Position { return v.End }
 
 // BoolVal is a boolean literal (true / false).
 type BoolVal struct {
 	Pos   Position
+	End   Position // just past the literal's last byte
 	Value bool
 }
 
 func (*BoolVal) valueNode()      {}
 func (v *BoolVal) pos() Position { return v.Pos }
+func (v *BoolVal) end() Position { return v.End }
 
 // BytesVal is a base64-encoded bytes literal (b"...").
 type BytesVal struct {
 	Pos   Position
+	End   Position // just past the closing quote
 	Value []byte
 }
 
 func (*BytesVal) valueNode()      {}
 func (v *BytesVal) pos() Position { return v.Pos }
+func (v *BytesVal) end() Position { return v.End }
 
 // NullVal represents an explicit null literal.
 type NullVal struct {
 	Pos Position
+	End Position // just past the literal's last byte
 }
 
 func (*NullVal) valueNode()      {}
 func (v *NullVal) pos() Position { return v.Pos }
+func (v *NullVal) end() Position { return v.End }
 
 // IdentVal is an unquoted identifier used as a value (enum names).
 type IdentVal struct {
 	Pos  Position
+	End  Position // just past the identifier's last byte
 	Name string
 }
 
 func (*IdentVal) valueNode()      {}
 func (v *IdentVal) pos() Position { return v.Pos }
+func (v *IdentVal) end() Position { return v.End }
 
 // TimestampVal is an RFC 3339 timestamp literal.
 type TimestampVal struct {
 	Pos   Position
+	End   Position // just past the literal's last byte
 	Value time.Time
 	Raw   string
 }
 
 func (*TimestampVal) valueNode()      {}
 func (v *TimestampVal) pos() Position { return v.Pos }
+func (v *TimestampVal) end() Position { return v.End }
 
 // DurationVal is a Go-style duration literal (e.g. 30s, 1h30m).
 type DurationVal struct {
 	Pos   Position
+	End   Position // just past the literal's last byte
 	Value time.Duration
 	Raw   string
 }
 
 func (*DurationVal) valueNode()      {}
 func (v *DurationVal) pos() Position { return v.Pos }
+func (v *DurationVal) end() Position { return v.End }
+
+// BadVal is a placeholder for a value that was required but missing or
+// malformed. It is produced only by [ParseTolerant] — [Parse] never
+// emits one. For a missing value, Pos points just past the token that
+// required it (right after a dangling '=' or key), the spot where the
+// value would be typed; for a malformed literal, Pos points at the
+// offending token. The corresponding syntax error is in the []Error
+// returned alongside the document. [FormatDocument] renders a BadVal
+// as nothing, so formatting a tolerant AST that contains one may not
+// reparse.
+type BadVal struct {
+	Pos Position
+	End Position // == Pos; a BadVal spans no source bytes
+}
+
+func (*BadVal) valueNode()      {}
+func (v *BadVal) pos() Position { return v.Pos }
+func (v *BadVal) end() Position { return v.End }
 
 // ListVal is a list value: [elem, elem, ...].
 type ListVal struct {
 	Pos      Position
+	End      Position // just past the closing ']'
 	Elements []Value
 }
 
 func (*ListVal) valueNode()      {}
 func (v *ListVal) pos() Position { return v.Pos }
+func (v *ListVal) end() Position { return v.End }
 
 // BlockVal is an anonymous block value: { entries }.
 // Used for maps (key: value pairs) and inline messages in lists.
 type BlockVal struct {
 	Pos     Position
+	End     Position // just past the closing '}'
 	Entries []Entry
 }
 
 func (*BlockVal) valueNode()      {}
 func (v *BlockVal) pos() Position { return v.Pos }
+func (v *BlockVal) end() Position { return v.End }
+
+// EntrySpan returns the source byte span [start, end) covered by an
+// entry parsed with [Parse] or [ParseTolerant]: start is the position
+// of the entry's key and end is just past its value (past the closing
+// '}' for a [Block]). Leading comments and surrounding whitespace are
+// not included. Entries constructed by hand have a zero end.
+func EntrySpan(e Entry) (start, end Position) { return e.pos(), e.end() }
+
+// ValueSpan returns the source byte span [start, end) covered by a
+// value parsed with [Parse] or [ParseTolerant]. A [BadVal] spans no
+// bytes (start == end). Values constructed by hand have a zero end.
+func ValueSpan(v Value) (start, end Position) { return v.pos(), v.end() }
