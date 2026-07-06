@@ -11,6 +11,25 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- `encoding/pxf`: `ParseTolerant` — error-tolerant parse mode for
+  editor tooling (#27). Recovers at entry/block boundaries instead of
+  stopping at the first syntax error, returning a best-effort
+  `*Document` plus all positioned errors: a missing or malformed value
+  becomes a `BadVal` placeholder (new AST node), unclosed blocks and
+  lists are closed at EOF, unterminated strings end at the newline,
+  and malformed directives are skipped to the next directive or body
+  entry. `Parse` keeps its all-or-nothing contract.
+
+### Fixed
+
+- `encoding/pxf`: `Parse`, `Unmarshal` / `UnmarshalFull`, and
+  `(pxf.default)` bytes defaults now decode URL-safe base64
+  (RFC 4648 §5) in `b"..."` values, matching the lexer's acceptance
+  rule. Previously the lexer validated a URL-safe bytes literal but
+  every decode path then rejected it.
+
 ## [1.0.0] — 2026-05-13
 
 First major-version cut. Implements the three one-time spec changes

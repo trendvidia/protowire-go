@@ -125,6 +125,24 @@ bytes_field = b"AQID"
 	assert.Equal(t, []byte{1, 2, 3}, get("bytes_field").Bytes())
 }
 
+func TestBytesFieldURLSafeBase64(t *testing.T) {
+	// RFC 4648 §5 URL-safe alphabet (draft §3.7): the lexer accepts it,
+	// so both decode paths must too. 0xff 0xef encodes as "_-8=" in the
+	// URL-safe alphabet ("/+8=" in standard).
+	desc := msgDesc(t, "AllTypes")
+	input := []byte(`bytes_field = b"_-8="`)
+
+	msg, err := pxf.UnmarshalDescriptor(input, desc)
+	require.NoError(t, err)
+	got := msg.ProtoReflect().Get(desc.Fields().ByName("bytes_field")).Bytes()
+	assert.Equal(t, []byte{0xff, 0xef}, got)
+
+	doc, err := pxf.Parse(input)
+	require.NoError(t, err)
+	bv := doc.Entries[0].(*pxf.Assignment).Value.(*pxf.BytesVal)
+	assert.Equal(t, []byte{0xff, 0xef}, bv.Value)
+}
+
 func TestEnumField(t *testing.T) {
 	desc := msgDesc(t, "AllTypes")
 	input := `enum_field = STATUS_ACTIVE`

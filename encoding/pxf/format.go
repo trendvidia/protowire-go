@@ -110,6 +110,11 @@ func (f *formatter) formatValue(val Value, level int) {
 		f.buf.WriteByte('"')
 	case *NullVal:
 		f.buf.WriteString("null")
+	case *BadVal:
+		// A tolerant-parse placeholder has no source text; emitting
+		// nothing means the output may not reparse (documented on
+		// BadVal). Explicit so the omission is a decision, not a
+		// fall-through.
 	case *IdentVal:
 		f.buf.WriteString(v.Name)
 	case *TimestampVal:

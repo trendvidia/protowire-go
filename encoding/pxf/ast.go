@@ -285,6 +285,22 @@ type DurationVal struct {
 func (*DurationVal) valueNode()      {}
 func (v *DurationVal) pos() Position { return v.Pos }
 
+// BadVal is a placeholder for a value that was required but missing or
+// malformed. It is produced only by [ParseTolerant] — [Parse] never
+// emits one. For a missing value, Pos points just past the token that
+// required it (right after a dangling '=' or key), the spot where the
+// value would be typed; for a malformed literal, Pos points at the
+// offending token. The corresponding syntax error is in the []Error
+// returned alongside the document. [FormatDocument] renders a BadVal
+// as nothing, so formatting a tolerant AST that contains one may not
+// reparse.
+type BadVal struct {
+	Pos Position
+}
+
+func (*BadVal) valueNode()      {}
+func (v *BadVal) pos() Position { return v.Pos }
+
 // ListVal is a list value: [elem, elem, ...].
 type ListVal struct {
 	Pos      Position
