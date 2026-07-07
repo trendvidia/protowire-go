@@ -371,6 +371,8 @@ replace google.golang.org/protobuf => github.com/trendvidia/protobuf-go v1.36.12
 
 Run `go mod tidy` afterward and re-verify with `go test ./...`. The fork keeps the `google.golang.org/protobuf` import path, tracks upstream's tags closely, and adds nothing user-visible beyond the three unsafe setters — code that compiles against upstream compiles against the fork unchanged.
 
+> **Contributing to `protowire-go` itself?** This repo's own `go.mod` deliberately depends only on upstream protobuf so the published module stays clean. To get the fork's fast path in your local builds and CI without committing a `replace`, use the git-ignored `go.work` workspace: `cp docs/go.work.example go.work`. See [docs/protobuf-fork.md](docs/protobuf-fork.md) for the full rationale.
+
 When to opt in:
 
 - **Binaries / services** that benchmark show latency or allocation pressure on `dynamicpb` decode paths — likely yes.

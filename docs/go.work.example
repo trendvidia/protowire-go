@@ -1,0 +1,20 @@
+// Copy this file to the repo root as `go.work` to route
+// google.golang.org/protobuf through the trendvidia fork for your local
+// builds and CI, without adding a `replace` to the published go.mod.
+//
+//     cp docs/go.work.example go.work
+//
+// `go.work` is git-ignored (see .gitignore) so it never leaks into the
+// published module. See docs/protobuf-fork.md for the full rationale.
+
+go 1.25.0
+
+use .
+
+// Route google.golang.org/protobuf to the trendvidia fork, which adds
+// SetUnsafe / AppendUnsafe / MapSetUnsafe on *dynamicpb.Message for the
+// PXF/SBE unmarshal fast paths (see encoding/pxf/decode_fast.go).
+//
+// Keep this version in lockstep with the fork tag referenced elsewhere
+// (currently v1.36.12); the fork tracks upstream's tags closely.
+replace google.golang.org/protobuf => github.com/trendvidia/protobuf-go v1.36.12
