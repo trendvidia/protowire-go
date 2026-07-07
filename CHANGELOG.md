@@ -11,6 +11,26 @@ format changes.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-07-07
+
+Packaging hygiene. No API or wire-format changes, and no behavior
+change for consumers: a `replace` in a dependency's `go.mod` never
+applied to downstream builds, so `go get github.com/trendvidia/protowire-go`
+resolved to upstream protobuf before and after this release.
+
+### Changed
+
+- `go.mod` no longer carries `replace google.golang.org/protobuf =>
+  github.com/trendvidia/protobuf-go`. The published module now depends
+  only on the canonical upstream `google.golang.org/protobuf`. The
+  `dynamicpb` unmarshal fast path (`SetUnsafe` / `AppendUnsafe` /
+  `MapSetUnsafe`) is unchanged — still an opt-in runtime optimization
+  that falls back gracefully when the fork isn't present. Contributors
+  and CI restore the fork for local builds via a git-ignored `go.work`
+  (copy `docs/go.work.example`); downstream binaries that want the fast
+  path continue to add the `replace` to their own `go.mod`, exactly as
+  before. New doc: `docs/protobuf-fork.md`.
+
 ## [1.1.0] — 2026-07-06
 
 The editor-tooling release: the read side (error-tolerant parsing)
