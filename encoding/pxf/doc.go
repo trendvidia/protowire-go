@@ -23,6 +23,8 @@
 //   - [Parse] / [FormatDocument] — AST path. Produces a [Document] with
 //     comments attached to entries. Use when you need to round-trip a
 //     PXF document while preserving its formatting and comments.
+//     [FormatValue] / [AppendValue] render a single value to its source
+//     literal for tools that splice values back into a buffer.
 //   - [ParseTolerant] — error-tolerant AST path for editor tooling.
 //     Recovers at entry/block boundaries and returns a best-effort
 //     [Document] plus all positioned errors, so completion and hover
@@ -32,7 +34,11 @@
 //     to a hand-written document leave everything else byte-stable:
 //     comments, blank lines, ordering, indentation, and formatting
 //     quirks. [FormatDocument] remains the explicit, on-demand
-//     normalizer.
+//     normalizer. Edits address fields by dotted path
+//     ([Rewriter.Set] / [Rewriter.Remove]) or by the AST node the
+//     caller holds from [Rewriter.Document] ([Rewriter.ReplaceValue] /
+//     [Rewriter.AppendEntry] / [Rewriter.SetSpan]) — the latter reach a
+//     specific node among same-key siblings that a path cannot.
 //
 // # Concurrency
 //

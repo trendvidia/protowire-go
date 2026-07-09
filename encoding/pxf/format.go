@@ -28,6 +28,35 @@ func FormatDocument(doc *Document) []byte {
 	return buf.Bytes()
 }
 
+// FormatValue renders v as its PXF source literal — the exact text the
+// formatter emits for a value inside [FormatDocument]. It is the
+// single-value entry point for tools that splice a rendered value back
+// into a buffer, so they need not re-implement PXF literal rendering
+// (string quoting, raw int/float forms, base64 bytes, enum idents,
+// durations, timestamps).
+//
+// Multi-line values (lists, block values) render with two-space
+// indentation and no trailing newline; the first line carries no
+// leading indent, so a caller splicing into an indented context must
+// re-indent the continuation lines itself. The [Rewriter] does this
+// automatically — prefer its methods when editing a document in place.
+//
+// A [BadVal] renders as nothing (it spans no source), so formatting a
+// value tree that contains one may not reparse.
+func FormatValue(v Value) []byte {
+	return AppendValue(nil, v)
+}
+
+// AppendValue appends the PXF source literal of v to dst and returns
+// the extended slice. It is the allocation-friendly form of
+// [FormatValue]; see that function for the rendering details.
+func AppendValue(dst []byte, v Value) []byte {
+	buf := bytes.NewBuffer(dst)
+	f := &formatter{buf: buf, indent: "  "}
+	f.formatValue(v, 0)
+	return buf.Bytes()
+}
+
 type formatter struct {
 	buf    *bytes.Buffer
 	indent string
