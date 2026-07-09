@@ -196,6 +196,69 @@ int32_field = 42
 	assert.Contains(t, a2.LeadingComments[1].Text, "Double slash")
 }
 
+func TestInlineTrailingComment(t *testing.T) {
+	t.Run("last entry in block before closing brace", func(t *testing.T) {
+		src := []byte("capabilities {\n  restrict = true # deny-by-default\n}\n")
+		doc, err := pxf.Parse(src)
+		require.NoError(t, err)
+		require.Len(t, doc.Entries, 1)
+		block := doc.Entries[0].(*pxf.Block)
+		require.Len(t, block.Entries, 1)
+		a := block.Entries[0].(*pxf.Assignment)
+		assert.Equal(t, "restrict", a.Key)
+		assert.Equal(t, "# deny-by-default", a.TrailingComment)
+		// The comment round-trips instead of being dropped.
+		assert.Equal(t, string(src), string(pxf.FormatDocument(doc)))
+	})
+
+	t.Run("last entry at top level before EOF", func(t *testing.T) {
+		src := []byte(`theme_variant = "dark" # matches my terminal` + "\n")
+		doc, err := pxf.Parse(src)
+		require.NoError(t, err)
+		require.Len(t, doc.Entries, 1)
+		a := doc.Entries[0].(*pxf.Assignment)
+		assert.Equal(t, "theme_variant", a.Key)
+		assert.Equal(t, "# matches my terminal", a.TrailingComment)
+		assert.Equal(t, string(src), string(pxf.FormatDocument(doc)))
+	})
+
+	t.Run("entry with a following entry attaches to itself not the next", func(t *testing.T) {
+		src := []byte("host = \"prod\" # primary\nport = 8080\n")
+		doc, err := pxf.Parse(src)
+		require.NoError(t, err)
+		require.Len(t, doc.Entries, 2)
+		host := doc.Entries[0].(*pxf.Assignment)
+		port := doc.Entries[1].(*pxf.Assignment)
+		assert.Equal(t, "# primary", host.TrailingComment)
+		assert.Empty(t, port.LeadingComments, "inline comment must not migrate to the next entry's leading comments")
+		assert.Empty(t, port.TrailingComment)
+	})
+
+	t.Run("map entry trailing comment", func(t *testing.T) {
+		src := []byte("labels {\n  team: \"core\" # owning team\n}\n")
+		doc, err := pxf.Parse(src)
+		require.NoError(t, err)
+		block := doc.Entries[0].(*pxf.Block)
+		require.Len(t, block.Entries, 1)
+		m := block.Entries[0].(*pxf.MapEntry)
+		assert.Equal(t, "team", m.Key)
+		assert.Equal(t, "# owning team", m.TrailingComment)
+		assert.Equal(t, string(src), string(pxf.FormatDocument(doc)))
+	})
+
+	t.Run("own-line comment stays leading, not trailing", func(t *testing.T) {
+		src := []byte("a = 1\n# not a's trailer\nb = 2\n")
+		doc, err := pxf.Parse(src)
+		require.NoError(t, err)
+		require.Len(t, doc.Entries, 2)
+		a := doc.Entries[0].(*pxf.Assignment)
+		b := doc.Entries[1].(*pxf.Assignment)
+		assert.Empty(t, a.TrailingComment)
+		require.Len(t, b.LeadingComments, 1)
+		assert.Contains(t, b.LeadingComments[0].Text, "not a's trailer")
+	})
+}
+
 func TestFormatDocument(t *testing.T) {
 	input := `# Header
 @type test.v1.AllTypes
