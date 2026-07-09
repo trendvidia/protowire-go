@@ -204,7 +204,7 @@ func TestSetSpanRawSplice(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := findAssignment(t, r.Document().Entries, "a").Value
-	start, end := pxf.ValueSpan(v.(pxf.Value))
+	start, end := pxf.ValueSpan(v)
 	if err := r.SetSpan(start.Offset, end.Offset, []byte("42")); err != nil {
 		t.Fatal(err)
 	}
