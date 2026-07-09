@@ -11,6 +11,28 @@ format changes.
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-07-09
+
+A parser bug fix for comment round-tripping. No API or wire-format
+changes; the `encoding/pxf` AST types are unchanged.
+
+### Fixed
+
+- `encoding/pxf`: `Parse` no longer drops an inline (same-line) comment
+  that trails the **last** entry before a block's closing `}` or EOF
+  (#34). Such a comment had nowhere to attach — it was only ever flushed
+  as the *next* entry's `LeadingComments`, and with no following entry it
+  was lost, so `FormatDocument` of the parsed document omitted it.
+  `Parse` now stores an inline-trailing comment directly in
+  `Assignment.TrailingComment` / `MapEntry.TrailingComment` (the fields
+  `FormatDocument` already renders), so `restrict = true # deny-by-default`
+  round-trips in place. This also fixes the previously-surviving case
+  where a following entry *did* exist: the comment now attaches to the
+  entry it trails instead of migrating to the next entry's leading
+  comments, removing the line-matching reconstruction burden on consumers
+  (see trendvidia/goed#1). Comments on their own line remain leading
+  comments.
+
 ## [1.1.1] — 2026-07-07
 
 Packaging hygiene. No API or wire-format changes, and no behavior
