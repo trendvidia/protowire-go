@@ -38,6 +38,10 @@ type Rewriter struct {
 	src   []byte
 	doc   *Document
 	edits []spanEdit
+	// insertSeq gives each [Rewriter.AppendEntry] a distinct edit
+	// identity so repeated appends into one block accumulate rather
+	// than deduplicating (as same-path Sets do).
+	insertSeq int
 }
 
 // spanEdit replaces src[start:end) with text. start == end is a pure
@@ -167,6 +171,122 @@ func (r *Rewriter) Remove(path string) error {
 	}
 	r.stage(spanEdit{path: path, start: start, end: end})
 	return nil
+}
+
+// ReplaceValue stages a replacement of the source span of an existing
+// value node with the rendering of with. Unlike [Rewriter.Set], which
+// addresses a value by a first-match dotted path, ReplaceValue targets
+// the exact node the caller holds from [Rewriter.Document] — so it can
+// mutate one node among siblings that share a key (repeated widget
+// nodes in a children block, say) that no path can single out.
+//
+// old must be a value parsed from this Rewriter's source (it carries
+// the span to replace); a hand-built value or a [BadVal] has no span
+// and is rejected. Continuation lines of a multi-line replacement are
+// re-indented to old's line, matching Set. Calling ReplaceValue again
+// for the same node replaces the previously staged edit.
+func (r *Rewriter) ReplaceValue(old, with Value) error {
+	if old == nil {
+		return fmt.Errorf("pxf: ReplaceValue: nil old value")
+	}
+	if with == nil {
+		return fmt.Errorf("pxf: ReplaceValue: nil replacement value")
+	}
+	if containsBadVal(with) {
+		return fmt.Errorf("pxf: ReplaceValue: cannot write a BadVal placeholder")
+	}
+	start := old.pos().Offset
+	end := old.end().Offset
+	if start >= end {
+		return fmt.Errorf("pxf: ReplaceValue: old value has no source span (not a parsed value, or a BadVal)")
+	}
+	return r.SetSpan(start, end, r.renderValue(with, r.lineLeadingIndent(start)))
+}
+
+// SetSpan stages a replacement of src[start:end) with text — the raw
+// escape hatch beneath [Rewriter.ReplaceValue] and [Rewriter.Set].
+// start == end is a pure insertion; a nil text is a pure deletion.
+// Routing edits through the Rewriter (rather than splicing bytes by
+// hand) keeps overlap detection, edit batching, and the reparse
+// safety-net in [Rewriter.Bytes]. text is copied, so the caller may
+// reuse its buffer. Staging another edit over the identical span
+// replaces this one (last call wins).
+func (r *Rewriter) SetSpan(start, end int, text []byte) error {
+	if start < 0 || end < start || end > len(r.src) {
+		return fmt.Errorf("pxf: SetSpan: span [%d:%d) out of range for source of length %d", start, end, len(r.src))
+	}
+	r.stage(spanEdit{path: spanPath(start, end), start: start, end: end, text: append([]byte(nil), text...)})
+	return nil
+}
+
+// AppendEntry stages the insertion of e as the last entry of block,
+// formatted to match the block's existing entries: multi-line blocks
+// get a new line indented like the siblings (or the block's own indent
+// plus one level when the block is empty), placed just before the
+// closing brace; an inline block (`foo { ... }`, including the empty
+// `foo { }`) gets the entry spliced inline before the brace. block must
+// be a node from this Rewriter's [Rewriter.Document]. Repeated
+// AppendEntry calls into one block accumulate in call order.
+func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
+	if block == nil {
+		return fmt.Errorf("pxf: AppendEntry: nil block")
+	}
+	if e == nil {
+		return fmt.Errorf("pxf: AppendEntry: nil entry")
+	}
+	if entryContainsBadVal(e) {
+		return fmt.Errorf("pxf: AppendEntry: cannot write a BadVal placeholder")
+	}
+	closeOff := block.End.Offset - 1
+	scopeStart := block.Pos.Offset
+	if closeOff < scopeStart || closeOff >= len(r.src) || r.src[closeOff] != '}' {
+		return fmt.Errorf("pxf: AppendEntry: block %q has no source span (not a parsed block)", block.Name)
+	}
+
+	if !bytes.Contains(r.src[scopeStart:closeOff], []byte("\n")) {
+		// Inline block `{ ... }` (or `{}`): splice ` <entry> ` before '}'.
+		var sb bytes.Buffer
+		if closeOff > 0 && r.src[closeOff-1] != ' ' && r.src[closeOff-1] != '\t' {
+			sb.WriteByte(' ')
+		}
+		writeEntryInline(&sb, e)
+		sb.WriteByte(' ')
+		r.stageInsertEdit(closeOff, sb.Bytes())
+		return nil
+	}
+
+	// Multi-line block: insert a full line just above the closing brace,
+	// indented like the existing siblings.
+	indent := r.childIndent(block.Entries, block.Pos.Offset)
+	insertAt := closeOff
+	var prefix []byte
+	ls := lineStartOffset(r.src, closeOff)
+	if isBlank(r.src[ls:closeOff]) {
+		insertAt = ls
+	} else {
+		// The '}' shares a line with the last entry; break the line.
+		prefix = []byte("\n")
+	}
+	var sb bytes.Buffer
+	sb.Write(prefix)
+	sb.Write(renderEntryLines(e, indent))
+	sb.WriteByte('\n')
+	r.stageInsertEdit(insertAt, sb.Bytes())
+	return nil
+}
+
+// stageInsertEdit records a zero-width insertion of text at off under a
+// unique edit identity, so multiple insertions at the same offset are
+// all kept (in call order) rather than deduplicated.
+func (r *Rewriter) stageInsertEdit(off int, text []byte) {
+	r.insertSeq++
+	r.stage(spanEdit{path: fmt.Sprintf("\x00insert#%d", r.insertSeq), start: off, end: off, text: text})
+}
+
+// spanPath is the dedup key for a span-addressed edit. The NUL prefix
+// keeps it distinct from every dotted path.
+func spanPath(start, end int) string {
+	return fmt.Sprintf("\x00span:%d:%d", start, end)
 }
 
 // Bytes applies the staged edits and returns the rewritten document.
@@ -464,17 +584,29 @@ func (r *Rewriter) renderValue(v Value, linePrefix string) []byte {
 // there is one on its own line, otherwise the container's own indent
 // plus one level (top level: none).
 func (r *Rewriter) siblingIndent(t *target) string {
-	if len(t.containerEntries) > 0 {
-		first := t.containerEntries[0].pos().Offset
+	containerPos := -1
+	if t.container != nil {
+		containerPos = t.container.pos().Offset
+	}
+	return r.childIndent(t.containerEntries, containerPos)
+}
+
+// childIndent returns the indentation a new child of a block should
+// use: the indent of the first existing child on its own line, else the
+// block's own indent plus one level. containerPos < 0 means the
+// document top level, which is not indented.
+func (r *Rewriter) childIndent(entries []Entry, containerPos int) string {
+	if len(entries) > 0 {
+		first := entries[0].pos().Offset
 		ls := lineStartOffset(r.src, first)
 		if isBlank(r.src[ls:first]) {
 			return string(r.src[ls:first])
 		}
 	}
-	if t.container == nil {
+	if containerPos < 0 {
 		return ""
 	}
-	return r.lineIndentAt(t.container.pos().Offset) + "  "
+	return r.lineIndentAt(containerPos) + "  "
 }
 
 // lineIndentAt returns the whitespace prefix of the line containing
@@ -485,6 +617,79 @@ func (r *Rewriter) lineIndentAt(off int) string {
 		return string(r.src[ls:off])
 	}
 	return ""
+}
+
+// lineLeadingIndent returns the leading whitespace of the line
+// containing off, regardless of what else precedes off on the line.
+// Used to align continuation lines of a value spliced after its key.
+func (r *Rewriter) lineLeadingIndent(off int) string {
+	ls := lineStartOffset(r.src, off)
+	i := ls
+	for i < off && (r.src[i] == ' ' || r.src[i] == '\t') {
+		i++
+	}
+	return string(r.src[ls:i])
+}
+
+// renderEntryLines formats a single entry for insertion into a
+// multi-line block: fully formatted (nested blocks indented), every
+// line prefixed with baseIndent, and no trailing newline (the caller
+// controls line breaks).
+func renderEntryLines(e Entry, baseIndent string) []byte {
+	var buf bytes.Buffer
+	f := &formatter{buf: &buf, indent: "  "}
+	f.formatEntries([]Entry{e}, 0)
+	out := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
+	if baseIndent != "" {
+		out = append([]byte(baseIndent), bytes.ReplaceAll(out, []byte("\n"), []byte("\n"+baseIndent))...)
+	}
+	return out
+}
+
+// writeEntryInline renders an entry on a single line for insertion into
+// an inline block, e.g. `a = 1`, `"k": "v"`, or `n { a = 1 }`.
+func writeEntryInline(buf *bytes.Buffer, e Entry) {
+	f := &formatter{buf: buf, indent: "  "}
+	switch n := e.(type) {
+	case *Assignment:
+		buf.WriteString(n.Key)
+		buf.WriteString(" = ")
+		f.formatValue(n.Value, 0)
+	case *MapEntry:
+		if needsQuoting(n.Key) {
+			fmt.Fprintf(buf, "%q", n.Key)
+		} else {
+			buf.WriteString(n.Key)
+		}
+		buf.WriteString(": ")
+		f.formatValue(n.Value, 0)
+	case *Block:
+		buf.WriteString(n.Name)
+		buf.WriteString(" {")
+		for _, c := range n.Entries {
+			buf.WriteByte(' ')
+			writeEntryInline(buf, c)
+		}
+		buf.WriteString(" }")
+	}
+}
+
+// entryContainsBadVal reports whether e holds a [BadVal] anywhere in
+// its value tree (including nested block entries).
+func entryContainsBadVal(e Entry) bool {
+	switch n := e.(type) {
+	case *Assignment:
+		return containsBadVal(n.Value)
+	case *MapEntry:
+		return containsBadVal(n.Value)
+	case *Block:
+		for _, c := range n.Entries {
+			if entryContainsBadVal(c) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasMapEntry reports whether any sibling is a ':'-form map entry,
