@@ -172,6 +172,28 @@ func (p *parser) flushComments() []Comment {
 	return c
 }
 
+// takeTrailingComment removes and returns the text of a pending comment that
+// trails a value inline — one written after the value on the same source line
+// (e.g. `restrict = true # deny-by-default`). end is the value's end position.
+// A newline terminates every line, so at most one such comment exists and it
+// is the first pending comment. Without this, an inline comment on the final
+// entry before EOF or a block's '}' would never be flushed to any entry and
+// would be dropped; comments with a following entry would instead surface only
+// as that entry's leading comments. Returns "" when the first pending comment
+// begins on a later line (a genuine leading comment for the next entry) or
+// before the value (a rare comment wedged between the separator and value).
+func (p *parser) takeTrailingComment(end Position) string {
+	if len(p.comments) == 0 {
+		return ""
+	}
+	c := p.comments[0]
+	if c.Pos.Line != end.Line || c.Pos.Offset < end.Offset {
+		return ""
+	}
+	p.comments = p.comments[1:]
+	return c.Text
+}
+
 // peekKind returns the kind of the next significant token (skipping
 // newlines and comments) without consuming it or disturbing pending-
 // comment accumulation. Used by parseDirective to disambiguate "this
@@ -811,7 +833,8 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Assignment{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading}, nil
+		trailing := p.takeTrailingComment(val.end())
+		return &Assignment{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
 
 	case COLON:
 		// Map entry. Only allowed inside a '{ ... }' block, never at
@@ -828,7 +851,8 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &MapEntry{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading}, nil
+		trailing := p.takeTrailingComment(val.end())
+		return &MapEntry{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
 
 	case LBRACE:
 		// `{ ... }` denotes a submessage field; same identifier-only rule
