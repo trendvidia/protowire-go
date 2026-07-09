@@ -11,6 +11,35 @@ format changes.
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-09
+
+Additive `encoding/pxf` API for editor tooling. New exported surface
+only — no changes to existing behavior or the wire format.
+
+### Added
+
+- `encoding/pxf`: `FormatValue` / `AppendValue` render a single
+  [`Value`] to its PXF source literal (#37). This exposes the
+  formatter's existing per-value logic — string escaping, raw int/float
+  forms, base64 bytes, enum idents, durations, timestamps — so tools
+  that splice a value back into a buffer no longer re-implement (and
+  risk subtly mis-escaping) it.
+- `encoding/pxf`: `Rewriter.ReplaceValue` / `Rewriter.SetSpan` mutate by
+  the AST node the caller already holds from `Rewriter.Document`, rather
+  than by dotted path (#38). Path resolution is first-match-wins, so it
+  cannot target a specific node among same-key siblings (repeated widget
+  nodes in a `children { … }` block, say); node targeting can. Both
+  route through the Rewriter's edit list, preserving overlap detection,
+  edit batching, and the reparse safety-net in `Rewriter.Bytes` that a
+  raw byte splice discards.
+- `encoding/pxf`: `Rewriter.AppendEntry` inserts a new entry into a
+  block, formatted to match its existing entries — sibling-matched
+  indentation, inline vs. multi-line placement, and the empty-block
+  (`foo { }`) case (#39). The layout logic is the library's own, reused
+  from `FormatDocument` instead of re-derived by each caller. The caller
+  supplies the concrete `Entry`, so the `=` vs. `:` separator is
+  explicit rather than schema-guessed.
+
 ## [1.1.2] — 2026-07-09
 
 A parser bug fix for comment round-tripping. No API or wire-format
