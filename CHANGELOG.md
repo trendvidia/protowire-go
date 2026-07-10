@@ -11,6 +11,23 @@ format changes.
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-07-09
+
+Indentation-fidelity fixes for the `encoding/pxf` `Rewriter`. Cosmetic
+only — output already round-tripped and re-parsed; no API or wire-format
+changes.
+
+### Fixed
+
+- `encoding/pxf`: format-preserving edits now indent a nested body by the
+  document's own indent width instead of a hard-coded two spaces, so
+  structural insertion into a 4-space- or tab-indented document no longer
+  produces mixed indentation. Both `Rewriter.AppendEntry` (#41) and the
+  value path shared by `Rewriter.Set` / `Rewriter.ReplaceValue` and the
+  synthesized block chains created by `Set` (#43) infer the step,
+  preferring a nested sibling block's body, then a document-wide scan,
+  then a two-space default.
+
 ## [1.2.0] — 2026-07-09
 
 Additive `encoding/pxf` API for editor tooling. New exported surface
@@ -808,7 +825,8 @@ Initial public release. Versioned to match sibling components in the
 - Minimum Go version is `1.25` (set by the floor of transitive
   dependencies, surfaced by `go mod tidy`).
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/trendvidia/protowire-go/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/trendvidia/protowire-go/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/trendvidia/protowire-go/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/trendvidia/protowire-go/compare/v1.1.0...v1.1.1
