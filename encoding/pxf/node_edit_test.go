@@ -66,6 +66,36 @@ func TestAppendValuePreservesDst(t *testing.T) {
 	}
 }
 
+// --- #43: renderValue / renderChain honor the document's indent step -
+
+func TestSetCreatesChainWithDocumentStep(t *testing.T) {
+	// The synthesized block scaffolding steps by the document's width
+	// (4 spaces here), not a hard-coded 2.
+	src := "server {\n    host = \"h\"\n}\n"
+	got := rewrite(t, src, func(r *pxf.Rewriter) error {
+		return r.Set("server.tls.min_version", &pxf.StringVal{Value: "1.3"})
+	})
+	want := "server {\n    host = \"h\"\n    tls {\n        min_version = \"1.3\"\n    }\n}\n"
+	if got != want {
+		t.Fatalf("got:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+func TestSetMultilineValueUsesDocumentStep(t *testing.T) {
+	// A multi-line value written onto an existing entry steps its body by
+	// the document width (4 spaces), via renderValue.
+	src := "server {\n    tags = [\"a\"]\n}\n"
+	got := rewrite(t, src, func(r *pxf.Rewriter) error {
+		return r.Set("server.tags", &pxf.ListVal{Elements: []pxf.Value{
+			&pxf.StringVal{Value: "x"}, &pxf.StringVal{Value: "y"},
+		}})
+	})
+	want := "server {\n    tags = [\n        \"x\",\n        \"y\"\n    ]\n}\n"
+	if got != want {
+		t.Fatalf("got:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 // --- #38: ReplaceValue / SetSpan ------------------------------------
 
 // findAssignment returns the first assignment with the given key,
@@ -152,7 +182,8 @@ func TestReplaceValueReindentsMultiline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "server {\n    tags = [\n      \"x\",\n      \"y\"\n    ]\n}\n"
+	// Source indents 4 spaces, so the replacement list body steps by 4.
+	want := "server {\n    tags = [\n        \"x\",\n        \"y\"\n    ]\n}\n"
 	if string(out) != want {
 		t.Fatalf("got:\n%q\nwant:\n%q", out, want)
 	}
