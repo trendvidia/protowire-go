@@ -808,7 +808,20 @@ Initial public release. Versioned to match sibling components in the
 - Minimum Go version is `1.25` (set by the floor of transitive
   dependencies, surfaced by `go mod tidy`).
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v0.70.2...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/trendvidia/protowire-go/compare/v1.1.2...v1.2.0
+[1.1.2]: https://github.com/trendvidia/protowire-go/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/trendvidia/protowire-go/compare/v1.1.0...v1.1.1
+[1.1.0]: https://github.com/trendvidia/protowire-go/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/trendvidia/protowire-go/compare/v0.77.0...v1.0.0
+[0.77.0]: https://github.com/trendvidia/protowire-go/compare/v0.76.0...v0.77.0
+[0.76.0]: https://github.com/trendvidia/protowire-go/compare/v0.75.0...v0.76.0
+[0.75.0]: https://github.com/trendvidia/protowire-go/compare/v0.74.0...v0.75.0
+[0.74.0]: https://github.com/trendvidia/protowire-go/compare/v0.73.0...v0.74.0
+[0.73.0]: https://github.com/trendvidia/protowire-go/compare/v0.72.0...v0.73.0
+[0.72.0]: https://github.com/trendvidia/protowire-go/compare/v0.71.0...v0.72.0
+[0.71.0]: https://github.com/trendvidia/protowire-go/compare/v0.70.3...v0.71.0
+[0.70.3]: https://github.com/trendvidia/protowire-go/compare/v0.70.2...v0.70.3
 [0.70.2]: https://github.com/trendvidia/protowire-go/compare/v0.70.1...v0.70.2
 [0.70.1]: https://github.com/trendvidia/protowire-go/compare/v0.70.0...v0.70.1
 [0.70.0]: https://github.com/trendvidia/protowire-go/releases/tag/v0.70.0
