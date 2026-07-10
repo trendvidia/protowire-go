@@ -256,8 +256,16 @@ func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
 	}
 
 	// Multi-line block: insert a full line just above the closing brace,
-	// indented like the existing siblings.
+	// indented like the existing siblings. A nested body (a block entry's
+	// children) steps in by the document's own indent width, not a fixed
+	// two spaces.
+	step := r.bodyIndentStep(block)
 	indent := r.childIndent(block.Entries, block.Pos.Offset)
+	if len(block.Entries) == 0 {
+		// No sibling reveals the base indent; derive it from the block's
+		// own line plus one step, rather than childIndent's 2-space guess.
+		indent = r.lineLeadingIndent(block.Pos.Offset) + step
+	}
 	insertAt := closeOff
 	var prefix []byte
 	ls := lineStartOffset(r.src, closeOff)
@@ -269,7 +277,7 @@ func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
 	}
 	var sb bytes.Buffer
 	sb.Write(prefix)
-	sb.Write(renderEntryLines(e, indent))
+	sb.Write(renderEntryLines(e, indent, step))
 	sb.WriteByte('\n')
 	r.stageInsertEdit(insertAt, sb.Bytes())
 	return nil
@@ -609,6 +617,56 @@ func (r *Rewriter) childIndent(entries []Entry, containerPos int) string {
 	return r.lineIndentAt(containerPos) + "  "
 }
 
+// bodyIndentStep infers the per-level indentation step to use for a
+// body appended into block: prefer a nested block among the target's
+// own entries (a sibling's body is the most relevant reference), then a
+// document-wide scan, then a two-space default when nothing reveals it.
+func (r *Rewriter) bodyIndentStep(block *Block) string {
+	if s := r.scanIndentStep(block.Entries); s != "" {
+		return s
+	}
+	if s := r.scanIndentStep(r.doc.Entries); s != "" {
+		return s
+	}
+	return "  "
+}
+
+// scanIndentStep returns the whitespace the first own-line child of the
+// first nested block (or block value) in entries adds over that block's
+// own line — the document's indentation step — or "" when no nested
+// block on its own lines reveals one.
+func (r *Rewriter) scanIndentStep(entries []Entry) string {
+	for _, e := range entries {
+		var kids []Entry
+		switch n := e.(type) {
+		case *Block:
+			kids = n.Entries
+		default:
+			if v, ok := entryValue(e); ok {
+				if bv, ok := v.(*BlockVal); ok {
+					kids = bv.Entries
+				}
+			}
+		}
+		if len(kids) == 0 {
+			continue
+		}
+		base := r.lineLeadingIndent(e.pos().Offset)
+		first := kids[0].pos().Offset
+		ls := lineStartOffset(r.src, first)
+		if isBlank(r.src[ls:first]) {
+			ci := string(r.src[ls:first])
+			if len(ci) > len(base) && strings.HasPrefix(ci, base) {
+				return ci[len(base):]
+			}
+		}
+		if s := r.scanIndentStep(kids); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 // lineIndentAt returns the whitespace prefix of the line containing
 // off, or "" when non-whitespace precedes off on its line.
 func (r *Rewriter) lineIndentAt(off int) string {
@@ -632,12 +690,12 @@ func (r *Rewriter) lineLeadingIndent(off int) string {
 }
 
 // renderEntryLines formats a single entry for insertion into a
-// multi-line block: fully formatted (nested blocks indented), every
-// line prefixed with baseIndent, and no trailing newline (the caller
-// controls line breaks).
-func renderEntryLines(e Entry, baseIndent string) []byte {
+// multi-line block: fully formatted (nested blocks indented by step per
+// level), every line prefixed with baseIndent, and no trailing newline
+// (the caller controls line breaks).
+func renderEntryLines(e Entry, baseIndent, step string) []byte {
 	var buf bytes.Buffer
-	f := &formatter{buf: &buf, indent: "  "}
+	f := &formatter{buf: &buf, indent: step}
 	f.formatEntries([]Entry{e}, 0)
 	out := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	if baseIndent != "" {
