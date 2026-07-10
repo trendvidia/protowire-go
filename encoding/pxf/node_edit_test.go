@@ -292,9 +292,64 @@ func TestAppendEntryBlockNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "children {\n    a { type = \"Button\" }\n    b {\n      type = \"Label\"\n    }\n}\n"
+	// The source steps in by 4 (a is 4 spaces inside children), so the
+	// appended block's body steps by 4 too, not a fixed 2.
+	want := "children {\n    a { type = \"Button\" }\n    b {\n        type = \"Label\"\n    }\n}\n"
 	if string(out) != want {
 		t.Fatalf("got:\n%q\nwant:\n%q", out, want)
+	}
+}
+
+func TestAppendEntryBlockBodyMatchesDocumentStep(t *testing.T) {
+	// #41: a nested body must step by the document's own indent width,
+	// inferred from a sibling block's body (4 spaces here), not a fixed 2.
+	src := "root {\n    children {\n        greeting {\n            type = \"Label\"\n        }\n    }\n}\n"
+	r, err := pxf.NewRewriter([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	children := r.Document().Entries[0].(*pxf.Block).Entries[0].(*pxf.Block)
+	child := &pxf.Block{Name: "button", Entries: []pxf.Entry{
+		&pxf.Assignment{Key: "type", Value: &pxf.StringVal{Value: "Button"}},
+	}}
+	if err := r.AppendEntry(children, child); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "root {\n    children {\n        greeting {\n            type = \"Label\"\n        }\n" +
+		"        button {\n            type = \"Button\"\n        }\n    }\n}\n"
+	if string(out) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestAppendEntryEmptyBlockUsesDocumentStep(t *testing.T) {
+	// An empty target block reveals no local step; the width is inferred
+	// document-wide (4 spaces from sub's body) for both the new node's
+	// own line and its body.
+	src := "root {\n    sub {\n        x = 1\n    }\n    children {\n    }\n}\n"
+	r, err := pxf.NewRewriter([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	children := r.Document().Entries[0].(*pxf.Block).Entries[1].(*pxf.Block)
+	child := &pxf.Block{Name: "button", Entries: []pxf.Entry{
+		&pxf.Assignment{Key: "type", Value: &pxf.StringVal{Value: "Button"}},
+	}}
+	if err := r.AppendEntry(children, child); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "root {\n    sub {\n        x = 1\n    }\n    children {\n" +
+		"        button {\n            type = \"Button\"\n        }\n    }\n}\n"
+	if string(out) != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
 	}
 }
 
