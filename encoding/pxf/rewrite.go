@@ -108,7 +108,7 @@ func (r *Rewriter) Set(path string, v Value) error {
 		start := old.pos().Offset
 		end := old.end().Offset
 		indent := r.lineIndentAt(t.entry.pos().Offset)
-		r.stage(spanEdit{path: path, start: start, end: end, text: r.renderValue(v, indent)})
+		r.stage(spanEdit{path: path, start: start, end: end, text: r.renderValue(v, indent, r.stepFor(t.containerEntries))})
 		return nil
 	}
 	return r.stageInsert(path, t, v)
@@ -200,7 +200,7 @@ func (r *Rewriter) ReplaceValue(old, with Value) error {
 	if start >= end {
 		return fmt.Errorf("pxf: ReplaceValue: old value has no source span (not a parsed value, or a BadVal)")
 	}
-	return r.SetSpan(start, end, r.renderValue(with, r.lineLeadingIndent(start)))
+	return r.SetSpan(start, end, r.renderValue(with, r.lineLeadingIndent(start), r.indentStep()))
 }
 
 // SetSpan stages a replacement of src[start:end) with text — the raw
@@ -259,7 +259,7 @@ func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
 	// indented like the existing siblings. A nested body (a block entry's
 	// children) steps in by the document's own indent width, not a fixed
 	// two spaces.
-	step := r.bodyIndentStep(block)
+	step := r.stepFor(block.Entries)
 	indent := r.childIndent(block.Entries, block.Pos.Offset)
 	if len(block.Entries) == 0 {
 		// No sibling reveals the base indent; derive it from the block's
@@ -458,6 +458,7 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 	if needsQuoting(leaf) && !mapForm {
 		return fmt.Errorf("pxf: Set %s: key %q needs a map (':') context", path, leaf)
 	}
+	step := r.stepFor(t.containerEntries)
 
 	// Locate the insertion scope: [open..close) of the container block,
 	// or the end of the document for the top level.
@@ -488,7 +489,7 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 		if closeOff > 0 && r.src[closeOff-1] != ' ' && r.src[closeOff-1] != '\t' {
 			sb.WriteByte(' ')
 		}
-		sb.Write(r.renderChain(t.missing, "", mapForm, v, true))
+		sb.Write(r.renderChain(t.missing, "", step, mapForm, v, true))
 		sb.WriteByte(' ')
 		r.stage(spanEdit{path: path, start: closeOff, end: closeOff, text: sb.Bytes()})
 		return nil
@@ -512,7 +513,7 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 	}
 	var sb bytes.Buffer
 	sb.Write(prefix)
-	sb.Write(r.renderChain(t.missing, indent, mapForm, v, false))
+	sb.Write(r.renderChain(t.missing, indent, step, mapForm, v, false))
 	sb.WriteByte('\n')
 	r.stage(spanEdit{path: path, start: insertAt, end: insertAt, text: sb.Bytes()})
 	return nil
@@ -520,17 +521,17 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 
 // renderChain renders the missing path tail: zero or more nested block
 // opens, then `leaf = value` (or `leaf: value` in map form).
-// baseIndent is the indent of the first rendered line; nested lines
-// add two spaces per level. In inline form everything renders on one
-// line and baseIndent is ignored.
-func (r *Rewriter) renderChain(missing []string, baseIndent string, mapForm bool, v Value, inline bool) []byte {
+// baseIndent is the indent of the first rendered line; nested lines add
+// one step per level. In inline form everything renders on one line and
+// baseIndent/step are ignored.
+func (r *Rewriter) renderChain(missing []string, baseIndent, step string, mapForm bool, v Value, inline bool) []byte {
 	var sb bytes.Buffer
 	// Only the leaf's immediate container decides '=' vs ':'; synthesized
 	// intermediate blocks are messages, so their leaf uses '='.
 	leafMap := mapForm && len(missing) == 1
 	for i, seg := range missing[:len(missing)-1] {
 		if !inline {
-			sb.WriteString(indentAt(baseIndent, i))
+			sb.WriteString(indentAt(baseIndent, step, i))
 		}
 		sb.WriteString(seg)
 		if inline {
@@ -542,7 +543,7 @@ func (r *Rewriter) renderChain(missing []string, baseIndent string, mapForm bool
 	leaf := missing[len(missing)-1]
 	depth := len(missing) - 1
 	if !inline {
-		sb.WriteString(indentAt(baseIndent, depth))
+		sb.WriteString(indentAt(baseIndent, step, depth))
 	}
 	if leafMap && needsQuoting(leaf) {
 		fmt.Fprintf(&sb, "%q", leaf)
@@ -554,31 +555,32 @@ func (r *Rewriter) renderChain(missing []string, baseIndent string, mapForm bool
 	} else {
 		sb.WriteString(" = ")
 	}
-	sb.Write(r.renderValue(v, indentAt(baseIndent, depth)))
+	sb.Write(r.renderValue(v, indentAt(baseIndent, step, depth), step))
 	for i := len(missing) - 2; i >= 0; i-- {
 		if inline {
 			sb.WriteString(" }")
 		} else {
 			sb.WriteByte('\n')
-			sb.WriteString(indentAt(baseIndent, i))
+			sb.WriteString(indentAt(baseIndent, step, i))
 			sb.WriteByte('}')
 		}
 	}
 	return sb.Bytes()
 }
 
-// indentAt returns base plus depth levels of two-space indent.
-func indentAt(base string, depth int) string {
-	return base + strings.Repeat("  ", depth)
+// indentAt returns base plus depth levels of step.
+func indentAt(base, step string, depth int) string {
+	return base + strings.Repeat(step, depth)
 }
 
 // renderValue formats v on its own (via the [FormatDocument]
 // formatter) and re-indents any continuation lines with linePrefix so
 // multi-line values (lists, blocks) align under the entry they are
-// spliced into.
-func (r *Rewriter) renderValue(v Value, linePrefix string) []byte {
+// spliced into. Nested bodies step in by step per level, matching the
+// document's indent width rather than a fixed two spaces.
+func (r *Rewriter) renderValue(v Value, linePrefix, step string) []byte {
 	var buf bytes.Buffer
-	f := &formatter{buf: &buf, indent: "  "}
+	f := &formatter{buf: &buf, indent: step}
 	f.formatValue(v, 0)
 	out := buf.Bytes()
 	if linePrefix != "" && bytes.IndexByte(out, '\n') >= 0 {
@@ -617,14 +619,20 @@ func (r *Rewriter) childIndent(entries []Entry, containerPos int) string {
 	return r.lineIndentAt(containerPos) + "  "
 }
 
-// bodyIndentStep infers the per-level indentation step to use for a
-// body appended into block: prefer a nested block among the target's
-// own entries (a sibling's body is the most relevant reference), then a
-// document-wide scan, then a two-space default when nothing reveals it.
-func (r *Rewriter) bodyIndentStep(block *Block) string {
-	if s := r.scanIndentStep(block.Entries); s != "" {
+// stepFor infers the per-level indentation step to use for content
+// inserted among entries: prefer a nested block among those entries (a
+// sibling's body is the most relevant reference), then a document-wide
+// scan, then a two-space default when nothing reveals it.
+func (r *Rewriter) stepFor(entries []Entry) string {
+	if s := r.scanIndentStep(entries); s != "" {
 		return s
 	}
+	return r.indentStep()
+}
+
+// indentStep infers the document's per-level indentation step from a
+// document-wide scan, or two spaces when nothing reveals it.
+func (r *Rewriter) indentStep() string {
 	if s := r.scanIndentStep(r.doc.Entries); s != "" {
 		return s
 	}

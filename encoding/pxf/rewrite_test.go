@@ -135,7 +135,9 @@ func TestRewriterSetMultilineValueIndents(t *testing.T) {
 			&pxf.StringVal{Value: "y"},
 		}})
 	})
-	want := "server {\n\ttags = [\n\t  \"x\",\n\t  \"y\"\n\t]\n}\n"
+	// The document indents with tabs, so the list body steps by a tab
+	// too (not a hard-coded 2 spaces) — no mixed tab/space indentation.
+	want := "server {\n\ttags = [\n\t\t\"x\",\n\t\t\"y\"\n\t]\n}\n"
 	if got != want {
 		t.Fatalf("got:\n%q\nwant:\n%q", got, want)
 	}
