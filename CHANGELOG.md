@@ -11,6 +11,25 @@ format changes.
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-07-14
+
+Spec-conformance fix for non-finite floats in the `encoding/pxf`
+decoder. No API changes.
+
+### Fixed
+
+- `encoding/pxf`: the decoder now accepts the non-finite float
+  identifiers `inf`, `+inf`, `-inf`, and `nan` that draft §3.8 mandates
+  for float and double fields — and that `Marshal` itself emits — so
+  messages holding non-finite floats round-trip through the package's
+  own encoder/decoder pair (#47). The signed forms lex as float tokens
+  (`+` is admitted as a token start for exactly this case; `+1.5` stays
+  illegal), and the bare identifiers are recognized in the decoder's
+  float/double branches. Covers all decode paths, including `@dataset`
+  row binding. Only the four exact lowercase spellings are accepted;
+  `Inf`, `NaN`, `infinity`, signed `nan`, and finite literals that
+  overflow to infinity remain rejected.
+
 ## [1.2.1] — 2026-07-09
 
 Indentation-fidelity fixes for the `encoding/pxf` `Rewriter`. Cosmetic
@@ -825,7 +844,8 @@ Initial public release. Versioned to match sibling components in the
 - Minimum Go version is `1.25` (set by the floor of transitive
   dependencies, surfaced by `go mod tidy`).
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.2...HEAD
+[1.2.2]: https://github.com/trendvidia/protowire-go/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/trendvidia/protowire-go/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/trendvidia/protowire-go/compare/v1.1.2...v1.2.0
 [1.1.2]: https://github.com/trendvidia/protowire-go/compare/v1.1.1...v1.1.2
