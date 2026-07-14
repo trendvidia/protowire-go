@@ -142,7 +142,7 @@ func (l *lexer) Next() Token {
 	case ch == '@':
 		return l.lexDirective(pos)
 
-	case ch == '-' || isDigit(ch):
+	case ch == '-' || ch == '+' || isDigit(ch):
 		return l.lexNumber(pos)
 
 	case isIdentStart(ch):
@@ -412,12 +412,20 @@ func (l *lexer) lexDirective(pos Position) Token {
 func (l *lexer) lexNumber(pos Position) Token {
 	start := l.pos
 	neg := false
-	if l.peek() == '-' {
-		neg = true
+	if sign := l.peek(); sign == '-' || sign == '+' {
 		l.advance()
-		if l.pos >= len(l.input) || !isDigit(l.peek()) {
-			return Token{Kind: ILLEGAL, Value: "-", Pos: pos}
+		// Spec §3.8: "+inf" and "-inf" are the only signed identifier
+		// literals. A '+' sign is valid for nothing else.
+		if l.hasIdent("inf") {
+			l.advance()
+			l.advance()
+			l.advance()
+			return Token{Kind: FLOAT, Value: l.viewString(start, l.pos), Pos: pos}
 		}
+		if sign == '+' || l.pos >= len(l.input) || !isDigit(l.peek()) {
+			return Token{Kind: ILLEGAL, Value: string(sign), Pos: pos}
+		}
+		neg = true
 	}
 
 	digitStart := l.pos
@@ -507,6 +515,20 @@ func (l *lexer) lexIdent(pos Position) Token {
 		return Token{Kind: NULL, Value: val, Pos: pos}
 	}
 	return Token{Kind: IDENT, Value: val, Pos: pos}
+}
+
+// hasIdent reports whether the input at the current position reads
+// exactly the identifier word (not a prefix of a longer identifier).
+// Does not advance.
+func (l *lexer) hasIdent(word string) bool {
+	end := l.pos + len(word)
+	if end > len(l.input) {
+		return false
+	}
+	if string(l.input[l.pos:end]) != word {
+		return false
+	}
+	return end == len(l.input) || !isIdentPart(l.input[end])
 }
 
 // viewString returns a zero-copy string view into the input buffer.

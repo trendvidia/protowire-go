@@ -1215,6 +1215,14 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 	return nil
 }
 
+// isNonFiniteIdent reports whether tok is one of the spec's unsigned
+// non-finite float identifiers (§3.8: "inf", "nan"). The signed forms
+// "+inf"/"-inf" lex as FLOAT tokens, so they need no special case here.
+// strconv.ParseFloat accepts all four spellings directly.
+func isNonFiniteIdent(tok Token) bool {
+	return tok.Kind == IDENT && (tok.Value == "inf" || tok.Value == "nan")
+}
+
 func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
 
@@ -1286,7 +1294,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 		return protoreflect.ValueOfUint64(n), nil
 
 	case protoreflect.FloatKind:
-		if d.current.Kind != FLOAT && d.current.Kind != INT {
+		if d.current.Kind != FLOAT && d.current.Kind != INT && !isNonFiniteIdent(d.current) {
 			return protoreflect.Value{}, errorf(pos, "expected number for field %q", fd.Name())
 		}
 		f, err := strconv.ParseFloat(d.current.Value, 32)
@@ -1297,7 +1305,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 		return protoreflect.ValueOfFloat32(float32(f)), nil
 
 	case protoreflect.DoubleKind:
-		if d.current.Kind != FLOAT && d.current.Kind != INT {
+		if d.current.Kind != FLOAT && d.current.Kind != INT && !isNonFiniteIdent(d.current) {
 			return protoreflect.Value{}, errorf(pos, "expected number for field %q", fd.Name())
 		}
 		f, err := strconv.ParseFloat(d.current.Value, 64)
