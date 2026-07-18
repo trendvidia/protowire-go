@@ -11,11 +11,15 @@ format changes.
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-07-17
+
 Reference implementation of **keyed repeated fields** (spec issue
 [trendvidia/protowire#116], draft `-01` §3.13; tracked here as #50).
 A `repeated <Message>` field annotated `(pxf.key) = "<field>"` may be
 written as a block of named blocks — entry name = key-field value,
-document order = list order. Targets the spec's v1.3.0 release train.
+document order = list order. Additive `encoding/pxf` API — no changes
+to existing behavior or the pb/SBE wire formats. Cut in lockstep with
+the spec's v1.3.0 train.
 
 ### Added
 
@@ -927,7 +931,8 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.2...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/trendvidia/protowire-go/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/trendvidia/protowire-go/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/trendvidia/protowire-go/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/trendvidia/protowire-go/compare/v1.1.2...v1.2.0
