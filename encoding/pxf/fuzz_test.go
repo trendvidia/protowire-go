@@ -202,3 +202,89 @@ func FuzzUnmarshalKeyed(f *testing.F) {
 		}
 	})
 }
+
+// FuzzRewriteKeyed exercises the keyed-collection editors' byte-offset
+// surgery over both surface forms. It applies a fuzz-selected op with
+// fuzzed key/subpath/value strings to a fixed valid document and
+// asserts the Rewriter never panics and that Bytes() upholds its
+// contract: it either errors or returns a document that reparses (the
+// built-in reparse safety net makes silently-invalid output impossible,
+// so this is really a panic / offset-math check on the surgery).
+func FuzzRewriteKeyed(f *testing.F) {
+	const blockDoc = `id = "root"
+children {
+  greeting {
+    type = "Label"
+    weight = 1
+  }
+  "us-east-1" {
+    type = "Region"
+  }
+}
+`
+	const anonDoc = `service = "edge"
+regions = [
+  {
+    name = "us-east-1"
+    replicas = 3
+  },
+  {
+    name = "eu-west-2"
+    replicas = 1
+  }
+]
+`
+	f.Add(0, "greeting", "weight", "9", true)
+	f.Add(1, "us-east-1", "", "", true)
+	f.Add(2, "footer", "type", "X", true)
+	f.Add(3, "greeting", "welcome", "", true)
+	f.Add(4, "greeting", "", "", true)
+	f.Add(0, "us-east-1", "replicas", "5", false)
+	f.Add(2, "ap-south-1", "replicas", "2", false)
+	f.Add(5, "us-east-1", "eu-west-2", "", false)
+
+	f.Fuzz(func(t *testing.T, op int, key, arg, val string, block bool) {
+		src := anonDoc
+		field := "regions"
+		if block {
+			src = blockDoc
+			field = "children"
+		}
+		r, err := pxf.NewRewriter([]byte(src))
+		if err != nil {
+			t.Fatalf("NewRewriter on a fixed valid doc failed: %v", err)
+		}
+		if !block {
+			r.KeyedByField("regions", "name")
+		}
+		defer func() {
+			if rec := recover(); rec != nil {
+				t.Fatalf("keyed Rewriter panicked: op=%d key=%q arg=%q val=%q block=%v: %v", op, key, arg, val, block, rec)
+			}
+		}()
+		switch op % 6 {
+		case 0:
+			_ = r.SetKeyed(field, key, arg, &pxf.StringVal{Value: val})
+		case 1:
+			_ = r.RemoveKeyedElement(field, key)
+		case 2:
+			_ = r.InsertKeyedElement(field, key, arg, []pxf.Entry{
+				&pxf.Assignment{Key: "type", Value: &pxf.StringVal{Value: val}},
+			})
+		case 3:
+			_ = r.RenameKeyedElement(field, key, arg)
+		case 4:
+			_ = r.RemoveKeyed(field, key, "type")
+		case 5:
+			_ = r.MoveKeyedElement(field, key, arg)
+		}
+		// Contract: Bytes never panics; on success the result reparses.
+		out, err := r.Bytes()
+		if err != nil {
+			return
+		}
+		if _, err := pxf.Parse(out); err != nil {
+			t.Fatalf("Bytes() returned a document that does not reparse: %v\nop=%d key=%q arg=%q val=%q block=%v\nout=%q", err, op, key, arg, val, block, out)
+		}
+	})
+}

@@ -330,8 +330,8 @@ func TestKeyedEditorErrors(t *testing.T) {
 	if err := r.SetKeyed("nope", "k", "x", &pxf.IntVal{Raw: "1"}); err == nil {
 		t.Fatal("want error for missing field path")
 	}
-	if err := r.SetKeyed("id", "k", "x", &pxf.IntVal{Raw: "1"}); err == nil || !strings.Contains(err.Error(), "not a block") {
-		t.Fatalf("want not-a-block error, got %v", err)
+	if err := r.SetKeyed("id", "k", "x", &pxf.IntVal{Raw: "1"}); err == nil || !strings.Contains(err.Error(), "no keyed collection") {
+		t.Fatalf("want no-keyed-collection error, got %v", err)
 	}
 	if err := r.SetKeyed("children", "", "x", &pxf.IntVal{Raw: "1"}); err == nil || !strings.Contains(err.Error(), "empty key") {
 		t.Fatalf("want empty-key error, got %v", err)
