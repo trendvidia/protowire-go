@@ -86,6 +86,7 @@ type directDecoder struct {
 	nullMaskFd     protoreflect.FieldDescriptor   // cached _null field, may be nil
 	pathPrefix     string                         // dotted path prefix for nested messages
 	onSecret       func(path, value string) error // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
+	keyedElem      *keyedElemState                // context for the next decodeFields call: it decodes one element of a keyed repeated field (draft -01 §3.13)
 }
 
 func (d *directDecoder) advance() {
@@ -537,6 +538,12 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 	fields := desc.Fields()
 	var setOneofs map[string]string
 
+	// A non-nil keyedElem applies to exactly this body: the immediate
+	// entries of one element of a keyed repeated field. Consume it so
+	// nested submessages don't inherit the key-field checks.
+	ke := d.keyedElem
+	d.keyedElem = nil
+
 	for {
 		if inBlock && d.current.Kind == RBRACE {
 			d.advance()
@@ -553,12 +560,21 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
 			return errorf(pos, "expected identifier, string, or integer, got %s (%q)", d.current.Kind, d.current.Value)
 		}
+		keyQuoted := d.current.Kind == STRING
 		key := d.current.Value
 		d.advance()
 
 		switch d.current.Kind {
 		case EQUALS:
 			d.advance()
+			if keyQuoted {
+				// Grammar accepts a string at entry-name position
+				// everywhere; the schema layer restricts it to keyed
+				// repeated fields' blocks (draft -01 §3.13), which have
+				// their own decode loop — in message context a quoted
+				// name never names a field.
+				return quotedNameUnkeyedError(pos, key)
+			}
 			fd := fields.ByName(protoreflect.Name(key))
 			if fd == nil {
 				if d.discardUnknown {
@@ -581,6 +597,15 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 				d.advance()
 				continue
 			}
+			if ke != nil && fd.Name() == ke.keyName && d.current.Kind == STRING {
+				// Explicit assignment to the element's key field: the
+				// empty string is never a valid key, and in the named
+				// (keyed-block) form the value must agree with the
+				// entry name (draft -01 §3.13).
+				if err := ke.checkExplicitKey(d.current.Value, d.current.Pos); err != nil {
+					return err
+				}
+			}
 			if d.result != nil {
 				d.result.markPresent(d.pathPrefix + string(fd.Name()))
 			}
@@ -590,6 +615,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 
 		case LBRACE:
 			d.advance()
+			if keyQuoted {
+				return quotedNameUnkeyedError(pos, key)
+			}
 			fd := fields.ByName(protoreflect.Name(key))
 			if fd == nil {
 				if d.discardUnknown {
@@ -602,6 +630,24 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 				return errorf(pos, "field %q is not a message type, cannot use block syntax", key)
 			}
 			if fd.IsList() {
+				// Keyed repeated field (draft -01 §3.13): the block form
+				// is a sequence of named entries, one per element.
+				if keyFd := KeyField(fd); keyFd != nil {
+					if d.result != nil {
+						d.result.markPresent(d.pathPrefix + string(fd.Name()))
+					}
+					if err := d.decodeKeyedBlockBody(msg, fd, keyFd); err != nil {
+						return err
+					}
+					continue
+				}
+				if d.current.Kind == STRING {
+					// The block spells the keyed form on a field with no
+					// (pxf.key); report the quoted entry name — the more
+					// specific schema violation — rather than the
+					// generic shape error.
+					return quotedNameUnkeyedError(d.current.Pos, d.current.Value)
+				}
 				return errorf(pos, "repeated field %q must use list syntax: %s = [...]", key, key)
 			}
 			if fd.IsMap() {
@@ -671,6 +717,15 @@ func (d *directDecoder) decodeFieldValue(msg protoreflect.Message, fd protorefle
 		return d.decodeMapInline(msg, fd)
 	}
 	if fd.IsList() {
+		// Keyed repeated field written `name = { ... }`: a block-tail is
+		// an abbreviation of `= { ... }` (draft -01 §3.13), so the
+		// assignment spelling of the keyed block form is equally valid.
+		if d.current.Kind == LBRACE {
+			if keyFd := KeyField(fd); keyFd != nil {
+				d.advance()
+				return d.decodeKeyedBlockBody(msg, fd, keyFd)
+			}
+		}
 		return d.decodeListInline(msg, fd)
 	}
 	if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
@@ -879,13 +934,14 @@ func (d *directDecoder) decodeListInline(msg protoreflect.Message, fd protorefle
 	d.advance()
 
 	list := msg.Mutable(fd).List()
+	keyFd := KeyField(fd) // non-nil: anonymous form of a keyed repeated field (draft -01 §3.13)
 
 	for d.current.Kind != RBRACKET && d.current.Kind != EOF {
 		if d.current.Kind == NULL {
 			return errorf(d.current.Pos, "null is not allowed in repeated field %q", fd.Name())
 		}
 		if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
-			v, err := d.consumeListMsg(fd, list)
+			v, err := d.consumeListMsg(fd, list, keyFd)
 			if err != nil {
 				return err
 			}
@@ -915,7 +971,11 @@ func (d *directDecoder) decodeListInline(msg protoreflect.Message, fd protorefle
 	return nil
 }
 
-func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list protoreflect.List) (protoreflect.Value, error) {
+// consumeListMsg consumes one message-typed element of a repeated
+// field. keyFd is non-nil when fd is a keyed repeated field, in which
+// case the element body gets the key-field decode checks of draft -01
+// §3.13 (an explicit empty-string key is rejected).
+func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list protoreflect.List, keyFd protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	mdesc := fd.Message()
 
 	if isTimestamp(mdesc) && d.current.Kind == TIMESTAMP {
@@ -1027,10 +1087,89 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	}
 	d.advance()
 	sub := list.NewElement().Message()
+	if keyFd != nil {
+		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name()}
+	}
 	if err := d.decodeFields(sub, true); err != nil {
 		return protoreflect.Value{}, err
 	}
 	return protoreflect.ValueOfMessage(sub), nil
+}
+
+// decodeKeyedBlockBody decodes the block form of a keyed repeated field
+// (draft -01 §3.13): a sequence of named entries — `name { ... }` or
+// equivalently `name = { ... }` — where each entry name (unquoted
+// value, for string-literal names) populates the element's key field
+// and entry order is list order. Duplicate entry names within the
+// block, the empty string as a name, and a disagreeing explicit
+// key-field assignment inside an entry are decode errors ([KeyedError]).
+// The opening '{' has been consumed; the closing '}' is consumed before
+// returning.
+func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd protoreflect.FieldDescriptor) error {
+	d.depth++
+	if d.depth > MaxNestingDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+	}
+	defer func() { d.depth-- }()
+
+	list := msg.Mutable(fd).List()
+	var seen map[string]struct{}
+	for {
+		switch d.current.Kind {
+		case RBRACE:
+			d.advance()
+			return nil
+		case EOF:
+			return errorf(d.current.Pos, "expected '}' to close keyed field %q, got EOF", fd.Name())
+		case IDENT, STRING:
+			// entry name
+		default:
+			return errorf(d.current.Pos, "expected entry name (identifier or string) in keyed field %q, got %s (%q)",
+				fd.Name(), d.current.Kind, d.current.Value)
+		}
+		namePos := d.current.Pos
+		// IDENT token values are zero-copy views into the input; the name
+		// is stored into the message, so clone.
+		name := strings.Clone(d.current.Value)
+		if name == "" {
+			return keyedEmptyNameError(namePos, fd.Name())
+		}
+		if !utf8.ValidString(name) {
+			return errorf(namePos, "invalid UTF-8 in entry name for keyed field %q", fd.Name())
+		}
+		if _, dup := seen[name]; dup {
+			return keyedDuplicateKeyError(namePos, fd.Name(), name)
+		}
+		if seen == nil {
+			seen = make(map[string]struct{}, 4)
+		}
+		seen[name] = struct{}{}
+		d.advance()
+
+		switch d.current.Kind {
+		case LBRACE:
+			d.advance()
+		case EQUALS:
+			d.advance()
+			if d.current.Kind != LBRACE {
+				return errorf(d.current.Pos,
+					"keyed entry %q of field %q must have a block value ('{ ... }'): the element type is a message",
+					name, fd.Name())
+			}
+			d.advance()
+		default:
+			return errorf(d.current.Pos, "expected '{' or '=' after entry name %q in keyed field %q, got %s",
+				name, fd.Name(), d.current.Kind)
+		}
+
+		sub := list.NewElement().Message()
+		fastSet(sub, keyFd, protoreflect.ValueOfString(name))
+		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name(), entryName: name, named: true}
+		if err := d.decodeFields(sub, true); err != nil {
+			return err
+		}
+		fastAppend(list, protoreflect.ValueOfMessage(sub))
+	}
 }
 
 func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {

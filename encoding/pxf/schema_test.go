@@ -195,7 +195,7 @@ message M {
 	msg := dynamicpb.NewMessage(findMsg(t, fd, "M"))
 	err := pxf.Unmarshal([]byte("true = true"), msg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reserved-name")
+	assert.Contains(t, err.Error(), "PXF schema violations")
 	assert.Contains(t, err.Error(), "bad.v1.M.true")
 }
 
@@ -209,7 +209,7 @@ message M {
 	})
 	_, err := pxf.UnmarshalDescriptor([]byte("true = true"), findMsg(t, fd, "M"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reserved-name")
+	assert.Contains(t, err.Error(), "PXF schema violations")
 }
 
 func TestUnmarshalFullDescriptor_DefaultRejectsNonConformantSchema(t *testing.T) {
@@ -222,7 +222,7 @@ message M {
 	})
 	_, _, err := pxf.UnmarshalFullDescriptor([]byte("true = true"), findMsg(t, fd, "M"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reserved-name")
+	assert.Contains(t, err.Error(), "PXF schema violations")
 }
 
 func TestUnmarshal_SkipValidateBypassesCheck(t *testing.T) {

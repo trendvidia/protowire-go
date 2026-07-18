@@ -65,6 +65,11 @@ const (
 	ViolationOneof
 	// ViolationEnumValue is an enum value whose name is reserved.
 	ViolationEnumValue
+	// ViolationKeyOption is a (pxf.key) annotation whose placement
+	// violates draft -01 §3.13: the annotated field is not a repeated
+	// message-typed field, or the annotation value does not name a
+	// singular string field of the element message.
+	ViolationKeyOption
 )
 
 func (k ViolationKind) String() string {
@@ -75,36 +80,49 @@ func (k ViolationKind) String() string {
 		return "oneof"
 	case ViolationEnumValue:
 		return "enum value"
+	case ViolationKeyOption:
+		return "keyed field option"
 	default:
 		return "unknown"
 	}
 }
 
-// Violation describes one schema element whose name collides with a
-// reserved PXF keyword. Returned by [ValidateDescriptor].
+// Violation describes one schema element that fails a PXF bind-time
+// check: a name colliding with a reserved PXF keyword, or an invalid
+// (pxf.key) placement. Returned by [ValidateDescriptor].
 type Violation struct {
 	// File is the .proto file path the offending element is declared in.
 	File string
 	// Element is the fully-qualified protobuf name of the element
 	// (e.g. "trades.v1.Side.null").
 	Element string
-	// Name is the bare reserved identifier ("null" / "true" / "false").
+	// Name is the bare reserved identifier ("null" / "true" / "false")
+	// for reserved-name violations, or the (pxf.key) annotation value
+	// for ViolationKeyOption.
 	Name string
 	// Kind is the kind of element that collided.
 	Kind ViolationKind
+	// Detail is a human-readable explanation; set only for
+	// ViolationKeyOption.
+	Detail string
 }
 
 // String renders a one-line human-readable description of v.
 func (v Violation) String() string {
+	if v.Kind == ViolationKeyOption {
+		return fmt.Sprintf("%s: field %q: invalid (pxf.key) = %q: %s (draft -01 §3.13)",
+			v.File, v.Element, v.Name, v.Detail)
+	}
 	return fmt.Sprintf("%s: %s %q uses PXF-reserved name %q (draft §3.13)",
 		v.File, v.Kind, v.Element, v.Name)
 }
 
 // ValidateDescriptor walks the file containing desc and returns every
-// reserved-name collision among messages, oneofs, and enum values
-// reachable from that file. The returned slice is sorted by element
-// fully-qualified name for stable output. A nil/empty slice means the
-// schema is conformant.
+// bind-time violation reachable from that file: reserved-name
+// collisions among messages, oneofs, and enum values, plus invalid
+// (pxf.key) placements (draft -01 §3.13). The returned slice is sorted
+// by element fully-qualified name for stable output. A nil/empty slice
+// means the schema is conformant.
 //
 // The check is case-sensitive: identifiers such as "NULL" or "True"
 // lex as ordinary identifiers and are accepted.
@@ -115,8 +133,8 @@ func ValidateDescriptor(desc protoreflect.MessageDescriptor) []Violation {
 	return ValidateFile(desc.ParentFile())
 }
 
-// ValidateFile walks fd and returns every reserved-name collision in
-// the file. See [ValidateDescriptor] for the rule and semantics.
+// ValidateFile walks fd and returns every bind-time violation in the
+// file. See [ValidateDescriptor] for the rules and semantics.
 func ValidateFile(fd protoreflect.FileDescriptor) []Violation {
 	if fd == nil {
 		return nil
@@ -145,6 +163,7 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 					Kind:    ViolationField,
 				})
 			}
+			checkKeyOption(path, f, out)
 		}
 		oneofs := md.Oneofs()
 		for j := range oneofs.Len() {
@@ -164,6 +183,39 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 		}
 		walkMessages(path, md.Messages(), out)
 		walkEnums(path, md.Enums(), out)
+	}
+}
+
+// checkKeyOption validates the placement of a (pxf.key) annotation on f
+// per draft -01 §3.13: the annotated field must be a repeated
+// message-typed field, and the annotation value must name a singular
+// string field of the element message. Appends a ViolationKeyOption
+// for each failure.
+func checkKeyOption(path string, f protoreflect.FieldDescriptor, out *[]Violation) {
+	keyName, ok := KeyFieldName(f)
+	if !ok {
+		return
+	}
+	violation := func(detail string) {
+		*out = append(*out, Violation{
+			File:    path,
+			Element: string(f.FullName()),
+			Name:    keyName,
+			Kind:    ViolationKeyOption,
+			Detail:  detail,
+		})
+	}
+	if !f.IsList() || f.Kind() != protoreflect.MessageKind {
+		violation("(pxf.key) is valid only on repeated message-typed fields")
+		return
+	}
+	kf := f.Message().Fields().ByName(protoreflect.Name(keyName))
+	if kf == nil {
+		violation(fmt.Sprintf("element message %s has no field %q", f.Message().FullName(), keyName))
+		return
+	}
+	if kf.IsList() || kf.IsMap() || kf.Kind() != protoreflect.StringKind {
+		violation(fmt.Sprintf("key field %s must be a singular string field", kf.FullName()))
 	}
 }
 
@@ -196,5 +248,5 @@ func asValidationError(vs []Violation) error {
 	for i, v := range vs {
 		parts[i] = v.String()
 	}
-	return fmt.Errorf("PXF schema reserved-name violations:\n  %s", strings.Join(parts, "\n  "))
+	return fmt.Errorf("PXF schema violations:\n  %s", strings.Join(parts, "\n  "))
 }

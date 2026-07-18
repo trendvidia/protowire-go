@@ -168,7 +168,7 @@ message M {
 	msg := dynamicpb.NewMessage(findMsg(t, fd, "M"))
 	_, err := pxf.UnmarshalFull([]byte("true = true"), msg)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reserved-name")
+	assert.Contains(t, err.Error(), "PXF schema violations")
 }
 
 func TestUnmarshalFull_SkipValidateBypasses(t *testing.T) {

@@ -817,13 +817,15 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 
 	switch p.current.Kind {
 	case EQUALS:
-		// `=` denotes a field assignment on a proto message; the key must
-		// be an identifier (= proto field name). Map-style keys (string /
-		// integer) are only valid with `:`.
-		if keyKind != IDENT {
+		// `=` denotes a field assignment on a proto message; the key is
+		// an identifier (= proto field name) or a string literal (quoted
+		// entry name, draft -01 §3.13 — the grammar accepts it everywhere,
+		// the schema layer restricts it to keyed repeated fields). Integer
+		// keys are only valid with `:` (map entries).
+		if keyKind == INT {
 			// Tolerant mode records and keeps the entry as an assignment.
 			if err := p.soft(errorf(pos,
-				"field assignment with '=' requires an identifier key, got %s (%q); use ':' for map entries",
+				"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
 				keyKind, key)); err != nil {
 				return nil, err
 			}
@@ -834,7 +836,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 			return nil, err
 		}
 		trailing := p.takeTrailingComment(val.end())
-		return &Assignment{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
+		return &Assignment{Pos: pos, End: val.end(), Key: key, KeyQuoted: keyKind == STRING, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
 
 	case COLON:
 		// Map entry. Only allowed inside a '{ ... }' block, never at
@@ -855,11 +857,12 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		return &MapEntry{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
 
 	case LBRACE:
-		// `{ ... }` denotes a submessage field; same identifier-only rule
-		// as `=` applies.
-		if keyKind != IDENT {
+		// `{ ... }` denotes a submessage field; the name is an identifier
+		// or a string literal (quoted entry name, draft -01 §3.13). Same
+		// integer-key rule as `=` applies.
+		if keyKind == INT {
 			if err := p.soft(errorf(pos,
-				"submessage block requires an identifier key, got %s (%q)",
+				"submessage block requires an identifier or string key, got %s (%q)",
 				keyKind, key)); err != nil {
 				return nil, err
 			}
@@ -870,14 +873,14 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 			}
 			// Too deep to descend; skip the whole block, keep the entry.
 			end := p.skipBalanced(LBRACE, RBRACE)
-			return &Block{Pos: pos, End: end, Name: key, LeadingComments: leading}, nil
+			return &Block{Pos: pos, End: end, Name: key, NameQuoted: keyKind == STRING, LeadingComments: leading}, nil
 		}
 		p.advance() // consume {
 		entries, bodyEnd, err := p.parseBody(depth + 1)
 		if err != nil {
 			return nil, err
 		}
-		return &Block{Pos: pos, End: bodyEnd, Name: key, Entries: entries, LeadingComments: leading}, nil
+		return &Block{Pos: pos, End: bodyEnd, Name: key, NameQuoted: keyKind == STRING, Entries: entries, LeadingComments: leading}, nil
 
 	default:
 		if err := p.soft(errorf(p.current.Pos, "expected '=', ':', or '{' after %q, got %s", key, p.current.Kind)); err != nil {
