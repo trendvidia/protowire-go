@@ -40,6 +40,27 @@
 //     [Rewriter.AppendEntry] / [Rewriter.SetSpan]) — the latter reach a
 //     specific node among same-key siblings that a path cannot.
 //
+// # Keyed repeated fields
+//
+// A repeated message-typed field annotated (pxf.key) = "<field>"
+// (draft -01 §3.13) reads and writes as a block of named blocks —
+// entry name = key-field value, document order = list order:
+//
+//	children {
+//	  greeting    { type = "Label" }
+//	  counter_row { type = "HBox"  }
+//	}
+//
+// The Unmarshal family decodes both this and the anonymous list form;
+// [Marshal] emits the keyed form whenever every key is present,
+// non-empty, and distinct. [CanonicalizeKeyed] plus [FormatDocument]
+// canonicalize a parsed document the same way (the reference `pxf fmt`
+// pipeline), [KeyedDiagnostics] surfaces the keyed schema checks as
+// positioned diagnostics for editor tooling, and [IsKeyed] /
+// [KeyField] / [KeyFieldName] expose the annotation to tools that
+// would otherwise re-derive it from raw descriptors. Violations decode
+// as the typed [KeyedError].
+//
 // # Concurrency
 //
 // The package-level functions ([Unmarshal], [Marshal], [Parse],

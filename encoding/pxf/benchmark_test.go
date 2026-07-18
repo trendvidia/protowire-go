@@ -154,6 +154,94 @@ func BenchmarkPXFMarshal(b *testing.B) {
 	}
 }
 
+// Keyed repeated fields (draft -01 §3.13). The keyed path adds a
+// (pxf.key) option lookup per repeated message field on both decode
+// (block form) and encode (form selection); these benchmarks keep that
+// cost visible next to the plain PXF pair above.
+
+const benchKeyedProtoSrc = `
+syntax = "proto3";
+package benchkeyed.v1;
+
+import "pxf/annotations.proto";
+
+message Node {
+  string id = 1;
+  string type = 2;
+  int32 weight = 3;
+  repeated Node children = 4 [(pxf.key) = "id"];
+}
+`
+
+const benchKeyedPXF = `
+id = "root"
+type = "VBox"
+children {
+  header { type = "Label" weight = 1 }
+  toolbar { type = "HBox" weight = 2 }
+  body {
+    type = "VBox"
+    weight = 3
+    children {
+      sidebar { type = "List" weight = 1 }
+      "content-main" { type = "ScrollView" weight = 4 }
+    }
+  }
+  status_bar { type = "HBox" weight = 1 }
+}
+`
+
+var benchKeyedDesc protoreflect.MessageDescriptor
+
+func init() {
+	comp := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(
+			&protocompile.SourceResolver{
+				Accessor: protocompile.SourceAccessorFromMap(map[string]string{
+					"benchkeyed.proto":      benchKeyedProtoSrc,
+					"pxf/annotations.proto": annotationsProtoSrc,
+				}),
+			},
+		),
+	}
+	result, err := comp.Compile(context.Background(), "benchkeyed.proto")
+	if err != nil {
+		panic(err)
+	}
+	for _, f := range result {
+		if f.Path() == "benchkeyed.proto" {
+			benchKeyedDesc = f.Messages().ByName("Node")
+			return
+		}
+	}
+	panic("benchkeyed.proto not found")
+}
+
+func BenchmarkPXFUnmarshalKeyed(b *testing.B) {
+	data := []byte(benchKeyedPXF)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		_, err := pxf.UnmarshalDescriptor(data, benchKeyedDesc)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.SetBytes(int64(len(data)))
+}
+
+func BenchmarkPXFMarshalKeyed(b *testing.B) {
+	msg, err := pxf.UnmarshalDescriptor([]byte(benchKeyedPXF), benchKeyedDesc)
+	require.NoError(b, err)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		if _, err := pxf.Marshal(msg); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkJSONUnmarshal(b *testing.B) {
 	msg := benchMessage(b)
 	jsonData, err := protojson.Marshal(msg)
