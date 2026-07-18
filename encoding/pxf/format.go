@@ -82,7 +82,11 @@ func (f *formatter) formatEntries(entries []Entry, level int) {
 		case *Assignment:
 			f.writeComments(e.LeadingComments, level)
 			f.writeIndent(level)
-			f.buf.WriteString(e.Key)
+			if e.KeyQuoted {
+				fmt.Fprintf(f.buf, "%q", e.Key)
+			} else {
+				f.buf.WriteString(e.Key)
+			}
 			f.buf.WriteString(" = ")
 			f.formatValue(e.Value, level)
 			if e.TrailingComment != "" {
@@ -110,7 +114,11 @@ func (f *formatter) formatEntries(entries []Entry, level int) {
 		case *Block:
 			f.writeComments(e.LeadingComments, level)
 			f.writeIndent(level)
-			f.buf.WriteString(e.Name)
+			if e.NameQuoted {
+				fmt.Fprintf(f.buf, "%q", e.Name)
+			} else {
+				f.buf.WriteString(e.Name)
+			}
 			f.buf.WriteString(" {\n")
 			f.formatEntries(e.Entries, level+1)
 			f.writeIndent(level)

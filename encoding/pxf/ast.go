@@ -165,9 +165,16 @@ type Entry interface {
 
 // Assignment represents "key = value" (field assignment in message context).
 type Assignment struct {
-	Pos             Position
-	End             Position // just past the value's last byte
-	Key             string
+	Pos Position
+	End Position // just past the value's last byte
+	Key string
+	// KeyQuoted records that Key was written as a string literal
+	// (`"name" = { ... }`, the quoted entry-name form of draft -01
+	// §3.13). Key always holds the unquoted (denoted) value; the flag
+	// exists so [FormatDocument] round-trips the source spelling. A
+	// quoted name is only meaningful as the key of a keyed repeated
+	// field's entry — the schema layer rejects it anywhere else.
+	KeyQuoted       bool
 	Value           Value
 	LeadingComments []Comment // comments on lines before this entry
 	TrailingComment string    // inline comment after value on same line
@@ -193,9 +200,16 @@ func (e *MapEntry) end() Position { return e.End }
 
 // Block represents "name { entries }" (nested message).
 type Block struct {
-	Pos             Position
-	End             Position // just past the closing '}'
-	Name            string
+	Pos  Position
+	End  Position // just past the closing '}'
+	Name string
+	// NameQuoted records that Name was written as a string literal
+	// (`"us-east-1" { ... }`, draft -01 §3.13). Name always holds the
+	// unquoted (denoted) value; the flag preserves the source spelling
+	// for [FormatDocument]. A quoted name is only meaningful as the key
+	// of a keyed repeated field's entry — the schema layer rejects it
+	// anywhere else.
+	NameQuoted      bool
 	Entries         []Entry
 	LeadingComments []Comment
 }

@@ -71,6 +71,7 @@ type encoder struct {
 	nullMaskFd   protoreflect.FieldDescriptor // cached, top-level only
 	nullSet      map[string]bool              // cached, top-level only
 	pathPrefix   string                       // dotted path prefix for nested null lookup
+	skipKeyFd    protoreflect.FieldDescriptor // key field to omit from the NEXT encodeMessage call (keyed-block entry body, draft -01 §3.13)
 	scratch      [64]byte                     // scratch buffer for number formatting
 }
 
@@ -90,8 +91,18 @@ func (e *encoder) writeFieldPrefix(level int, name protoreflect.Name) {
 func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 	fields := msg.Descriptor().Fields()
 
+	// A pending skipKeyFd applies to exactly this body: the entry name
+	// of a keyed-block entry already carries the key field's value, so
+	// the field is not additionally emitted inside the block (draft -01
+	// §3.13). Consume it so nested messages don't inherit the skip.
+	skipKey := e.skipKeyFd
+	e.skipKeyFd = nil
+
 	for i := range fields.Len() {
 		fd := fields.Get(i)
+		if skipKey != nil && fd == skipKey {
+			continue
+		}
 
 		// Skip the _null FieldMask field itself.
 		if e.nullMaskFd != nil && e.pathPrefix == "" && fd.Number() == e.nullMaskFd.Number() {
@@ -244,6 +255,16 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 		return nil
 	}
 
+	// Keyed repeated field (draft -01 §3.13): emit the keyed block form
+	// whenever every element's key is present, non-empty, and distinct;
+	// otherwise fall through to the anonymous list form (elements with
+	// absent or duplicate keys can only be represented anonymously).
+	if keyFd := KeyField(fd); keyFd != nil && list.Len() > 0 {
+		if keyedFormEligible(list, keyFd) {
+			return e.encodeKeyedList(fd, list, keyFd, level)
+		}
+	}
+
 	e.writeFieldPrefix(level, fd.Name())
 	e.buf.WriteString("[\n")
 
@@ -307,6 +328,54 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 
 	e.writeIndent(level)
 	e.buf.WriteString("]\n")
+	return nil
+}
+
+// keyedFormEligible reports whether every element of list has a
+// non-empty key value that is distinct within the collection — the
+// draft -01 §3.13 condition for emitting the keyed block form.
+func keyedFormEligible(list protoreflect.List, keyFd protoreflect.FieldDescriptor) bool {
+	seen := make(map[string]struct{}, list.Len())
+	for i := range list.Len() {
+		key := list.Get(i).Message().Get(keyFd).String()
+		if key == "" {
+			return false
+		}
+		if _, dup := seen[key]; dup {
+			return false
+		}
+		seen[key] = struct{}{}
+	}
+	return true
+}
+
+// encodeKeyedList emits a keyed repeated field in the keyed block form:
+// one named block per element, in list order. Entry names are written
+// unquoted when identifier-safe and quoted otherwise; the key field is
+// not additionally emitted inside the entry's block.
+func (e *encoder) encodeKeyedList(fd protoreflect.FieldDescriptor, list protoreflect.List, keyFd protoreflect.FieldDescriptor, level int) error {
+	e.writeIndent(level)
+	e.buf.WriteString(string(fd.Name()))
+	e.buf.WriteString(" {\n")
+	for i := range list.Len() {
+		sub := list.Get(i).Message()
+		key := sub.Get(keyFd).String()
+		e.writeIndent(level + 1)
+		if identSafeEntryName(key) {
+			e.buf.WriteString(key)
+		} else {
+			e.writeQuotedString(key)
+		}
+		e.buf.WriteString(" {\n")
+		e.skipKeyFd = keyFd
+		if err := e.encodeMessage(sub, level+2); err != nil {
+			return err
+		}
+		e.writeIndent(level + 1)
+		e.buf.WriteString("}\n")
+	}
+	e.writeIndent(level)
+	e.buf.WriteString("}\n")
 	return nil
 }
 

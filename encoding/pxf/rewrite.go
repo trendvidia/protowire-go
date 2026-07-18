@@ -718,7 +718,11 @@ func writeEntryInline(buf *bytes.Buffer, e Entry) {
 	f := &formatter{buf: buf, indent: "  "}
 	switch n := e.(type) {
 	case *Assignment:
-		buf.WriteString(n.Key)
+		if n.KeyQuoted {
+			fmt.Fprintf(buf, "%q", n.Key)
+		} else {
+			buf.WriteString(n.Key)
+		}
 		buf.WriteString(" = ")
 		f.formatValue(n.Value, 0)
 	case *MapEntry:
@@ -730,7 +734,11 @@ func writeEntryInline(buf *bytes.Buffer, e Entry) {
 		buf.WriteString(": ")
 		f.formatValue(n.Value, 0)
 	case *Block:
-		buf.WriteString(n.Name)
+		if n.NameQuoted {
+			fmt.Fprintf(buf, "%q", n.Name)
+		} else {
+			buf.WriteString(n.Name)
+		}
 		buf.WriteString(" {")
 		for _, c := range n.Entries {
 			buf.WriteByte(' ')

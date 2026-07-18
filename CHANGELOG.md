@@ -11,6 +11,65 @@ format changes.
 
 ## [Unreleased]
 
+Reference implementation of **keyed repeated fields** (spec issue
+[trendvidia/protowire#116], draft `-01` §3.13; tracked here as #50).
+A `repeated <Message>` field annotated `(pxf.key) = "<field>"` may be
+written as a block of named blocks — entry name = key-field value,
+document order = list order. Targets the spec's v1.3.0 release train.
+
+### Added
+
+- `encoding/pxf`: grammar — `field_entry` accepts a string literal at
+  entry-name position (`"us-east-1" { ... }`, also `"name" = { ... }`),
+  in both `Parse` and `ParseTolerant`. The AST carries the unquoted
+  name plus a quoted-ness flag (`Assignment.KeyQuoted`,
+  `Block.NameQuoted`) so `FormatDocument` round-trips the source
+  spelling. Integer keys remain map-only.
+- `encoding/pxf`: decode — the Unmarshal family interprets the keyed
+  block form, populating the key field from each entry name. Duplicate
+  entry names in a block (compared by unquoted value), the empty string
+  as a key (either surface form), a disagreeing explicit key-field
+  assignment, and a quoted entry name outside a keyed field's block are
+  rejected with the typed `*KeyedError` (`errors.As`-able, `Kind` one
+  of `KeyedDuplicateKey` / `KeyedKeyConflict` / `KeyedEmptyKey` /
+  `KeyedQuotedNameUnkeyed`). An agreeing explicit key assignment is
+  redundant but legal.
+- `encoding/pxf`: encode — `Marshal` emits the keyed block form
+  whenever every element's key is present, non-empty, and distinct
+  (entry names quoted only when not identifier-safe, key field omitted
+  from entry bodies), and falls back to the anonymous list form
+  otherwise.
+- `encoding/pxf`: `CanonicalizeKeyed` rewrites a parsed document to
+  canonical keyed form for schema-aware formatting (the reference
+  `pxf fmt` pipeline together with `FormatDocument`): eligible
+  anonymous bindings become keyed blocks, identifier-safe quoted names
+  are unquoted, redundant agreeing key assignments are dropped.
+- `encoding/pxf`: `KeyedDiagnostics` surfaces the keyed schema checks
+  as positioned diagnostics over a (tolerant) AST instead of hard
+  errors, for editor tooling (protolsp) and linters (protocheck).
+- `encoding/pxf`: descriptor helpers `IsKeyed`, `KeyField`, and
+  `KeyFieldName` expose `(pxf.key) = 50002` so downstream tools consume
+  the option without re-deriving it from raw descriptors. Bind-time
+  validation (`ValidateFile` / `ValidateDescriptor`, run by every
+  decode unless `SkipValidate`) now also rejects invalid `(pxf.key)`
+  placements as `ViolationKeyOption`, with the new `Violation.Detail`
+  field carrying the explanation.
+- `encoding/pxf`: the cross-port conformance corpus
+  `testdata/keyed/` is vendored from the spec repo and wired into the
+  test suite; fuzzing extended with a schema-bound keyed target
+  (`FuzzUnmarshalKeyed`) plus keyed seeds for the parser fuzzers.
+
+### Changed
+
+- `encoding/pxf`: the aggregate bind-time validation error header reads
+  `PXF schema violations:` (was `PXF schema reserved-name violations:`)
+  now that it also covers `(pxf.key)` placement; per-violation lines
+  are unchanged.
+- `encoding/pxf`: the fused decoder no longer silently accepts a quoted
+  string at field-name position (`"id" = ...`); it now rejects it as a
+  quoted entry name outside a keyed field, matching the grammar the
+  AST parser always enforced.
+
 ## [1.2.2] — 2026-07-14
 
 Spec-conformance fix for non-finite floats in the `encoding/pxf`
@@ -843,6 +902,8 @@ Initial public release. Versioned to match sibling components in the
   used on the unmarshal hot paths.
 - Minimum Go version is `1.25` (set by the floor of transitive
   dependencies, surfaced by `go mod tidy`).
+
+[trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
 [Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.2.2...HEAD
 [1.2.2]: https://github.com/trendvidia/protowire-go/compare/v1.2.1...v1.2.2
