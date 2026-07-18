@@ -58,6 +58,16 @@ document order = list order. Targets the spec's v1.3.0 release train.
   `testdata/keyed/` is vendored from the spec repo and wired into the
   test suite; fuzzing extended with a schema-bound keyed target
   (`FuzzUnmarshalKeyed`) plus keyed seeds for the parser fuzzers.
+- `encoding/pxf`: keyed-collection editors on the `Rewriter` (#53) —
+  `SetKeyed`, `RemoveKeyed`, `RemoveKeyedElement`, `InsertKeyedElement`
+  (append or before an anchor), `RenameKeyedElement` (name-token-only
+  edit with automatic quote/unquote), and `MoveKeyedElement` (verbatim
+  reorder; an element's glued leading comments travel with it). Element
+  keys are taken as opaque atoms — dotted and non-identifier keys that
+  dotted-path addressing cannot reach — and elements match in either
+  spelling (`name { … }` / `name = { … }`) by unquoted name. Schema-less
+  like the rest of the Rewriter, and format-preserving outside the
+  edited spans.
 
 ### Changed
 
