@@ -33,12 +33,16 @@ import (
 // missing intermediate block will create it twice (stage one Set with
 // a [BlockVal] value instead).
 //
-// Keyed collections (draft -01 §3.13 blocks of named blocks) have
-// their own editors — [Rewriter.SetKeyed], [Rewriter.RemoveKeyed],
+// Keyed collections (draft -01 §3.13) have their own editors —
+// [Rewriter.SetKeyed], [Rewriter.RemoveKeyed],
 // [Rewriter.InsertKeyedElement], [Rewriter.RemoveKeyedElement],
 // [Rewriter.RenameKeyedElement], [Rewriter.MoveKeyedElement] — that
 // take the element key as an opaque atom, since entry names may
-// contain dots and need not be identifier-shaped.
+// contain dots and need not be identifier-shaped. They cover a field
+// bound more than once (§3.13 concatenation) by searching every
+// binding, and the anonymous list form (`f = [ { k = "x" } ]`) once
+// its key field is named with [Rewriter.KeyedByField]; the keyed-block
+// form needs no declaration.
 //
 // A Rewriter is not safe for concurrent use.
 type Rewriter struct {
@@ -49,6 +53,12 @@ type Rewriter struct {
 	// identity so repeated appends into one block accumulate rather
 	// than deduplicating (as same-path Sets do).
 	insertSeq int
+	// keyFields records the (pxf.key) field name declared for a keyed
+	// collection at a dotted fieldPath via [Rewriter.KeyedByField]. It
+	// lets the keyed editors address a collection written in the
+	// anonymous list form, where the key is the value of the key field
+	// rather than an entry name. nil until the first declaration.
+	keyFields map[string]string
 }
 
 // spanEdit replaces src[start:end) with text. start == end is a pure

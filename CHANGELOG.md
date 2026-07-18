@@ -68,6 +68,18 @@ document order = list order. Targets the spec's v1.3.0 release train.
   spelling (`name { … }` / `name = { … }`) by unquoted name. Schema-less
   like the rest of the Rewriter, and format-preserving outside the
   edited spans.
+- `encoding/pxf`: the keyed-collection editors now cover the remaining
+  surface forms of a keyed field (#55). A field bound more than once
+  (§3.13 concatenation, `children { … } children { … }`) is treated as
+  one logical collection: lookup, rename, remove, and move search every
+  binding, duplicate detection spans them, and an append lands in the
+  last binding. The anonymous list form (`regions = [ { name = "x" } ]`)
+  is editable once its key field is named with the new
+  `Rewriter.KeyedByField(fieldPath, keyField)` — elements are addressed
+  by the key field's value and edited in place (including list-element
+  insert/remove/move with comma handling), preserving the anonymous form
+  rather than reformatting to keyed. The keyed-block form still needs no
+  declaration.
 
 ### Changed
 
