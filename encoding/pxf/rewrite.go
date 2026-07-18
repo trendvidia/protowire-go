@@ -33,6 +33,13 @@ import (
 // missing intermediate block will create it twice (stage one Set with
 // a [BlockVal] value instead).
 //
+// Keyed collections (draft -01 §3.13 blocks of named blocks) have
+// their own editors — [Rewriter.SetKeyed], [Rewriter.RemoveKeyed],
+// [Rewriter.InsertKeyedElement], [Rewriter.RemoveKeyedElement],
+// [Rewriter.RenameKeyedElement], [Rewriter.MoveKeyedElement] — that
+// take the element key as an opaque atom, since entry names may
+// contain dots and need not be identifier-shaped.
+//
 // A Rewriter is not safe for concurrent use.
 type Rewriter struct {
 	src   []byte
@@ -100,18 +107,26 @@ func (r *Rewriter) Set(path string, v Value) error {
 	if err != nil {
 		return err
 	}
+	return r.setResolved("Set "+path, path, t, v)
+}
+
+// setResolved stages the value edit for a resolved target — replacing
+// an existing entry's value span, or inserting the missing chain. op is
+// the display prefix for error messages ("Set <path>"); pathKey is the
+// staging identity (same-key edits replace each other).
+func (r *Rewriter) setResolved(op, pathKey string, t *target, v Value) error {
 	if t.entry != nil {
 		old, ok := entryValue(t.entry)
 		if !ok {
-			return fmt.Errorf("pxf: Set %s: path addresses a block; set its fields individually, or Remove it and Set a BlockVal", path)
+			return fmt.Errorf("pxf: %s: path addresses a block; set its fields individually, or Remove it and Set a BlockVal", op)
 		}
 		start := old.pos().Offset
 		end := old.end().Offset
 		indent := r.lineIndentAt(t.entry.pos().Offset)
-		r.stage(spanEdit{path: path, start: start, end: end, text: r.renderValue(v, indent, r.stepFor(t.containerEntries))})
+		r.stage(spanEdit{path: pathKey, start: start, end: end, text: r.renderValue(v, indent, r.stepFor(t.containerEntries))})
 		return nil
 	}
-	return r.stageInsert(path, t, v)
+	return r.stageInsert(op, pathKey, t, v)
 }
 
 // Remove stages the deletion of the entry at path. When the entry sits
@@ -128,8 +143,18 @@ func (r *Rewriter) Remove(path string) error {
 	if t.entry == nil {
 		return fmt.Errorf("pxf: Remove %s: no such entry", path)
 	}
-	start := t.entry.pos().Offset
-	end := t.entry.end().Offset
+	start, end, _ := r.entryRemovalSpan(t.entry)
+	r.stage(spanEdit{path: path, start: start, end: end})
+	return nil
+}
+
+// entryRemovalSpan returns the source span removing e should delete:
+// when the entry sits alone on its line(s), the whole lines including a
+// trailing comment on the last one (wholeLines true); otherwise the
+// exact entry span plus the spaces separating it from what follows.
+func (r *Rewriter) entryRemovalSpan(e Entry) (start, end int, wholeLines bool) {
+	start = e.pos().Offset
+	end = e.end().Offset
 
 	ls := lineStartOffset(r.src, start)
 	if isBlank(r.src[ls:start]) {
@@ -160,8 +185,7 @@ func (r *Rewriter) Remove(path string) error {
 			if le < len(r.src) {
 				le++ // include the newline
 			}
-			r.stage(spanEdit{path: path, start: ls, end: le})
-			return nil
+			return ls, le, true
 		}
 	}
 	// The entry shares its line(s) with other content: remove its exact
@@ -169,8 +193,7 @@ func (r *Rewriter) Remove(path string) error {
 	for end < len(r.src) && (r.src[end] == ' ' || r.src[end] == '\t') {
 		end++
 	}
-	r.stage(spanEdit{path: path, start: start, end: end})
-	return nil
+	return start, end, false
 }
 
 // ReplaceValue stages a replacement of the source span of an existing
@@ -242,7 +265,17 @@ func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
 	if closeOff < scopeStart || closeOff >= len(r.src) || r.src[closeOff] != '}' {
 		return fmt.Errorf("pxf: AppendEntry: block %q has no source span (not a parsed block)", block.Name)
 	}
+	insertAt, text := r.renderAppendEntry(scopeStart, closeOff, block.Entries, e)
+	r.stageInsertEdit(insertAt, text)
+	return nil
+}
 
+// renderAppendEntry computes the insertion that appends e as the last
+// entry of the scope whose opening entry starts at scopeStart and whose
+// closing '}' sits at closeOff, formatted to match the scope's existing
+// siblings. Shared by [Rewriter.AppendEntry] and the keyed-collection
+// editors, which stage the result under their own edit identities.
+func (r *Rewriter) renderAppendEntry(scopeStart, closeOff int, siblings []Entry, e Entry) (insertAt int, text []byte) {
 	if !bytes.Contains(r.src[scopeStart:closeOff], []byte("\n")) {
 		// Inline block `{ ... }` (or `{}`): splice ` <entry> ` before '}'.
 		var sb bytes.Buffer
@@ -251,22 +284,21 @@ func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
 		}
 		writeEntryInline(&sb, e)
 		sb.WriteByte(' ')
-		r.stageInsertEdit(closeOff, sb.Bytes())
-		return nil
+		return closeOff, sb.Bytes()
 	}
 
 	// Multi-line block: insert a full line just above the closing brace,
 	// indented like the existing siblings. A nested body (a block entry's
 	// children) steps in by the document's own indent width, not a fixed
 	// two spaces.
-	step := r.stepFor(block.Entries)
-	indent := r.childIndent(block.Entries, block.Pos.Offset)
-	if len(block.Entries) == 0 {
+	step := r.stepFor(siblings)
+	indent := r.childIndent(siblings, scopeStart)
+	if len(siblings) == 0 {
 		// No sibling reveals the base indent; derive it from the block's
 		// own line plus one step, rather than childIndent's 2-space guess.
-		indent = r.lineLeadingIndent(block.Pos.Offset) + step
+		indent = r.lineLeadingIndent(scopeStart) + step
 	}
-	insertAt := closeOff
+	insertAt = closeOff
 	var prefix []byte
 	ls := lineStartOffset(r.src, closeOff)
 	if isBlank(r.src[ls:closeOff]) {
@@ -279,8 +311,7 @@ func (r *Rewriter) AppendEntry(block *Block, e Entry) error {
 	sb.Write(prefix)
 	sb.Write(renderEntryLines(e, indent, step))
 	sb.WriteByte('\n')
-	r.stageInsertEdit(insertAt, sb.Bytes())
-	return nil
+	return insertAt, sb.Bytes()
 }
 
 // stageInsertEdit records a zero-width insertion of text at off under a
@@ -353,14 +384,20 @@ type target struct {
 }
 
 func (r *Rewriter) resolve(path string) (*target, error) {
+	return r.resolveIn(r.doc.Entries, nil, path)
+}
+
+// resolveIn resolves a dotted path against an arbitrary entry scope —
+// the document top level for [Rewriter.resolve], or one keyed element's
+// body for the keyed-collection editors. container is the entry owning
+// the scope (nil for the top level).
+func (r *Rewriter) resolveIn(entries []Entry, container Entry, path string) (*target, error) {
 	segs := strings.Split(path, ".")
 	for _, seg := range segs {
 		if seg == "" {
 			return nil, fmt.Errorf("pxf: invalid path %q: empty segment", path)
 		}
 	}
-	entries := r.doc.Entries
-	var container Entry
 	for i, seg := range segs {
 		e := findEntry(entries, seg)
 		if e == nil {
@@ -444,19 +481,20 @@ func containsBadVal(v Value) bool {
 }
 
 // stageInsert builds the text for the missing tail of a path and
-// stages its insertion at the end of the deepest existing scope.
-func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
+// stages its insertion at the end of the deepest existing scope. op is
+// the display prefix for error messages; pathKey the staging identity.
+func (r *Rewriter) stageInsert(op, pathKey string, t *target, v Value) error {
 	// The intermediate (block-creating) segments must be bare
 	// identifiers; the leaf may need quoting only in map (':') form.
 	for _, seg := range t.missing[:len(t.missing)-1] {
 		if needsQuoting(seg) {
-			return fmt.Errorf("pxf: Set %s: segment %q is not a valid block name", path, seg)
+			return fmt.Errorf("pxf: %s: segment %q is not a valid block name", op, seg)
 		}
 	}
 	leaf := t.missing[len(t.missing)-1]
 	mapForm := hasMapEntry(t.containerEntries)
 	if needsQuoting(leaf) && !mapForm {
-		return fmt.Errorf("pxf: Set %s: key %q needs a map (':') context", path, leaf)
+		return fmt.Errorf("pxf: %s: key %q needs a map (':') context", op, leaf)
 	}
 	step := r.stepFor(t.containerEntries)
 
@@ -479,7 +517,7 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 		scopeStart = c.Pos.Offset
 	}
 	if scopeStart >= 0 && (closeOff < 0 || closeOff >= len(r.src) || r.src[closeOff] != '}') {
-		return fmt.Errorf("pxf: Set %s: internal error: container span does not end at '}'", path)
+		return fmt.Errorf("pxf: %s: internal error: container span does not end at '}'", op)
 	}
 
 	if scopeStart >= 0 && !bytes.Contains(r.src[scopeStart:closeOff], []byte("\n")) {
@@ -491,7 +529,7 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 		}
 		sb.Write(r.renderChain(t.missing, "", step, mapForm, v, true))
 		sb.WriteByte(' ')
-		r.stage(spanEdit{path: path, start: closeOff, end: closeOff, text: sb.Bytes()})
+		r.stage(spanEdit{path: pathKey, start: closeOff, end: closeOff, text: sb.Bytes()})
 		return nil
 	}
 
@@ -515,7 +553,7 @@ func (r *Rewriter) stageInsert(path string, t *target, v Value) error {
 	sb.Write(prefix)
 	sb.Write(r.renderChain(t.missing, indent, step, mapForm, v, false))
 	sb.WriteByte('\n')
-	r.stage(spanEdit{path: path, start: insertAt, end: insertAt, text: sb.Bytes()})
+	r.stage(spanEdit{path: pathKey, start: insertAt, end: insertAt, text: sb.Bytes()})
 	return nil
 }
 
