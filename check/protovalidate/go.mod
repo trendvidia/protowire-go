@@ -7,7 +7,7 @@ require (
 	buf.build/go/protovalidate v1.2.0
 	github.com/bufbuild/protocompile v0.14.1
 	github.com/stretchr/testify v1.11.1
-	github.com/trendvidia/protowire-go v1.3.1-0.20260724032836-ff84a02f87f7
+	github.com/trendvidia/protowire-go v1.3.1
 	google.golang.org/protobuf v1.36.11
 )
 
