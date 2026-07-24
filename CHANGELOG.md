@@ -29,6 +29,12 @@ format changes.
 - `encoding/sbe`: `CodecOptions.NewCodec` attaches a `Validator` to a
   `Codec`, applied by `Unmarshal`, `UnmarshalDescriptor`, and the
   SOFH stream `Decoder`.
+- `check/protovalidate`: community validation engine adapting
+  `buf.build/go/protovalidate` (buf.validate annotations, CEL rules)
+  to the `check.Validator` seam. Ships as a **nested Go module** with
+  its own tag series (`check/protovalidate/vX.Y.Z`) so protovalidate's
+  cel-go dependency tree stays out of the core module and its
+  consumers' graphs. Rule IDs are namespaced `buf.validate.…`.
 
 ## [1.3.0] — 2026-07-17
 

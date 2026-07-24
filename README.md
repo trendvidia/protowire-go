@@ -186,6 +186,30 @@ err := opts.Unmarshal(data, &msg)
 
 The check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the rule.
 
+## Data validation (`check`)
+
+All three decoders (`pxf`, `pb`, `sbe`) accept an optional post-decode validator through the engine-neutral seam in the `check` package. Violations fail the decode with a `*check.Error` carrying the full report:
+
+```go
+import (
+    "github.com/trendvidia/protowire-go/check"
+    pvcheck "github.com/trendvidia/protowire-go/check/protovalidate"
+)
+
+v, err := pvcheck.New()                      // buf.validate rules via protovalidate
+opts := pxf.UnmarshalOptions{Validator: v}   // sbe: sbe.CodecOptions{Validator: v}
+
+result, err := opts.UnmarshalFull(data, &msg)
+var ce *check.Error
+if errors.As(err, &ce) {
+    for _, viol := range ce.Report.Violations {
+        fmt.Println(viol.Path, viol.RuleID, viol.Message)
+    }
+}
+```
+
+The `check/protovalidate` adapter is a **separate nested module** (`go get github.com/trendvidia/protowire-go/check/protovalidate`) so its CEL dependency tree never enters the core module's graph. Any engine implementing `check.Validator` plugs in the same way; rule IDs are namespaced per engine (`buf.validate.…`, `rfc001.…`). This seam is distinct from the reserved-name check above: that one guards the schema, this one validates decoded data.
+
 ## Struct binary marshaling (`encoding/pb`)
 
 Marshal any Go struct to/from protobuf binary using `protowire:"N"` struct tags — no `.proto` files, no code generation.
