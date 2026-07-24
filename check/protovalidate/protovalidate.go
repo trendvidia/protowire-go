@@ -4,6 +4,11 @@
 // Package protovalidate adapts buf.build/go/protovalidate to the
 // protowire-go validation seam ([check.Validator]).
 //
+// Deprecated: this module moved to
+// github.com/trendvidia/protocheck/protovalidate — protocheck is the
+// validator abstraction layer, and engine adapters live with it. This
+// copy remains functional but receives no further changes.
+//
 // This is the community validation engine: rules are declared with
 // buf.validate annotations in the .proto schema and evaluated by
 // protovalidate's CEL runtime. The package lives in its own Go module

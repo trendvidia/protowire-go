@@ -1,3 +1,6 @@
+// Deprecated: moved to github.com/trendvidia/protocheck/protovalidate —
+// protocheck is the validator abstraction layer, and engine adapters live
+// with it.
 module github.com/trendvidia/protowire-go/check/protovalidate
 
 go 1.25.0
