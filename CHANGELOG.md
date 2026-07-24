@@ -11,6 +11,18 @@ format changes.
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-07-24
+
+The **validation seam** (RFC-001 #070, tracked here as #49): all three
+decoders (pxf / pb / SBE) optionally run post-decode data validation
+through an engine-neutral `check.Validator`, failing the decode with a
+`*check.Error` on violations. Engines plug in at link time — the
+open-source protovalidate adapter ships as the nested module
+`check/protovalidate` (tagged `check/protovalidate/v1.3.1`), and the
+protocheck engine adapts from its own repo. Additive API; no changes to
+existing behavior or the pb/SBE wire formats, and no new dependencies in
+the core module.
+
 ### Added
 
 - `check`: new package defining the validation seam for all decoders
