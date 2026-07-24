@@ -10,6 +10,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/trendvidia/protowire-go/check"
 )
 
 // Unmarshal parses PXF data into msg with default options.
@@ -36,7 +38,11 @@ func (o UnmarshalOptions) Unmarshal(data []byte, msg proto.Message) error {
 			return err
 		}
 	}
-	return unmarshalDirect(data, r, o.TypeResolver, o.DiscardUnknown, o.OnSecretField)
+	if err := unmarshalDirect(data, r, o.TypeResolver, o.DiscardUnknown, o.OnSecretField); err != nil {
+		return err
+	}
+	_, err := check.Validate(o.Validator, msg)
+	return err
 }
 
 // UnmarshalDescriptor parses PXF data using the given message descriptor.
@@ -50,11 +56,16 @@ func (o UnmarshalOptions) UnmarshalDescriptor(data []byte, desc protoreflect.Mes
 	if err := unmarshalDirect(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.OnSecretField); err != nil {
 		return nil, err
 	}
+	if _, err := check.Validate(o.Validator, msg); err != nil {
+		return nil, err
+	}
 	return msg, nil
 }
 
 // UnmarshalFullDescriptor parses PXF data using the given message descriptor
-// and returns field presence metadata.
+// and returns field presence metadata. If a Validator reports violations,
+// the decoded message and the Result (with the check.Report attached) are
+// returned alongside the *check.Error.
 func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect.MessageDescriptor) (*dynamicpb.Message, *Result, error) {
 	if !o.SkipValidate {
 		if err := asValidationError(ValidateDescriptor(desc)); err != nil {
@@ -66,7 +77,8 @@ func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect
 	if err != nil {
 		return nil, nil, err
 	}
-	return msg, result, nil
+	result.report, err = check.Validate(o.Validator, msg)
+	return msg, result, err
 }
 
 func decodeMapKey(fd protoreflect.FieldDescriptor, key string, pos Position) (protoreflect.MapKey, error) {

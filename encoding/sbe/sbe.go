@@ -50,6 +50,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/trendvidia/protowire-go/check"
 )
 
 const (
@@ -83,17 +85,38 @@ var byteOrder = binary.LittleEndian
 // Codec encodes and decodes proto.Message values using the SBE binary format.
 // A Codec is safe for concurrent use after creation.
 type Codec struct {
-	byName map[protoreflect.FullName]*messageTemplate
-	byID   map[uint16]*messageTemplate
+	byName    map[protoreflect.FullName]*messageTemplate
+	byID      map[uint16]*messageTemplate
+	validator check.Validator
+}
+
+// CodecOptions configures Codec construction. The zero value is
+// equivalent to the package-level [NewCodec].
+type CodecOptions struct {
+	// Validator, if non-nil, runs data validation on every message
+	// decoded by [Codec.Unmarshal], [Codec.UnmarshalDescriptor], and
+	// [Decoder.Decode]. When it reports violations the decode fails
+	// with a *check.Error, retrievable via errors.As. It does not
+	// apply to [Codec.View], which reads the wire buffer without
+	// materializing a message. The validator is fixed at construction
+	// so the Codec stays safe for concurrent use.
+	Validator check.Validator
 }
 
 // NewCodec creates an SBE codec from proto file descriptors.
 // Each file must have (sbe.schema_id) and (sbe.version) file options, and
 // each message to be encoded must have an (sbe.template_id) message option.
 func NewCodec(files ...protoreflect.FileDescriptor) (*Codec, error) {
+	return CodecOptions{}.NewCodec(files...)
+}
+
+// NewCodec creates an SBE codec from proto file descriptors with the
+// given options.
+func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, error) {
 	c := &Codec{
-		byName: make(map[protoreflect.FullName]*messageTemplate),
-		byID:   make(map[uint16]*messageTemplate),
+		byName:    make(map[protoreflect.FullName]*messageTemplate),
+		byID:      make(map[uint16]*messageTemplate),
+		validator: o.Validator,
 	}
 	for _, fd := range files {
 		schemaID, ok := getFileUint32Option(fd, extSchemaID)
@@ -151,7 +174,11 @@ func (c *Codec) Unmarshal(data []byte, msg proto.Message) error {
 	if !ok {
 		return fmt.Errorf("sbe: no template registered for %s", name)
 	}
-	return unmarshalMessage(data, msg.ProtoReflect(), tmpl)
+	if err := unmarshalMessage(data, msg.ProtoReflect(), tmpl); err != nil {
+		return err
+	}
+	_, err := check.Validate(c.validator, msg)
+	return err
 }
 
 // UnmarshalDescriptor decodes SBE binary into a new dynamicpb.Message.
@@ -162,6 +189,9 @@ func (c *Codec) UnmarshalDescriptor(data []byte, desc protoreflect.MessageDescri
 	}
 	msg := dynamicpb.NewMessage(desc)
 	if err := unmarshalMessage(data, msg, tmpl); err != nil {
+		return nil, err
+	}
+	if _, err := check.Validate(c.validator, msg); err != nil {
 		return nil, err
 	}
 	return msg, nil

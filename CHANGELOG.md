@@ -11,6 +11,25 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- `check`: new package defining the validation seam for all decoders
+  (#49, RFC-001 #070) — a `Validator` interface plus engine-neutral
+  `Report`/`Violation` types and a `*check.Error` decode failure.
+  Validation engines (protovalidate, protocheck) live in separate
+  modules and plug in at link time; the core module gains no new
+  dependencies.
+- `encoding/pxf`: `UnmarshalOptions.Validator` runs post-decode data
+  validation. Violations fail the decode with `*check.Error`; the
+  `UnmarshalFull` variants return their `Result` with the report
+  attached (`Result.Report()`). Distinct from `SkipValidate`, which
+  keeps its existing schema reserved-name-check meaning.
+- `encoding/pb`: `UnmarshalOptions` struct with a `Validator` field;
+  the validator receives the decoded tagged-struct pointer.
+- `encoding/sbe`: `CodecOptions.NewCodec` attaches a `Validator` to a
+  `Codec`, applied by `Unmarshal`, `UnmarshalDescriptor`, and the
+  SOFH stream `Decoder`.
+
 ## [1.3.0] — 2026-07-17
 
 Reference implementation of **keyed repeated fields** (spec issue

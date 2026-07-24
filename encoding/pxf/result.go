@@ -3,6 +3,8 @@
 
 package pxf
 
+import "github.com/trendvidia/protowire-go/check"
+
 // Result captures field-level presence metadata from PXF decoding.
 // It tracks which fields were explicitly set, which were set to null,
 // and which were absent from the input.
@@ -13,6 +15,15 @@ type Result struct {
 	directives    []Directive
 	datasets      []DatasetDirective
 	protos        []ProtoDirective
+	report        *check.Report
+}
+
+// Report returns the validation report produced by
+// [UnmarshalOptions.Validator], or nil when no validator ran. It is
+// populated even when the decode failed with a *check.Error, so callers
+// can inspect the full violation list rather than just the error text.
+func (r *Result) Report() *check.Report {
+	return r.report
 }
 
 // Directives returns the `@<name> *(prefix) [{ ... }]` blocks the

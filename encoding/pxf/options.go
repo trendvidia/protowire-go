@@ -6,6 +6,8 @@ package pxf
 import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"github.com/trendvidia/protowire-go/check"
 )
 
 // TypeResolver resolves protobuf type URLs to message descriptors.
@@ -79,6 +81,20 @@ type UnmarshalOptions struct {
 	//
 	// Errors from the hook abort the decode and propagate.
 	OnSecretField func(path, value string) error
+
+	// Validator, if non-nil, runs data validation on the decoded
+	// message after the decode (and, for the Full variants, after the
+	// post-decode defaults/required pass). When it reports violations
+	// the decode fails with a *check.Error, retrievable via errors.As;
+	// the Full variants additionally return their Result with the
+	// check.Report attached (see [Result.Report]).
+	//
+	// This is a different mechanism from SkipValidate above: that
+	// knob controls the per-call schema reserved-name check on the
+	// descriptor, while Validator checks the decoded data against an
+	// engine-defined rule set (e.g. buf.validate annotations via a
+	// protovalidate adapter, or the RFC-001 surface via protocheck).
+	Validator check.Validator
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -89,6 +105,8 @@ func UnmarshalFull(data []byte, msg proto.Message) (*Result, error) {
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
+// If a Validator reports violations, the Result (with the check.Report
+// attached) is returned alongside the *check.Error.
 func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result, error) {
 	r := msg.ProtoReflect()
 	if !o.SkipValidate {
@@ -96,5 +114,10 @@ func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result
 			return nil, err
 		}
 	}
-	return unmarshalDirectFull(data, r, o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode, o.OnSecretField)
+	result, err := unmarshalDirectFull(data, r, o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode, o.OnSecretField)
+	if err != nil {
+		return nil, err
+	}
+	result.report, err = check.Validate(o.Validator, msg)
+	return result, err
 }
