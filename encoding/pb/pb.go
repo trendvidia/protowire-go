@@ -17,6 +17,12 @@
 // The `zigzag` tag option selects proto3 sint32 / sint64 instead, which
 // is more compact for negative values.
 //
+// Repeated numeric scalars (slices of bool, int, uint, or float kinds)
+// are encoded packed — one length-delimited record carrying the
+// concatenated element encodings — matching the proto3 default.
+// Unmarshal accepts both packed and unpacked encodings, as required of
+// proto3 decoders.
+//
 // The wire format is standard protobuf binary, compatible with any .proto
 // definition using the same field numbers and matching types.
 //
@@ -161,7 +167,15 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 			b = protowire.AppendBytes(b, fv.Bytes())
 			return b, nil
 		}
-		// Repeated: one tag+value per element
+		if fv.Len() == 0 {
+			return b, nil
+		}
+		// Repeated numeric scalars: packed (proto3 default) — one
+		// LEN-typed record carrying the concatenated element encodings.
+		if packedKind(fv.Type().Elem().Kind()) {
+			return appendPacked(b, num, fv, zigzag), nil
+		}
+		// Other element types: one tag+value per element.
 		for i := 0; i < fv.Len(); i++ {
 			var err error
 			b, err = marshalField(b, num, fv.Index(i), zigzag)
@@ -292,6 +306,52 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 	return b, nil
 }
 
+// packedKind reports whether a slice element kind is a numeric scalar
+// that proto3 encodes packed by default. String, bytes, message, and
+// map elements are never packed.
+func packedKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool,
+		reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8,
+		reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8,
+		reflect.Float64, reflect.Float32:
+		return true
+	}
+	return false
+}
+
+// appendPacked encodes a repeated numeric scalar field in packed form.
+// Unlike singular scalar fields, every element is emitted — packed
+// encoding has no per-element presence, so zeros are preserved.
+func appendPacked(b []byte, num protowire.Number, fv reflect.Value, zigzag bool) []byte {
+	var payload []byte
+	for i := 0; i < fv.Len(); i++ {
+		ev := fv.Index(i)
+		switch ev.Kind() {
+		case reflect.Bool:
+			var v uint64
+			if ev.Bool() {
+				v = 1
+			}
+			payload = protowire.AppendVarint(payload, v)
+		case reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8:
+			if zigzag {
+				payload = protowire.AppendVarint(payload, protowire.EncodeZigZag(ev.Int()))
+			} else {
+				payload = protowire.AppendVarint(payload, uint64(ev.Int()))
+			}
+		case reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8:
+			payload = protowire.AppendVarint(payload, ev.Uint())
+		case reflect.Float64:
+			payload = protowire.AppendFixed64(payload, math.Float64bits(ev.Float()))
+		case reflect.Float32:
+			payload = protowire.AppendFixed32(payload, math.Float32bits(float32(ev.Float())))
+		}
+	}
+	b = protowire.AppendTag(b, num, protowire.BytesType)
+	return protowire.AppendBytes(b, payload)
+}
+
 // unmarshalStruct decodes data into rv. depth is the current submessage
 // depth (top-level call = 1); it is threaded through nested stream
 // construction so a fresh inner buffer cannot reset the recursion counter.
@@ -340,6 +400,33 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 
 	// Handle slices (repeated fields) — except []byte
 	if fv.Kind() == reflect.Slice && !(fv.Type().Elem().Kind() == reflect.Uint8 && fv.Type() == reflect.TypeOf([]byte(nil))) {
+		// Packed repeated numerics (proto3 default): a LEN-typed record
+		// carrying concatenated element encodings. The scalar branches
+		// below decode by element kind, not wire type, so each element
+		// is consumed from the payload with its natural encoding.
+		et := fv.Type().Elem()
+		for et.Kind() == reflect.Ptr {
+			et = et.Elem()
+		}
+		if typ == protowire.BytesType && packedKind(et.Kind()) {
+			payload, n := protowire.ConsumeBytes(data)
+			if n < 0 {
+				return 0, fmt.Errorf("corrupt packed field")
+			}
+			for len(payload) > 0 {
+				elem := reflect.New(fv.Type().Elem()).Elem()
+				if elem.Kind() == reflect.Ptr {
+					elem.Set(reflect.New(elem.Type().Elem()))
+				}
+				consumed, err := unmarshalField(payload, num, typ, elem, zigzag, depth)
+				if err != nil {
+					return 0, err
+				}
+				payload = payload[consumed:]
+				fv.Set(reflect.Append(fv, elem))
+			}
+			return n, nil
+		}
 		elem := reflect.New(fv.Type().Elem()).Elem()
 		// If elem is a pointer, allocate it
 		if elem.Kind() == reflect.Ptr {

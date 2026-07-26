@@ -4,9 +4,12 @@
 package pb
 
 import (
+	"math"
 	"math/big"
 	"reflect"
 	"testing"
+
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 type Inner struct {
@@ -349,5 +352,143 @@ func TestMapZeroValueEntries(t *testing.T) {
 	}
 	if got.Counts[""] != 0 {
 		t.Errorf("Counts round-trip mismatch: got %+v", got.Counts)
+	}
+}
+
+type WithPacked struct {
+	U32 []uint32  `protowire:"1"`
+	I64 []int64   `protowire:"2"`
+	Zig []int32   `protowire:"3,zigzag"`
+	F32 []float32 `protowire:"4"`
+	F64 []float64 `protowire:"5"`
+	Bs  []bool    `protowire:"6"`
+}
+
+func TestPackedRoundTrip(t *testing.T) {
+	// Zero-valued elements must survive: packed encoding has no
+	// per-element presence, so nothing may be dropped.
+	orig := &WithPacked{
+		U32: []uint32{1, 0, 2, 300},
+		I64: []int64{-1, 0, 42},
+		Zig: []int32{-5, 0, 5},
+		F32: []float32{1.5, 0, -2.25},
+		F64: []float64{3.14, 0, -1e100},
+		Bs:  []bool{true, false, true},
+	}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	got := &WithPacked{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(orig, got) {
+		t.Errorf("round-trip mismatch:\n  orig: %+v\n  got:  %+v", orig, got)
+	}
+}
+
+func TestPackedWireFormat(t *testing.T) {
+	// Canonical example from the protobuf encoding docs: repeated
+	// int32/uint32 {3, 270, 86942} packs to `LEN 6: 03 8E 02 9E A7 05`.
+	orig := &WithPacked{U32: []uint32{3, 270, 86942}}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := []byte{0x0a, 0x06, 0x03, 0x8e, 0x02, 0x9e, 0xa7, 0x05}
+	if !reflect.DeepEqual(data, want) {
+		t.Errorf("packed encoding mismatch:\n  want %x\n  got  %x", want, data)
+	}
+}
+
+func TestUnpackedDecode(t *testing.T) {
+	// proto3 decoders must accept unpacked encodings of packable fields
+	// (one tag per element) — e.g. from proto2 or a non-default encoder.
+	var data []byte
+	for _, v := range []uint64{7, 0, 9} {
+		data = protowire.AppendTag(data, 1, protowire.VarintType)
+		data = protowire.AppendVarint(data, v)
+	}
+	data = protowire.AppendTag(data, 4, protowire.Fixed32Type)
+	data = protowire.AppendFixed32(data, math.Float32bits(1.5))
+
+	got := &WithPacked{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got.U32, []uint32{7, 0, 9}) {
+		t.Errorf("U32 = %v, want [7 0 9]", got.U32)
+	}
+	if !reflect.DeepEqual(got.F32, []float32{1.5}) {
+		t.Errorf("F32 = %v, want [1.5]", got.F32)
+	}
+}
+
+func TestPackedMixedWithUnpacked(t *testing.T) {
+	// A field may legally appear as a mix of packed and unpacked
+	// records; elements concatenate in order.
+	var data []byte
+	data = protowire.AppendTag(data, 1, protowire.VarintType)
+	data = protowire.AppendVarint(data, 1)
+	data = protowire.AppendTag(data, 1, protowire.BytesType)
+	var payload []byte
+	payload = protowire.AppendVarint(payload, 2)
+	payload = protowire.AppendVarint(payload, 3)
+	data = protowire.AppendBytes(data, payload)
+
+	got := &WithPacked{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got.U32, []uint32{1, 2, 3}) {
+		t.Errorf("U32 = %v, want [1 2 3]", got.U32)
+	}
+}
+
+func TestPackedCorrupt(t *testing.T) {
+	cases := map[string][]byte{
+		// Truncated varint inside the packed payload.
+		"truncated varint": {0x0a, 0x01, 0x80},
+		// Packed float32 payload not a multiple of 4 bytes.
+		"partial fixed32": {0x22, 0x03, 0x00, 0x00, 0x80},
+		// LEN header longer than remaining data.
+		"truncated payload": {0x0a, 0x05, 0x01},
+	}
+	for name, data := range cases {
+		if err := Unmarshal(data, &WithPacked{}); err == nil {
+			t.Errorf("%s: expected error, got nil", name)
+		}
+	}
+}
+
+func TestPackedStringsNotPacked(t *testing.T) {
+	// Repeated strings are never packed — each element keeps its own
+	// LEN-typed tag and must round-trip unchanged.
+	type M struct {
+		S []string `protowire:"1"`
+	}
+	orig := &M{S: []string{"a", "bc", "def"}}
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var want []byte
+	for _, s := range orig.S {
+		want = protowire.AppendTag(want, 1, protowire.BytesType)
+		want = protowire.AppendString(want, s)
+	}
+	if !reflect.DeepEqual(data, want) {
+		t.Errorf("repeated string encoding mismatch:\n  want %x\n  got  %x", want, data)
+	}
+	got := &M{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(orig, got) {
+		t.Errorf("round-trip mismatch: %+v vs %+v", orig, got)
 	}
 }
