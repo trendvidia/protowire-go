@@ -11,7 +11,11 @@
 //	    Delta int64  `protowire:"3,zigzag"`  // proto3 sint64 (zigzag varint)
 //	}
 //
-// The encoding follows proto3 semantics: zero-value fields are omitted.
+// The encoding follows proto3 semantics: zero-value singular fields are
+// omitted. Elements of repeated fields are always emitted, zeros
+// included — presence lives in the list, not the element — and a nil
+// pointer element is encoded as its pointee's zero record so the list
+// length is preserved (it decodes to an allocated zero-value pointer).
 // Signed-integer fields default to proto3 int32 / int64 wire format
 // (plain varint, with negative values sign-extended to a 10-byte uint64).
 // The `zigzag` tag option selects proto3 sint32 / sint64 instead, which
@@ -139,7 +143,7 @@ func marshalStruct(rv reflect.Value) ([]byte, error) {
 	for _, fi := range info.fields {
 		fv := rv.Field(fi.index)
 		var err error
-		b, err = marshalField(b, fi.fieldNum, fv, fi.zigzag)
+		b, err = marshalField(b, fi.fieldNum, fv, fi.zigzag, false)
 		if err != nil {
 			return nil, fmt.Errorf("field %s: %w", rv.Type().Field(fi.index).Name, err)
 		}
@@ -147,20 +151,31 @@ func marshalStruct(rv reflect.Value) ([]byte, error) {
 	return b, nil
 }
 
-func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool) ([]byte, error) {
-	// Handle pointer: dereference, skip if nil
+// marshalField appends one field's encoding. element reports whether fv
+// is an element of a repeated field rather than a singular field: the
+// proto3 zero-skip applies only to singular fields, so elements are
+// always emitted — packed-style presence lives in the list, not the
+// value, and dropping zeros would corrupt element counts.
+func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool, element bool) ([]byte, error) {
+	// Handle pointer: dereference; a nil singular field is absent, but a
+	// nil element emits its pointee's zero record so the list length
+	// survives the round trip (decode reallocates the pointer).
 	if fv.Kind() == reflect.Ptr {
 		if fv.IsNil() {
-			return b, nil
+			if !element {
+				return b, nil
+			}
+			fv = reflect.New(fv.Type().Elem()).Elem()
+		} else {
+			fv = fv.Elem()
 		}
-		fv = fv.Elem()
 	}
 
 	// Handle slices (repeated fields)
 	if fv.Kind() == reflect.Slice {
 		// []byte is a scalar (bytes field), not repeated
 		if fv.Type().Elem().Kind() == reflect.Uint8 && fv.Type() == reflect.TypeOf([]byte(nil)) {
-			if fv.Len() == 0 {
+			if fv.Len() == 0 && !element {
 				return b, nil
 			}
 			b = protowire.AppendTag(b, num, protowire.BytesType)
@@ -178,7 +193,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 		// Other element types: one tag+value per element.
 		for i := 0; i < fv.Len(); i++ {
 			var err error
-			b, err = marshalField(b, num, fv.Index(i), zigzag)
+			b, err = marshalField(b, num, fv.Index(i), zigzag, true)
 			if err != nil {
 				return nil, err
 			}
@@ -189,7 +204,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 	// Scalar and message fields — skip zero values (proto3)
 	switch fv.Kind() {
 	case reflect.Bool:
-		if !fv.Bool() {
+		if !fv.Bool() && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.VarintType)
@@ -197,7 +212,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 
 	case reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8:
 		v := fv.Int()
-		if v == 0 {
+		if v == 0 && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.VarintType)
@@ -210,7 +225,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 
 	case reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8:
 		v := fv.Uint()
-		if v == 0 {
+		if v == 0 && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.VarintType)
@@ -218,7 +233,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 
 	case reflect.Float64:
 		v := fv.Float()
-		if v == 0 {
+		if v == 0 && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.Fixed64Type)
@@ -226,7 +241,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 
 	case reflect.Float32:
 		v := float32(fv.Float())
-		if v == 0 {
+		if v == 0 && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.Fixed32Type)
@@ -234,7 +249,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 
 	case reflect.String:
 		v := fv.String()
-		if v == "" {
+		if v == "" && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.BytesType)
@@ -244,7 +259,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 		switch fv.Type() {
 		case bigIntType:
 			bi := fv.Addr().Interface().(*big.Int)
-			if bi.Sign() == 0 {
+			if bi.Sign() == 0 && !element {
 				return b, nil
 			}
 			msg := marshalBigInt(bi)
@@ -252,7 +267,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 			b = protowire.AppendBytes(b, msg)
 		case bigRatType:
 			rat := fv.Addr().Interface().(*big.Rat)
-			if rat.Sign() == 0 {
+			if rat.Sign() == 0 && !element {
 				return b, nil
 			}
 			msg := marshalBigRat(rat)
@@ -260,7 +275,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 			b = protowire.AppendBytes(b, msg)
 		case bigFloatType:
 			bf := fv.Addr().Interface().(*big.Float)
-			if bf.Sign() == 0 && bf.Prec() == 0 {
+			if bf.Sign() == 0 && bf.Prec() == 0 && !element {
 				return b, nil
 			}
 			msg := marshalBigFloat(bf)
@@ -287,11 +302,11 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 		for iter.Next() {
 			var entry []byte
 			var err error
-			entry, err = marshalField(entry, 1, iter.Key(), zigzag)
+			entry, err = marshalField(entry, 1, iter.Key(), zigzag, false)
 			if err != nil {
 				return nil, fmt.Errorf("map key: %w", err)
 			}
-			entry, err = marshalField(entry, 2, iter.Value(), zigzag)
+			entry, err = marshalField(entry, 2, iter.Value(), zigzag, false)
 			if err != nil {
 				return nil, fmt.Errorf("map value: %w", err)
 			}
