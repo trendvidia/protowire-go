@@ -11,6 +11,49 @@ format changes.
 
 ## [Unreleased]
 
+## [1.3.2] — 2026-07-25
+
+proto3 conformance fixes for `encoding/pb`'s repeated fields: packed
+repeated numeric scalars — the proto3 default encoding — now decode and
+are emitted on marshal (#62), and zero-valued elements of repeated
+fields are no longer dropped (#64). No changes to the PXF or SBE wire
+formats; `pb.Marshal` output bytes change for repeated numerics (now
+packed, matching a deterministic `protobuf-go` marshal of the same
+data). Unblocks appviewer's `docpack` mirror adding packed
+`repeated uint32` fields (appviewer#364).
+
+### Fixed
+
+- `encoding/pb`: packed repeated numeric scalars decode (#62, #63).
+  A LEN-typed record for a slice-typed field whose elements are
+  numeric (bool / int / uint / float classes) is expanded by decoding
+  elements from the packed payload; unpacked records still decode,
+  and a field may mix both forms.
+- `encoding/pb`: zero-valued elements of repeated fields are always
+  emitted (#64, #65). The per-element marshal path previously reused
+  singular-field marshaling, whose proto3 zero-skip dropped `""`
+  strings, zero big-number elements, and empty `[][]byte` elements
+  (`[]uint32{1,0,2}` round-tripped as `[1,2]`). Presence lives in the
+  list, not the element. Singular-field zero-skip and map-entry
+  encoding are unchanged.
+
+### Changed
+
+- `encoding/pb`: `Marshal` emits repeated numeric scalars packed —
+  one LEN-typed record per field — matching the proto3 default and
+  byte-identical to a deterministic `protobuf-go` marshal (#62, #63).
+- `encoding/pb`: a nil pointer element of a repeated field encodes as
+  its pointee's zero record instead of being skipped, preserving list
+  length across a round trip (#64, #65).
+
+### Deprecated
+
+- `check/protovalidate`: deprecated in favor of
+  `protocheck/protovalidate` — protocheck is the validator abstraction
+  layer, and engine adapters live with it (#61). This copy stays
+  functional but frozen; tagged `check/protovalidate/v1.3.2` so `go`
+  tooling surfaces the module-level deprecation notice.
+
 ## [1.3.1] — 2026-07-24
 
 The **validation seam** (RFC-001 #070, tracked here as #49): all three
