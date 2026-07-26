@@ -22,6 +22,9 @@ type fuzzTarget struct {
 	Buf   []byte       `protowire:"8"`
 	Inner *fuzzInner   `protowire:"9"`
 	List  []*fuzzInner `protowire:"10"`
+	Nums  []uint32     `protowire:"11"` // packed repeated scalar
+	Zigs  []int64      `protowire:"12,zigzag"`
+	Reals []float32    `protowire:"13"`
 }
 
 type fuzzInner struct {
@@ -40,6 +43,7 @@ func FuzzUnmarshal(f *testing.F) {
 		{Z: -100, Buf: []byte{0x00, 0xff, 0x10}},
 		{Inner: &fuzzInner{Name: "x", N: -1}},
 		{List: []*fuzzInner{{Name: "a", N: 1}, {Name: "b", N: 2}}},
+		{Nums: []uint32{1, 0, 300}, Zigs: []int64{-1, 0, 2}, Reals: []float32{1.5, 0}},
 		{},
 	}
 	for _, s := range seeds {
