@@ -492,3 +492,138 @@ func TestPackedStringsNotPacked(t *testing.T) {
 		t.Errorf("round-trip mismatch: %+v vs %+v", orig, got)
 	}
 }
+
+func TestRepeatedStringZeroElements(t *testing.T) {
+	// Zero-valued elements of unpacked repeated fields must be emitted —
+	// an empty string element is an empty LEN record, not an omission.
+	type M struct {
+		S []string `protowire:"1"`
+	}
+	orig := &M{S: []string{"a", "", "b"}}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var want []byte
+	for _, s := range orig.S {
+		want = protowire.AppendTag(want, 1, protowire.BytesType)
+		want = protowire.AppendString(want, s)
+	}
+	if !reflect.DeepEqual(data, want) {
+		t.Errorf("encoding mismatch:\n  want %x\n  got  %x", want, data)
+	}
+
+	got := &M{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(orig, got) {
+		t.Errorf("round-trip mismatch: %+v vs %+v", orig, got)
+	}
+}
+
+func TestRepeatedBigNumZeroElements(t *testing.T) {
+	type M struct {
+		Ints []big.Int `protowire:"1"`
+		Rats []big.Rat `protowire:"2"`
+	}
+	orig := &M{
+		Ints: []big.Int{*big.NewInt(5), {}, *big.NewInt(-3)},
+		Rats: []big.Rat{*big.NewRat(1, 2), {}},
+	}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got := &M{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if len(got.Ints) != len(orig.Ints) {
+		t.Fatalf("Ints length = %d, want %d", len(got.Ints), len(orig.Ints))
+	}
+	for i := range orig.Ints {
+		if orig.Ints[i].Cmp(&got.Ints[i]) != 0 {
+			t.Errorf("Ints[%d] = %v, want %v", i, &got.Ints[i], &orig.Ints[i])
+		}
+	}
+	if len(got.Rats) != len(orig.Rats) {
+		t.Fatalf("Rats length = %d, want %d", len(got.Rats), len(orig.Rats))
+	}
+	for i := range orig.Rats {
+		if orig.Rats[i].Cmp(&got.Rats[i]) != 0 {
+			t.Errorf("Rats[%d] = %v, want %v", i, &got.Rats[i], &orig.Rats[i])
+		}
+	}
+}
+
+func TestRepeatedNilPointerElements(t *testing.T) {
+	// A nil pointer element encodes as its pointee's zero record: the
+	// list length survives, decoding to an allocated zero-value pointer.
+	orig := &Outer{
+		Ptrs: []*Inner{nil, {Name: "x", Value: 7}, nil},
+	}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got := &Outer{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	want := []*Inner{{}, {Name: "x", Value: 7}, {}}
+	if !reflect.DeepEqual(got.Ptrs, want) {
+		t.Errorf("Ptrs = %+v, want %+v", got.Ptrs, want)
+	}
+}
+
+func TestRepeatedBytesZeroElements(t *testing.T) {
+	// Empty elements of a repeated bytes field keep their LEN records:
+	// element count is preserved across the round trip.
+	type M struct {
+		Bufs [][]byte `protowire:"1"`
+	}
+	orig := &M{Bufs: [][]byte{{0x01}, {}, {0x02, 0x03}}}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got := &M{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(got.Bufs) != 3 {
+		t.Fatalf("Bufs length = %d, want 3", len(got.Bufs))
+	}
+	for i, want := range [][]byte{{0x01}, nil, {0x02, 0x03}} {
+		if !reflect.DeepEqual(append([]byte(nil), got.Bufs[i]...), append([]byte(nil), want...)) {
+			t.Errorf("Bufs[%d] = %x, want %x", i, got.Bufs[i], want)
+		}
+	}
+}
+
+func TestSingularZeroSkipUnchanged(t *testing.T) {
+	// The element rule must not leak into singular fields: an all-zero
+	// struct with pointer, string, and big-number fields still encodes
+	// to nothing.
+	type M struct {
+		P *Inner   `protowire:"1"`
+		S string   `protowire:"2"`
+		B big.Int  `protowire:"3"`
+		U uint32   `protowire:"4"`
+		L []string `protowire:"5"`
+	}
+	data, err := Marshal(&M{})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("expected empty bytes for zero struct, got %x", data)
+	}
+}
