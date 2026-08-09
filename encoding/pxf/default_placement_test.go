@@ -489,6 +489,131 @@ func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	assert.Contains(t, key.Detail, "(pxf.key) is valid only on repeated message-typed fields")
 }
 
+// ValidateFile walks one file, not the transitive import closure, while
+// postDecode recurses into nested messages — so a misplaced
+// (pxf.default) on a type declared in an IMPORTED .proto binds clean and
+// falls through to the #66 decode-time guard. That is the one hole left
+// in #68's "bind-time, independently of what any document contains"
+// promise: a schema whose imported annotated field is present in every
+// document still carries a dead annotation with no diagnostic, which is
+// exactly the failure mode #68 was filed about.
+//
+// Pinned, not fixed: widening the walk to the import closure runs on
+// every decode that does not set SkipValidate, so it is a hot-path and
+// compatibility decision that wants the same spec-first treatment #68
+// got. The same hole applies to the reserved-name and (pxf.key) checks,
+// which have always been file-scoped.
+func TestValidateDescriptor_ImportedFileIsNotWalked(t *testing.T) {
+	const importedSrc = `
+syntax = "proto3";
+package defaultimported_test.v1;
+
+import "pxf/annotations.proto";
+
+message Inner {
+  repeated string tags = 1 [(pxf.default) = "ignored"];
+}
+`
+	const rootSrc = `
+syntax = "proto3";
+package defaultroot_test.v1;
+
+import "imported.proto";
+
+message Root {
+  defaultimported_test.v1.Inner inner = 1;
+}
+`
+	sources := map[string]string{
+		"test.proto":            rootSrc,
+		"imported.proto":        importedSrc,
+		"pxf/annotations.proto": annotationsProtoSrc,
+	}
+	comp := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(
+			&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(sources)},
+		),
+	}
+	files, err := comp.Compile(context.Background(), "test.proto")
+	require.NoError(t, err)
+	d, err := files.AsResolver().FindDescriptorByName("defaultroot_test.v1.Root")
+	require.NoError(t, err)
+	desc := d.(protoreflect.MessageDescriptor)
+
+	assert.Empty(t, pxf.ValidateDescriptor(desc),
+		"the imported file's violation is out of ValidateFile's scope")
+
+	// Binding Inner's own file does report it, so the walker is right and
+	// only its scope is narrow.
+	inner := desc.Fields().ByName("inner").Message()
+	require.Equal(t, protoreflect.FullName("defaultimported_test.v1.Inner"), inner.FullName())
+	vs := pxf.ValidateDescriptor(inner)
+	require.Len(t, vs, 1)
+	assert.Equal(t, pxf.ViolationDefaultOption, vs[0].Kind)
+
+	// Through Root, the diagnostic is the #66 decode-time guard instead,
+	// and only for a document that makes `inner` present.
+	_, _, err = pxf.UnmarshalFullDescriptor([]byte(`inner { }`), desc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `default values not supported for repeated field "tags"`)
+
+	// And with `inner` absent there is no diagnostic at all.
+	_, _, err = pxf.UnmarshalFullDescriptor([]byte(``), desc)
+	assert.NoError(t, err)
+}
+
+// The raw-unknown-bytes fallback shared by pxfStringOptions,
+// getStringOption and getBoolOption walks a buffer it does not own. A
+// truncated fixed32/fixed64 must end the walk, not slice past the end.
+func TestValidateFile_TruncatedUnknownOptionBytes(t *testing.T) {
+	build := func(t *testing.T, raw []byte) protoreflect.FileDescriptor {
+		t.Helper()
+		opts := &descriptorpb.FieldOptions{}
+		opts.ProtoReflect().SetUnknown(protoreflect.RawFields(raw))
+		fdp := &descriptorpb.FileDescriptorProto{
+			Name:    proto.String("truncated.proto"),
+			Package: proto.String("truncated_test.v1"),
+			Syntax:  proto.String("proto3"),
+			MessageType: []*descriptorpb.DescriptorProto{{
+				Name: proto.String("M"),
+				Field: []*descriptorpb.FieldDescriptorProto{{
+					Name:     proto.String("tags"),
+					Number:   proto.Int32(1),
+					JsonName: proto.String("tags"),
+					Label:    descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+					Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+					Options:  opts,
+				}},
+			}},
+		}
+		fd, err := protodesc.NewFile(fdp, nil)
+		require.NoError(t, err)
+		return fd
+	}
+
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{"fixed32", append(protowire.AppendTag(nil, 59998, protowire.Fixed32Type), 0x01, 0x02)},
+		{"fixed64", append(protowire.AppendTag(nil, 59999, protowire.Fixed64Type), 0x01, 0x02, 0x03)},
+		{"varint", append(protowire.AppendTag(nil, 59997, protowire.VarintType), 0x80)},
+		{"bytes-length", append(protowire.AppendTag(nil, 59996, protowire.BytesType), 0x7f)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fd := build(t, c.raw)
+			f := fd.Messages().Get(0).Fields().Get(0)
+			assert.NotPanics(t, func() {
+				pxf.ValidateFile(fd) // pxfStringOptions
+				pxf.Default(f)       // getStringOption
+				pxf.KeyFieldName(f)  // getStringOption
+				pxf.IsRequired(f)    // getBoolOption
+			})
+		})
+	}
+}
+
 // The aggregated error names every offending field, not just the first, so
 // a schema author fixes them in one pass.
 func TestValidateDescriptor_ReportsAllOffendersAtOnce(t *testing.T) {

@@ -141,8 +141,14 @@ func getBoolOption(fd protoreflect.FieldDescriptor, num protoreflect.FieldNumber
 			}
 			b = b[vn:]
 		case protowire.Fixed32Type:
+			if len(b) < 4 {
+				return false
+			}
 			b = b[4:]
 		case protowire.Fixed64Type:
+			if len(b) < 8 {
+				return false
+			}
 			b = b[8:]
 		case protowire.BytesType:
 			_, vn := protowire.ConsumeBytes(b)
@@ -296,8 +302,14 @@ func getStringOption(fd protoreflect.FieldDescriptor, num protoreflect.FieldNumb
 			}
 			b = b[vn:]
 		case protowire.Fixed32Type:
+			if len(b) < 4 {
+				return "", false
+			}
 			b = b[4:]
 		case protowire.Fixed64Type:
+			if len(b) < 8 {
+				return "", false
+			}
 			b = b[8:]
 		case protowire.BytesType:
 			v, vn := protowire.ConsumeBytes(b)

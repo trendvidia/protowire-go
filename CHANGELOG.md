@@ -46,6 +46,21 @@ format changes.
   it to a singular field; the error names the offending field by
   fully-qualified name.
 
+  **One hole is left open deliberately.** `ValidateFile` walks a single
+  file, not the transitive import closure, so a misplaced `(pxf.default)`
+  on a message type declared in an *imported* `.proto` is not reported at
+  bind time — even though `postDecode` recurses into that type and
+  applies its defaults. Through such a field the pre-#68 behaviour is
+  what remains: the #66 decode-time error for a document that leaves the
+  field absent, and no diagnostic at all for one that does not. The same
+  scoping has always applied to the reserved-name and `(pxf.key)` checks.
+  Widening the walk to the import closure runs on every decode that does
+  not set `SkipValidate`, so it is a hot-path and compatibility decision
+  wanting the same spec-first treatment #68 got; pinned meanwhile by
+  `TestValidateDescriptor_ImportedFileIsNotWalked`. Callers that need the
+  whole closure covered can call `ValidateFile` per `FileDescriptor` in a
+  registry-load pass.
+
   The walker reads both `(pxf.key)` and `(pxf.default)` in a single pass
   over each field's options (`pxfStringOptions`), because `ValidateFile`
   runs per field on every decode that does not set `SkipValidate`. Two
@@ -81,6 +96,14 @@ format changes.
   or stays explicit about rejecting it"); this takes the supports-it
   branch. Both `StdEncoding` and the URL/raw alphabets are accepted, as
   everywhere else `decodeBase64Lenient` is used.
+
+- `encoding/pxf`: `getStringOption` and `getBoolOption` no longer panic
+  on a truncated fixed32/fixed64 field in a `FieldOptions` unknown-bytes
+  buffer. Both walked past the end of the slice on the skip arms; the
+  new `pxfStringOptions` reader added the length checks for itself, and
+  these are its two siblings reading the same buffer through the public
+  `Default` / `KeyFieldName` / `IsRequired` accessors. Pinned by
+  `TestValidateFile_TruncatedUnknownOptionBytes`.
 
 - `encoding/pxf`: `(pxf.default)` on a repeated or map field returns an
   error instead of panicking (#66, #67). The annotation carries a single

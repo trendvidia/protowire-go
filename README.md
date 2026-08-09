@@ -44,7 +44,7 @@ msg, err := opts.UnmarshalDescriptor(data, desc)
 
 ### UnmarshalFull (field presence, required, defaults)
 
-`UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations. Defaults are applied only by the `UnmarshalFull*` entry points — plain `Unmarshal` / `UnmarshalDescriptor` decode the document as written. `(pxf.default)` carries a single literal, so it is valid only on fields one literal can denote; a misplaced annotation is a [bind-time schema violation](#schema-bind-time-checks) rejected by every entry point, not a decode-time surprise.
+`UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations. Defaults are applied only by the `UnmarshalFull*` entry points — plain `Unmarshal` / `UnmarshalDescriptor` decode the document as written. `(pxf.default)` carries a single literal, so it is valid only on fields one literal can denote; a misplaced annotation is a [bind-time schema violation](#schema-bind-time-checks) rejected by every entry point, not a decode-time surprise (within the bound file — see that section for the import-closure caveat).
 
 ```go
 result, err := pxf.UnmarshalFull(data, msg)
@@ -195,6 +195,8 @@ err := opts.Unmarshal(data, &msg)
 ```
 
 The reserved-name check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. `ValidateFile` walks the whole `.proto` file, so one bad element makes every message declared beside it non-bindable. `SkipValidate` is all-or-nothing — it bypasses all three checks, not one. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the reserved-name and `(pxf.key)` rules, and draft `-01` §annotation-extensions ("Default Placement") for `(pxf.default)`.
+
+The scope is one file, not the transitive import closure: a defect on a message type declared in an *imported* `.proto` is not reported, even when a field of the message being decoded refers to it. `UnmarshalFull*` still catches a misplaced `(pxf.default)` there when it comes to apply the default, with the decode-time error rather than the bind-time violation. Pre-validate each file you bind (`pxf.ValidateFile` per `FileDescriptor`) if you need the whole closure covered.
 
 ## Data validation (`check`)
 

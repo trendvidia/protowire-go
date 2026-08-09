@@ -60,8 +60,9 @@ var futureReservedDirectives = map[string]struct{}{
 	"permissions": {},
 }
 
-// ViolationKind identifies which kind of schema element collides with a
-// reserved PXF value keyword.
+// ViolationKind identifies which bind-time check an element failed:
+// which kind of schema element collides with a reserved PXF value
+// keyword, or which annotation is misplaced.
 type ViolationKind int
 
 const (
@@ -139,14 +140,20 @@ func (v Violation) String() string {
 }
 
 // ValidateDescriptor walks the file containing desc and returns every
-// bind-time violation reachable from that file: reserved-name
-// collisions among messages, oneofs, and enum values, plus invalid
-// (pxf.key) placements (draft -01 §3.13). The returned slice is sorted
-// by element fully-qualified name for stable output. A nil/empty slice
-// means the schema is conformant.
+// bind-time violation declared in that file: reserved-name collisions
+// among messages, oneofs, and enum values; invalid (pxf.key) placements
+// (draft -01 §3.13); and invalid (pxf.default) placements (draft -01
+// §annotation-extensions, "Default Placement"). The returned slice is
+// sorted by element fully-qualified name for stable output. A nil/empty
+// slice means the schema is conformant.
 //
-// The check is case-sensitive: identifiers such as "NULL" or "True"
-// lex as ordinary identifiers and are accepted.
+// The reserved-name check is case-sensitive: identifiers such as "NULL"
+// or "True" lex as ordinary identifiers and are accepted.
+//
+// Scope is desc's own file, not the transitive import closure: a
+// violation on a message type declared in an imported .proto is not
+// reported here, even when a field of desc refers to it. The decode-time
+// guards in [ApplyDefault] and postDecode are what remain for those.
 func ValidateDescriptor(desc protoreflect.MessageDescriptor) []Violation {
 	if desc == nil {
 		return nil
@@ -163,7 +170,11 @@ func ValidateFile(fd protoreflect.FileDescriptor) []Violation {
 	var out []Violation
 	walkMessages(fd.Path(), fd.Messages(), &out)
 	walkEnums(fd.Path(), fd.Enums(), &out)
-	sort.Slice(out, func(i, j int) bool {
+	// SliceStable, not Slice: one field can now yield up to three
+	// violations sharing an Element (reserved name, (pxf.key),
+	// (pxf.default)), and only a stable sort makes the documented
+	// "sorted for stable output" true for those ties.
+	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].Element < out[j].Element
 	})
 	return out
@@ -255,10 +266,14 @@ func checkKeyOption(path string, f protoreflect.FieldDescriptor, keyName string,
 // ViolationDefaultOption for each failure.
 //
 // The rejected set is exactly the set [applyDefaultImpl] cannot honor, so
-// a schema that binds here never meets a placement error at decode time
-// and vice versa. Keep the two in lockstep: the message-type arm defers
-// to [defaultableMessage], which is the same predicate
-// applyMessageDefault's dispatch chain implements.
+// the two guards agree on which placements are bad. Keep them in
+// lockstep: the message-type arm defers to [defaultableMessage], which is
+// the same predicate applyMessageDefault's dispatch chain implements.
+//
+// Agreeing on the set is not the same as covering the same fields.
+// [ValidateFile] walks one file, while postDecode recurses into nested
+// messages, so a bad placement on a type declared in an imported .proto
+// still reaches the decode-time guard unreported.
 //
 // Placement only — a literal that does not parse as the field's type
 // ("abc" on an int32) stays a decode-time error. Placement is decidable

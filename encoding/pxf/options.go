@@ -39,15 +39,19 @@ type UnmarshalOptions struct {
 	// [IsRequired] and [Default].
 	SkipPostDecode bool
 
-	// SkipValidate disables the per-call schema reserved-name check
-	// (draft §3.13). The default behavior — running the check on every
-	// decode call — is the safe one because the check catches schemas
-	// that would silently produce unreachable enum values or fields.
-	// Callers that have already validated their descriptors out-of-band
-	// (e.g. a registry-load step that pre-screens schemas before
-	// caching their descriptors) may set this to bypass the per-call
-	// recheck. Validate explicitly via [ValidateDescriptor] when
-	// pre-screening.
+	// SkipValidate disables the per-call bind-time schema checks. It is
+	// all-or-nothing: it bypasses every family [ValidateFile] reports,
+	// not one — reserved names (draft §3.13), (pxf.key) placement, and
+	// (pxf.default) placement (draft -01 §annotation-extensions).
+	//
+	// The default behavior — running the checks on every decode call —
+	// is the safe one because they catch schemas that would silently
+	// produce unreachable enum values or fields, or carry an annotation
+	// no decoder can honor. Callers that have already validated their
+	// descriptors out-of-band (e.g. a registry-load step that
+	// pre-screens schemas before caching their descriptors) may set
+	// this to bypass the per-call recheck. Validate explicitly via
+	// [ValidateDescriptor] when pre-screening.
 	SkipValidate bool
 
 	// OnSecretField, if non-nil, is called for each pxf.Secret-typed
@@ -90,7 +94,7 @@ type UnmarshalOptions struct {
 	// check.Report attached (see [Result.Report]).
 	//
 	// This is a different mechanism from SkipValidate above: that
-	// knob controls the per-call schema reserved-name check on the
+	// knob controls the per-call bind-time schema checks on the
 	// descriptor, while Validator checks the decoded data against an
 	// engine-defined rule set (e.g. buf.validate annotations via a
 	// protovalidate adapter, or the RFC-001 surface via protocheck).

@@ -1696,10 +1696,13 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 // [defaultableMessage].
 //
 // Those placements are also rejected at bind time by [ValidateFile] as
-// ViolationDefaultOption (#68), so a descriptor that survived
-// [ValidateDescriptor] cannot produce an error here. The guard stays
-// because this entry point takes an arbitrary fd from a caller that may
-// never have validated it, and because SkipValidate bypasses the walker.
+// ViolationDefaultOption (#68), so for a field declared in a validated
+// file this guard is unreachable. It stays load-bearing for three
+// callers it does not cover: this entry point takes an arbitrary fd from
+// a caller that may never have validated it; SkipValidate bypasses the
+// walker entirely; and [ValidateFile] walks a single file, so a field of
+// a message type declared in an imported .proto — which postDecode
+// recurses into — is never walked at all.
 //
 // Exported for layered-config consumers (e.g. chameleon) that run a
 // post-merge defaults pass with [UnmarshalOptions.SkipPostDecode].
@@ -1861,8 +1864,9 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 
 	// The set of types handled above is [defaultableMessage], which
 	// [checkDefaultOption] rejects the complement of at bind time. A
-	// descriptor that passed ValidateFile never reaches this line; the
-	// exported [ApplyDefault] and SkipValidate callers still can.
+	// field declared in a file that passed ValidateFile never reaches
+	// this line; the exported [ApplyDefault], SkipValidate callers, and
+	// fields of imported message types still can.
 	return fmt.Errorf("default values not supported for message type %s (field %q)", mdesc.FullName(), fd.Name())
 }
 
