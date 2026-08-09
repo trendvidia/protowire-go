@@ -11,7 +11,99 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- `encoding/pxf`: `(pxf.default)` placement is a bind-time schema
+  violation (#68). `ValidateFile` / `ValidateDescriptor` gained a
+  `ViolationDefaultOption` kind and a `checkDefaultOption` walker beside
+  the existing `checkKeyOption`, so a misplaced annotation is rejected
+  before the decoder looks at the document — the treatment `(pxf.key)`
+  has had since keyed repeated fields landed. The annotation carries
+  exactly one PXF literal, so the rejected set is the set no literal can
+  denote: repeated fields, map fields, groups, and message-typed fields
+  outside `Timestamp`, `Duration`, the nine `*Value` wrappers,
+  `pxf.BigInt`, `pxf.Decimal` and `pxf.BigFloat`. That is exactly the set
+  `applyDefaultImpl` cannot honor, so the bind-time walker and the
+  runtime guard agree by construction (`defaultableMessage` is the shared
+  predicate). Placement only: a literal that does not parse as the
+  field's type — `"abc"` on an `int32` — stays a decode-time error,
+  because placement is decidable from the descriptor alone while the
+  literal is not.
+
+  **This narrows what binds, and the narrowing is wider than #67's.**
+  Before, the misplaced annotation only ever surfaced through
+  `UnmarshalFull*` or the exported `ApplyDefault`, and only for a
+  document that left the field absent — so a schema whose annotated
+  repeated field was populated in every document decoded forever while
+  carrying a meaningless annotation, which is what #68 was filed about.
+  Now every entry point rejects it, including plain `Unmarshal` /
+  `UnmarshalDescriptor`, which never applied defaults at all. Two
+  consequences worth knowing before upgrading: `ValidateFile` walks the
+  whole `.proto` file, so one bad placement makes every message declared
+  beside it non-bindable; and `UnmarshalOptions.SkipValidate` is the only
+  escape hatch and is all-or-nothing — it also bypasses the reserved-name
+  and `(pxf.key)` checks. Migration is deleting the annotation or moving
+  it to a singular field; the error names the offending field by
+  fully-qualified name.
+
+  **One hole is left open deliberately.** `ValidateFile` walks a single
+  file, not the transitive import closure, so a misplaced `(pxf.default)`
+  on a message type declared in an *imported* `.proto` is not reported at
+  bind time — even though `postDecode` recurses into that type and
+  applies its defaults. Through such a field the pre-#68 behaviour is
+  what remains: the #66 decode-time error for a document that leaves the
+  field absent, and no diagnostic at all for one that does not. The same
+  scoping has always applied to the reserved-name and `(pxf.key)` checks.
+  Widening the walk to the import closure runs on every decode that does
+  not set `SkipValidate`, so it is a hot-path and compatibility decision
+  wanting the same spec-first treatment #68 got; pinned meanwhile by
+  `TestValidateDescriptor_ImportedFileIsNotWalked`. Callers that need the
+  whole closure covered can call `ValidateFile` per `FileDescriptor` in a
+  registry-load pass.
+
+  The walker reads both `(pxf.key)` and `(pxf.default)` in a single pass
+  over each field's options (`pxfStringOptions`), because `ValidateFile`
+  runs per field on every decode that does not set `SkipValidate`. Two
+  separate `getStringOption` calls measured +4.7% wall and +4 allocs/op
+  on `BenchmarkPXFUnmarshalKeyed`; the combined pass brings that to no
+  measurable wall-clock change and +1 alloc/op, with
+  `BenchmarkPXFUnmarshal` unchanged at 80 allocs/op.
+
+  Spec text landed first, in the same cycle: trendvidia/protowire#223
+  states the constraint (draft `-01` §annotation-extensions, "Default
+  Placement"), which previously said nothing about placement while its
+  sibling `(pxf.key)` carried an explicit bind-time MUST-reject list.
+  Five implementations had each invented an answer — measured on the
+  same schema, protowire-go panicked, protowire-java threw
+  `ClassCastException`, protowire-typescript errored, chameleon silently
+  ignored it, and protowire-rust silently applied the literal as a
+  one-element list, emitting `pb` bytes no other port emitted
+  (trendvidia/protowire-rust#23, trendvidia/protowire-java#52,
+  trendvidia/chameleon#131).
+
 ### Fixed
+
+- `encoding/pxf`: a `(pxf.default)` on a `google.protobuf.BytesValue`
+  field now applies instead of failing the decode (#68).
+  `parseScalarDefault` — the wrapper-defaults path — had no `BytesKind`
+  branch, so the literal fell to its `default` arm and reported
+  `unsupported default kind bytes`, even though `applyDefaultImpl`'s own
+  `BytesKind` arm has always accepted a base64 literal for a plain
+  `bytes` field. Found while building #68's bind-time check: the walker
+  admits every wrapper type, so the gap would have let a schema bind
+  clean and then fail at decode. It was a documented divergence pinned in
+  `TestApplyDefault_WKTInvalidValue` ("a future change either supports it
+  or stays explicit about rejecting it"); this takes the supports-it
+  branch. Both `StdEncoding` and the URL/raw alphabets are accepted, as
+  everywhere else `decodeBase64Lenient` is used.
+
+- `encoding/pxf`: `getStringOption` and `getBoolOption` no longer panic
+  on a truncated fixed32/fixed64 field in a `FieldOptions` unknown-bytes
+  buffer. Both walked past the end of the slice on the skip arms; the
+  new `pxfStringOptions` reader added the length checks for itself, and
+  these are its two siblings reading the same buffer through the public
+  `Default` / `KeyFieldName` / `IsRequired` accessors. Pinned by
+  `TestValidateFile_TruncatedUnknownOptionBytes`.
 
 - `encoding/pxf`: `(pxf.default)` on a repeated or map field returns an
   error instead of panicking (#66, #67). The annotation carries a single
@@ -31,11 +123,12 @@ format changes.
   (`default values not supported for map field "m"`) rather than the
   entry type's name. Schemas whose annotated repeated field is always
   present in the input are unaffected: a present field suppresses the
-  default, so the guard is unreachable. The placement is still not a
-  bind-time violation — `ValidateFile` / `ValidateDescriptor` pass such
-  a schema clean, unlike the sibling `(pxf.key)` check — so a misplaced
-  annotation lints green and fails only on the first document that
-  omits the field.
+  default, so the guard is unreachable. That last point is what #68
+  above supersedes — the placement is now a bind-time violation too, so
+  such a schema no longer lints green. The runtime guard stays
+  load-bearing for the exported `ApplyDefault`, which takes an arbitrary
+  descriptor its caller may never have validated, and for `SkipValidate`
+  callers.
 
 ## [1.3.2] — 2026-07-25
 
