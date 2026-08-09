@@ -159,3 +159,28 @@ func TestDecode_DefaultOnSingularFieldUnaffected(t *testing.T) {
 	assert.Equal(t, 0, msg.ProtoReflect().Get(fields.ByName("m")).Map().Len())
 	assert.False(t, res.IsSet("role"), "a default is not an input-set field")
 }
+
+// The non-Full entry points never call postDecode, so they never apply
+// defaults and never reach the guard — #66 was reachable only through
+// UnmarshalFull* and the exported ApplyDefault. Pins that blast radius,
+// which the CHANGELOG and README both state.
+func TestUnmarshalDescriptor_NeverAppliesDefaults(t *testing.T) {
+	t.Run("misplaced default is unreachable", func(t *testing.T) {
+		desc := compileDefaultPlacement(t, "ListScalar")
+
+		var msg protoreflect.ProtoMessage
+		var err error
+		require.NotPanics(t, func() {
+			msg, err = pxf.UnmarshalDescriptor([]byte(``), desc)
+		})
+		require.NoError(t, err)
+		assert.Equal(t, 0, msg.ProtoReflect().Get(desc.Fields().ByName("tags")).List().Len())
+	})
+
+	t.Run("singular default is not applied either", func(t *testing.T) {
+		desc := compileDefaultPlacement(t, "Control")
+		msg, err := pxf.UnmarshalDescriptor([]byte(``), desc)
+		require.NoError(t, err)
+		assert.Equal(t, "", msg.ProtoReflect().Get(desc.Fields().ByName("role")).String())
+	})
+}

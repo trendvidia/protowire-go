@@ -44,7 +44,7 @@ msg, err := opts.UnmarshalDescriptor(data, desc)
 
 ### UnmarshalFull (field presence, required, defaults)
 
-`UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations.
+`UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations. Defaults are applied only by the `UnmarshalFull*` entry points — plain `Unmarshal` / `UnmarshalDescriptor` decode the document as written. `(pxf.default)` carries a single literal and is therefore a singular-field annotation: a repeated or map field carrying one is rejected with an error.
 
 ```go
 result, err := pxf.UnmarshalFull(data, msg)
