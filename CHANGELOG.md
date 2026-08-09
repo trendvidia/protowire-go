@@ -11,6 +11,40 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `encoding/pxf`: a `(pxf.default)` on a oneof member no longer destroys
+  the arm the document chose (#72). Setting any member of a oneof clears
+  the others, and `postDecode` tested presence *per field* with no notion
+  of oneof membership — so a sibling's default was applied over the
+  member the document supplied, clearing it:
+
+  ```proto
+  oneof choice { string a = 1; string b = 2 [(pxf.default) = "bbb"]; }
+  ```
+
+  `a = "written"` decoded to `b = "bbb"`, case `b`. The written value was
+  gone, not shadowed, and `err` was nil. One annotated member was enough,
+  so this was never about how many defaults a oneof carried. The default
+  now applies only when **no** member of the oneof is present, with a
+  member bound to `null` counting as present — consistent with the
+  existing rule that `null` suppresses a default. Presence is read from
+  the document rather than from `WhichOneof`, so a default applied
+  earlier in the same pass cannot suppress a later one.
+
+  A proto3 `optional` field sits in a synthetic single-member oneof and
+  is deliberately excluded: nothing can clear it, so it keeps plain
+  per-field presence and its default still applies.
+
+  **This changes decoded output**, unlike the rest of #68's family, which
+  only narrowed what binds. A document that decoded to the *correct* arm
+  is unaffected; only the cases that were losing input change. Measured
+  before the fix in all four ports that implement the annotations —
+  protowire-go, protowire-java, protowire-rust, protowire-typescript,
+  identical behaviour in each — so this is one design bug inherited
+  uniformly rather than a divergence, and the other three will each want
+  the same fix (spec side: trendvidia/protowire#226).
+
 ### Added
 
 - `encoding/pxf`: `(pxf.default)` placement is a bind-time schema
@@ -61,13 +95,31 @@ format changes.
   whole closure covered can call `ValidateFile` per `FileDescriptor` in a
   registry-load pass.
 
-  The walker reads both `(pxf.key)` and `(pxf.default)` in a single pass
-  over each field's options (`pxfStringOptions`), because `ValidateFile`
-  runs per field on every decode that does not set `SkipValidate`. Two
-  separate `getStringOption` calls measured +4.7% wall and +4 allocs/op
-  on `BenchmarkPXFUnmarshalKeyed`; the combined pass brings that to no
+  The walker reads every annotation in a single pass over each field's
+  options (`pxfFieldOptions`), because `ValidateFile` runs per field on
+  every decode that does not set `SkipValidate`. Two separate
+  `getStringOption` calls measured +4.7% wall and +4 allocs/op on
+  `BenchmarkPXFUnmarshalKeyed`; the combined pass brings that to no
   measurable wall-clock change and +1 alloc/op, with
-  `BenchmarkPXFUnmarshal` unchanged at 80 allocs/op.
+  `BenchmarkPXFUnmarshal` unchanged at 80 allocs/op. `(pxf.required)`
+  joined the walker for #72 and rides in the same pass.
+
+- `encoding/pxf`: `(pxf.default)` and `(pxf.required)` gain bind-time
+  placement rules inside oneofs (#72, spec trendvidia/protowire#226). A
+  oneof in which **two or more members carry `(pxf.default)`** is now a
+  `ViolationDefaultOption` on each offending member: with two, some
+  default must win, and deciding by declaration order would make
+  reordering two fields silently change what an empty document decodes
+  to. `(pxf.required)` on **any** oneof member is a new
+  `ViolationRequiredOption` — read per field it demands that one specific
+  arm always be chosen, so a document selecting any other arm was
+  rejected with `required field "a" is absent`, making the oneof
+  unusable. Its only coherent reading, "the oneof must be set", is a
+  property of the oneof, and neither the spec nor this port has an
+  annotation at that scope; forbidding the member placement keeps a
+  future oneof-scoped annotation additive. Both narrow what binds, and
+  `SkipValidate` remains the all-or-nothing escape hatch — the runtime
+  rule above still protects written input under it.
 
   Spec text landed first, in the same cycle: trendvidia/protowire#223
   states the constraint (draft `-01` §annotation-extensions, "Default

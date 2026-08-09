@@ -84,6 +84,12 @@ const (
 	// repeated field, a map field, a group, or a message-typed field
 	// outside the set [applyMessageDefault] honors.
 	ViolationDefaultOption
+	// ViolationRequiredOption is a (pxf.required) annotation on a member
+	// of a oneof, which draft -01 §annotation-extensions ("Oneof
+	// Members") forbids: read per field it demands that one specific arm
+	// always be chosen, which makes every other arm of the oneof
+	// undecodable.
+	ViolationRequiredOption
 )
 
 func (k ViolationKind) String() string {
@@ -98,6 +104,8 @@ func (k ViolationKind) String() string {
 		return "keyed field option"
 	case ViolationDefaultOption:
 		return "default field option"
+	case ViolationRequiredOption:
+		return "required field option"
 	default:
 		return "unknown"
 	}
@@ -134,6 +142,9 @@ func (v Violation) String() string {
 	case ViolationDefaultOption:
 		return fmt.Sprintf("%s: field %q: invalid (pxf.default) = %q: %s (draft -01 §annotation-extensions)",
 			v.File, v.Element, v.Name, v.Detail)
+	case ViolationRequiredOption:
+		return fmt.Sprintf("%s: field %q: invalid (pxf.required): %s (draft -01 §annotation-extensions)",
+			v.File, v.Element, v.Detail)
 	}
 	return fmt.Sprintf("%s: %s %q uses PXF-reserved name %q (draft §3.13)",
 		v.File, v.Kind, v.Element, v.Name)
@@ -181,6 +192,11 @@ func ValidateFile(fd protoreflect.FileDescriptor) []Violation {
 }
 
 func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Violation) {
+	// Members of each oneof that carry (pxf.default), collected during the
+	// field pass and checked once the message's fields are known. Declared
+	// out here and cleared per message so the common schema — no oneof
+	// defaults anywhere — never allocates it.
+	var oneofDefaults map[protoreflect.FullName][]protoreflect.FieldDescriptor
 	for i := range msgs.Len() {
 		md := msgs.Get(i)
 		fields := md.Fields()
@@ -195,16 +211,63 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 					Kind:    ViolationField,
 				})
 			}
-			// One options pass for both annotations — see
-			// [pxfStringOptions] for why this is not two calls.
-			keyName, keyOK, def, defOK := pxfStringOptions(f)
-			if keyOK {
-				checkKeyOption(path, f, keyName, out)
+			// One options pass for every annotation — see
+			// [pxfFieldOptions] for why this is not three calls.
+			opts := pxfFieldOptions(f)
+			if opts.keySet {
+				checkKeyOption(path, f, opts.key, out)
 			}
-			if defOK {
-				checkDefaultOption(path, f, def, out)
+			if opts.defSet {
+				checkDefaultOption(path, f, opts.def, out)
+			}
+			if oo := realOneof(f); oo != nil {
+				if opts.required {
+					*out = append(*out, Violation{
+						File:    path,
+						Element: string(f.FullName()),
+						Name:    string(oo.Name()),
+						Kind:    ViolationRequiredOption,
+						Detail: fmt.Sprintf(
+							"(pxf.required) is not valid on a member of oneof %q: read per field it demands that one arm always be chosen, which makes every other arm undecodable",
+							oo.Name()),
+					})
+				}
+				if opts.defSet {
+					if oneofDefaults == nil {
+						oneofDefaults = map[protoreflect.FullName][]protoreflect.FieldDescriptor{}
+					}
+					oneofDefaults[oo.FullName()] = append(oneofDefaults[oo.FullName()], f)
+				}
 			}
 		}
+		// A oneof may carry at most one (pxf.default) among its members
+		// (draft -01 §annotation-extensions, "Oneof Members"). Reported on
+		// every offending member rather than on the oneof, so the author
+		// sees each annotation to remove and Violation.String stays a
+		// field-shaped message.
+		for _, members := range oneofDefaults {
+			if len(members) < 2 {
+				continue
+			}
+			names := make([]string, len(members))
+			for k, m := range members {
+				names[k] = string(m.Name())
+			}
+			oo := members[0].ContainingOneof()
+			for _, m := range members {
+				def, _ := Default(m)
+				*out = append(*out, Violation{
+					File:    path,
+					Element: string(m.FullName()),
+					Name:    def,
+					Kind:    ViolationDefaultOption,
+					Detail: fmt.Sprintf(
+						"at most one member of oneof %q may carry (pxf.default); %d do (%s)",
+						oo.Name(), len(members), strings.Join(names, ", ")),
+				})
+			}
+		}
+		clear(oneofDefaults)
 		oneofs := md.Oneofs()
 		for j := range oneofs.Len() {
 			o := oneofs.Get(j)
@@ -224,6 +287,19 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 		walkMessages(path, md.Messages(), out)
 		walkEnums(path, md.Enums(), out)
 	}
+}
+
+// realOneof returns f's containing oneof, or nil when f is not a member
+// of one. A proto3 `optional` field sits in a synthetic single-member
+// oneof, which carries none of the semantics the oneof rules are about —
+// nothing else can clear it — so it reports nil, and such fields keep
+// plain per-field presence.
+func realOneof(f protoreflect.FieldDescriptor) protoreflect.OneofDescriptor {
+	oo := f.ContainingOneof()
+	if oo == nil || oo.IsSynthetic() {
+		return nil
+	}
+	return oo
 }
 
 // checkKeyOption validates the placement of a (pxf.key) annotation on f
