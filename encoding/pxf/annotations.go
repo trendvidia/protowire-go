@@ -70,7 +70,10 @@ func IsRequired(fd protoreflect.FieldDescriptor) bool {
 //
 // The annotation value is returned even when its placement is
 // meaningless — a single literal cannot populate a repeated or map
-// field, and [ApplyDefault] rejects those fds with an error.
+// field. [ValidateFile] reports such placements as
+// ViolationDefaultOption at bind time and [ApplyDefault] rejects those
+// fds at runtime; this accessor reports what the schema author wrote,
+// which is what tooling (protolsp, protocheck) needs for diagnostics.
 func Default(fd protoreflect.FieldDescriptor) (string, bool) {
 	return getStringOption(fd, extDefault)
 }

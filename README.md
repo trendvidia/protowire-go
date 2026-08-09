@@ -44,7 +44,7 @@ msg, err := opts.UnmarshalDescriptor(data, desc)
 
 ### UnmarshalFull (field presence, required, defaults)
 
-`UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations. Defaults are applied only by the `UnmarshalFull*` entry points — plain `Unmarshal` / `UnmarshalDescriptor` decode the document as written. `(pxf.default)` carries a single literal and is therefore a singular-field annotation: a repeated or map field carrying one is rejected with an error.
+`UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations. Defaults are applied only by the `UnmarshalFull*` entry points — plain `Unmarshal` / `UnmarshalDescriptor` decode the document as written. `(pxf.default)` carries a single literal, so it is valid only on fields one literal can denote; a misplaced annotation is a [bind-time schema violation](#schema-bind-time-checks) rejected by every entry point, not a decode-time surprise.
 
 ```go
 result, err := pxf.UnmarshalFull(data, msg)
@@ -165,9 +165,19 @@ for _, tbl := range doc.Tables {
 
 Both honor the three-state cell semantics (empty / `null` / value), bind WKT timestamps and durations, resolve enums by name, and clear wrappers / optional / oneof on a `null` cell — the implementation routes through the existing `Unmarshal` pipeline so every decoder branch is exercised. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
 
-### Schema reserved-name check
+### Schema bind-time checks
 
-A protobuf schema bound for PXF use MUST NOT declare a field, oneof, or enum value named `null`, `true`, or `false` — those identifiers lex as PXF value keywords and produce silently-unreachable bindings. The check runs by default at the top of every `Unmarshal*` call:
+Three families of schema defect are rejected before the decoder looks at the document:
+
+| Check | Rule |
+| --- | --- |
+| Reserved names | No field, oneof, or enum value named `null`, `true`, or `false` — those identifiers lex as PXF value keywords and produce silently-unreachable bindings. |
+| `(pxf.key)` placement | Valid only on a repeated message-typed field, and the value must name a singular string field of the element message. |
+| `(pxf.default)` placement | The annotation carries exactly one PXF literal, so it is valid only on singular scalars, enums, and the message types a literal can denote: `Timestamp`, `Duration`, the nine `*Value` wrappers, `pxf.BigInt`, `pxf.Decimal`, `pxf.BigFloat`. A repeated field, a map field, a group, or any other message type is a violation. |
+
+The `(pxf.default)` rule is placement only — a literal that does not parse as the field's type (`"abc"` on an `int32`) stays a decode-time error, since placement is decidable from the descriptor alone and the literal is not.
+
+The checks run by default at the top of every `Unmarshal*` call:
 
 ```go
 // Decoder rejects with a clear error if the schema is non-conformant.
@@ -184,7 +194,7 @@ opts := pxf.UnmarshalOptions{SkipValidate: true}
 err := opts.Unmarshal(data, &msg)
 ```
 
-The check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the rule.
+The reserved-name check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. `ValidateFile` walks the whole `.proto` file, so one bad element makes every message declared beside it non-bindable. `SkipValidate` is all-or-nothing — it bypasses all three checks, not one. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the reserved-name and `(pxf.key)` rules, and draft `-01` §annotation-extensions ("Default Placement") for `(pxf.default)`.
 
 ## Data validation (`check`)
 

@@ -85,6 +85,26 @@ func isBigFloat(desc protoreflect.MessageDescriptor) bool {
 	return desc.FullName() == "pxf.BigFloat"
 }
 
+// defaultableMessage reports whether a (pxf.default) literal can denote
+// desc — the message types draft -01 §annotation-extensions ("Default
+// Placement") admits, which is exactly the set applyMessageDefault
+// dispatches on before it gives up. [checkDefaultOption] rejects every
+// other message type at bind time, so the two must move together: adding
+// a branch to applyMessageDefault means adding it here.
+//
+// Note this is narrower than "well-known type" as the draft's terminology
+// section defines it. google.protobuf.Any, FieldMask and Struct are
+// well-known types with no single-literal PXF form, and pxf.Secret's two
+// surface forms are block-shaped rather than literal-shaped.
+func defaultableMessage(desc protoreflect.MessageDescriptor) bool {
+	return isTimestamp(desc) ||
+		isDuration(desc) ||
+		isWrapperType(desc) ||
+		isBigInt(desc) ||
+		isDecimal(desc) ||
+		isBigFloat(desc)
+}
+
 // pxf.Secret well-known type.
 //
 // Secret carries a sensitive scalar plus optional hint/fingerprint

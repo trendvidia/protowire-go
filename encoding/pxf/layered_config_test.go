@@ -424,6 +424,15 @@ func TestApplyDefault_WKTMessageFields(t *testing.T) {
 			prec := sub.Get(sub.Descriptor().Fields().ByName("prec")).Uint()
 			assert.Greater(t, prec, uint64(0))
 		}},
+		// BytesValue took a base64 literal as of #68: parseScalarDefault
+		// grew the BytesKind branch it had always been missing, so the
+		// wrapper spelling now matches the plain `bytes` field that
+		// applyDefaultImpl has always handled. Previously pinned as a
+		// divergence in TestApplyDefault_WKTInvalidValue below.
+		{"bytv", "aGVsbG8=", func(t *testing.T, sub protoreflect.Message) {
+			assert.Equal(t, []byte("hello"),
+				sub.Get(sub.Descriptor().Fields().ByName("value")).Bytes())
+		}},
 	}
 	for _, c := range cases {
 		c := c
@@ -452,12 +461,10 @@ func TestApplyDefault_WKTInvalidValue(t *testing.T) {
 		{"bi", "not-a-bigint", "big integer"},
 		{"dec", "not-a-decimal", "decimal"},
 		{"bf", "not-a-bigfloat", "big float"},
-		// BytesValue defaults are unsupported by parseScalarDefault
-		// (pre-existing protowire-go limitation): the wrapper-defaults
-		// path doesn't include a BytesKind branch. Pinning this so a
-		// future change either supports it or stays explicit about
-		// rejecting it.
-		{"bytv", "aGVsbG8=", "unsupported default kind"},
+		// BytesValue is supported as of #68 (see the valid-value table
+		// above); what stays an error is a literal no base64 alphabet
+		// decodeBase64Lenient tries can read.
+		{"bytv", "not base64!", "invalid default bytes"},
 	}
 	for _, c := range cases {
 		c := c

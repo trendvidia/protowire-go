@@ -3,11 +3,17 @@
 
 package pxf
 
-// PXF schema-level conformance check per draft-trendvidia-protowire-00
-// §3.13. A protobuf schema bound for PXF use MUST NOT declare a message
-// field, oneof, or enum value whose name is case-sensitively equal to a
-// PXF value keyword (null / true / false): such a name lexes as the
-// keyword, so the declared element is unreachable from PXF surface syntax.
+// PXF schema-level conformance checks. Three families, all reported as
+// [Violation] and all enforced at descriptor-bind time:
+//
+//   - Reserved names (draft-trendvidia-protowire-00 §3.13). A protobuf
+//     schema bound for PXF use MUST NOT declare a message field, oneof,
+//     or enum value whose name is case-sensitively equal to a PXF value
+//     keyword (null / true / false): such a name lexes as the keyword,
+//     so the declared element is unreachable from PXF surface syntax.
+//   - (pxf.key) placement (draft -01 §3.13), see [checkKeyOption].
+//   - (pxf.default) placement (draft -01 §annotation-extensions,
+//     "Default Placement"), see [checkDefaultOption].
 //
 // Enforcement runs at descriptor-bind time inside [Unmarshal] /
 // [UnmarshalDescriptor] / [UnmarshalFull] / [UnmarshalFullDescriptor].
@@ -70,6 +76,13 @@ const (
 	// message-typed field, or the annotation value does not name a
 	// singular string field of the element message.
 	ViolationKeyOption
+	// ViolationDefaultOption is a (pxf.default) annotation whose
+	// placement violates draft -01 §annotation-extensions ("Default
+	// Placement"): the annotation carries exactly one PXF literal, and
+	// the annotated field is one no single literal can denote — a
+	// repeated field, a map field, a group, or a message-typed field
+	// outside the set [applyMessageDefault] honors.
+	ViolationDefaultOption
 )
 
 func (k ViolationKind) String() string {
@@ -82,6 +95,8 @@ func (k ViolationKind) String() string {
 		return "enum value"
 	case ViolationKeyOption:
 		return "keyed field option"
+	case ViolationDefaultOption:
+		return "default field option"
 	default:
 		return "unknown"
 	}
@@ -89,7 +104,8 @@ func (k ViolationKind) String() string {
 
 // Violation describes one schema element that fails a PXF bind-time
 // check: a name colliding with a reserved PXF keyword, or an invalid
-// (pxf.key) placement. Returned by [ValidateDescriptor].
+// (pxf.key) or (pxf.default) placement. Returned by
+// [ValidateDescriptor].
 type Violation struct {
 	// File is the .proto file path the offending element is declared in.
 	File string
@@ -97,20 +113,25 @@ type Violation struct {
 	// (e.g. "trades.v1.Side.null").
 	Element string
 	// Name is the bare reserved identifier ("null" / "true" / "false")
-	// for reserved-name violations, or the (pxf.key) annotation value
-	// for ViolationKeyOption.
+	// for reserved-name violations, the (pxf.key) annotation value for
+	// ViolationKeyOption, or the (pxf.default) literal for
+	// ViolationDefaultOption.
 	Name string
 	// Kind is the kind of element that collided.
 	Kind ViolationKind
 	// Detail is a human-readable explanation; set only for
-	// ViolationKeyOption.
+	// ViolationKeyOption and ViolationDefaultOption.
 	Detail string
 }
 
 // String renders a one-line human-readable description of v.
 func (v Violation) String() string {
-	if v.Kind == ViolationKeyOption {
+	switch v.Kind {
+	case ViolationKeyOption:
 		return fmt.Sprintf("%s: field %q: invalid (pxf.key) = %q: %s (draft -01 §3.13)",
+			v.File, v.Element, v.Name, v.Detail)
+	case ViolationDefaultOption:
+		return fmt.Sprintf("%s: field %q: invalid (pxf.default) = %q: %s (draft -01 §annotation-extensions)",
 			v.File, v.Element, v.Name, v.Detail)
 	}
 	return fmt.Sprintf("%s: %s %q uses PXF-reserved name %q (draft §3.13)",
@@ -164,6 +185,7 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 				})
 			}
 			checkKeyOption(path, f, out)
+			checkDefaultOption(path, f, out)
 		}
 		oneofs := md.Oneofs()
 		for j := range oneofs.Len() {
@@ -216,6 +238,58 @@ func checkKeyOption(path string, f protoreflect.FieldDescriptor, out *[]Violatio
 	}
 	if kf.IsList() || kf.IsMap() || kf.Kind() != protoreflect.StringKind {
 		violation(fmt.Sprintf("key field %s must be a singular string field", kf.FullName()))
+	}
+}
+
+// checkDefaultOption validates the placement of a (pxf.default)
+// annotation on f per draft -01 §annotation-extensions ("Default
+// Placement"): the annotation carries exactly one PXF literal, so it is
+// valid only on fields a single literal can denote — singular scalars,
+// enums, and the message types [applyMessageDefault] honors. Appends a
+// ViolationDefaultOption for each failure.
+//
+// The rejected set is exactly the set [applyDefaultImpl] cannot honor, so
+// a schema that binds here never meets a placement error at decode time
+// and vice versa. Keep the two in lockstep: the message-type arm defers
+// to [defaultableMessage], which is the same predicate
+// applyMessageDefault's dispatch chain implements.
+//
+// Placement only — a literal that does not parse as the field's type
+// ("abc" on an int32) stays a decode-time error. Placement is decidable
+// from the descriptor alone; the literal is not, without running the
+// value parser here.
+func checkDefaultOption(path string, f protoreflect.FieldDescriptor, out *[]Violation) {
+	def, ok := Default(f)
+	if !ok {
+		return
+	}
+	violation := func(detail string) {
+		*out = append(*out, Violation{
+			File:    path,
+			Element: string(f.FullName()),
+			Name:    def,
+			Kind:    ViolationDefaultOption,
+			Detail:  detail,
+		})
+	}
+	// Map before list: a map field reports IsMap, not IsList, but the
+	// ordering matches applyDefaultImpl's guard and reads the same way.
+	switch {
+	case f.IsMap():
+		violation("(pxf.default) is not valid on map fields: one literal cannot denote a map")
+		return
+	case f.IsList():
+		violation("(pxf.default) is not valid on repeated fields: one literal cannot denote a list")
+		return
+	}
+	switch f.Kind() {
+	case protoreflect.GroupKind:
+		violation("(pxf.default) is not valid on group fields")
+	case protoreflect.MessageKind:
+		if !defaultableMessage(f.Message()) {
+			violation(fmt.Sprintf("(pxf.default) is not valid on message type %s: no PXF literal denotes it",
+				f.Message().FullName()))
+		}
 	}
 }
 
