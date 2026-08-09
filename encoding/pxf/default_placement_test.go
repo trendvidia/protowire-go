@@ -11,7 +11,11 @@ import (
 	"github.com/bufbuild/protocompile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"
@@ -424,6 +428,65 @@ func TestDecode_DefaultOnSingularFieldUnaffected(t *testing.T) {
 	assert.Equal(t, 0, msg.ProtoReflect().Get(fields.ByName("tags")).List().Len())
 	assert.Equal(t, 0, msg.ProtoReflect().Get(fields.ByName("m")).Map().Len())
 	assert.False(t, res.IsSet("role"), "a default is not an input-set field")
+}
+
+// protocompile resolves (pxf.*) options into known extension fields, so
+// every other test in this file exercises only pxfStringOptions' fast
+// path. protoc-produced descriptors — and anything parsed without
+// pxf/annotations.proto in the resolver — carry them as unknown bytes
+// instead, which is the fallback branch. Build a descriptor with the
+// options as raw wire bytes to reach it, interleaving a varint and a
+// fixed64 field so the skip arms run too, and set both annotations so
+// the single pass has to fill both accumulators.
+func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
+	var raw []byte
+	// (pxf.required) = true — varint, skipped.
+	raw = protowire.AppendVarint(protowire.AppendTag(raw, 50000, protowire.VarintType), 1)
+	// An unrelated fixed64 nobody reads — skipped.
+	raw = protowire.AppendFixed64(protowire.AppendTag(raw, 59999, protowire.Fixed64Type), 7)
+	// (pxf.key) = "id" and (pxf.default) = "ignored".
+	raw = protowire.AppendString(protowire.AppendTag(raw, 50002, protowire.BytesType), "id")
+	raw = protowire.AppendString(protowire.AppendTag(raw, 50001, protowire.BytesType), "ignored")
+
+	opts := &descriptorpb.FieldOptions{}
+	opts.ProtoReflect().SetUnknown(protoreflect.RawFields(raw))
+
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("unknownbytes.proto"),
+		Package: proto.String("unknownbytes_test.v1"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("ListScalar"),
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:     proto.String("tags"),
+				Number:   proto.Int32(1),
+				JsonName: proto.String("tags"),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				Options:  opts,
+			}},
+		}},
+	}
+	fd, err := protodesc.NewFile(fdp, nil)
+	require.NoError(t, err)
+
+	vs := pxf.ValidateFile(fd)
+	require.Len(t, vs, 2, "both annotations read in one options pass: %v", vs)
+
+	byKind := map[pxf.ViolationKind]pxf.Violation{}
+	for _, v := range vs {
+		byKind[v.Kind] = v
+	}
+
+	def, ok := byKind[pxf.ViolationDefaultOption]
+	require.True(t, ok, "no ViolationDefaultOption in %v", vs)
+	assert.Equal(t, "ignored", def.Name)
+	assert.Contains(t, def.Detail, "(pxf.default) is not valid on repeated fields")
+
+	key, ok := byKind[pxf.ViolationKeyOption]
+	require.True(t, ok, "no ViolationKeyOption in %v", vs)
+	assert.Equal(t, "id", key.Name)
+	assert.Contains(t, key.Detail, "(pxf.key) is valid only on repeated message-typed fields")
 }
 
 // The aggregated error names every offending field, not just the first, so

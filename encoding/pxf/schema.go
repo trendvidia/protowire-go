@@ -184,8 +184,15 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 					Kind:    ViolationField,
 				})
 			}
-			checkKeyOption(path, f, out)
-			checkDefaultOption(path, f, out)
+			// One options pass for both annotations — see
+			// [pxfStringOptions] for why this is not two calls.
+			keyName, keyOK, def, defOK := pxfStringOptions(f)
+			if keyOK {
+				checkKeyOption(path, f, keyName, out)
+			}
+			if defOK {
+				checkDefaultOption(path, f, def, out)
+			}
 		}
 		oneofs := md.Oneofs()
 		for j := range oneofs.Len() {
@@ -213,11 +220,10 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 // message-typed field, and the annotation value must name a singular
 // string field of the element message. Appends a ViolationKeyOption
 // for each failure.
-func checkKeyOption(path string, f protoreflect.FieldDescriptor, out *[]Violation) {
-	keyName, ok := KeyFieldName(f)
-	if !ok {
-		return
-	}
+//
+// keyName is the authored annotation value, already read by the caller;
+// callers must only invoke this when the annotation is actually set.
+func checkKeyOption(path string, f protoreflect.FieldDescriptor, keyName string, out *[]Violation) {
 	violation := func(detail string) {
 		*out = append(*out, Violation{
 			File:    path,
@@ -258,11 +264,10 @@ func checkKeyOption(path string, f protoreflect.FieldDescriptor, out *[]Violatio
 // ("abc" on an int32) stays a decode-time error. Placement is decidable
 // from the descriptor alone; the literal is not, without running the
 // value parser here.
-func checkDefaultOption(path string, f protoreflect.FieldDescriptor, out *[]Violation) {
-	def, ok := Default(f)
-	if !ok {
-		return
-	}
+//
+// def is the authored annotation value, already read by the caller;
+// callers must only invoke this when the annotation is actually set.
+func checkDefaultOption(path string, f protoreflect.FieldDescriptor, def string, out *[]Violation) {
 	violation := func(detail string) {
 		*out = append(*out, Violation{
 			File:    path,

@@ -46,6 +46,14 @@ format changes.
   it to a singular field; the error names the offending field by
   fully-qualified name.
 
+  The walker reads both `(pxf.key)` and `(pxf.default)` in a single pass
+  over each field's options (`pxfStringOptions`), because `ValidateFile`
+  runs per field on every decode that does not set `SkipValidate`. Two
+  separate `getStringOption` calls measured +4.7% wall and +4 allocs/op
+  on `BenchmarkPXFUnmarshalKeyed`; the combined pass brings that to no
+  measurable wall-clock change and +1 alloc/op, with
+  `BenchmarkPXFUnmarshal` unchanged at 80 allocs/op.
+
   Spec text landed first, in the same cycle: trendvidia/protowire#223
   states the constraint (draft `-01` §annotation-extensions, "Default
   Placement"), which previously said nothing about placement while its

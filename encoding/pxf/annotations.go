@@ -157,6 +157,105 @@ func getBoolOption(fd protoreflect.FieldDescriptor, num protoreflect.FieldNumber
 	return false
 }
 
+// pxfStringOptions reads the (pxf.key) and (pxf.default) string
+// extensions from fd's options in a single pass, returning each value
+// and whether it was set.
+//
+// [ValidateFile] runs per field on every decode that does not set
+// SkipValidate, so the number of passes over FieldOptions sits on the
+// hot path. Reading the two extensions with two [getStringOption] calls
+// measured +4.7% wall and +4 allocs/op on BenchmarkPXFUnmarshalKeyed
+// against the same benchmark before the (pxf.default) check existed:
+// protoreflect's Range takes a capturing closure, which escapes, so the
+// cost is per call and per field that carries any option at all. One
+// pass with two accumulators brings that back to no measurable
+// wall-clock change against the pre-check baseline and +1 alloc/op on
+// the keyed path — the combined closure captures four variables rather
+// than two.
+//
+// The two public accessors ([KeyFieldName], [Default]) keep using
+// getStringOption — they are called one annotation at a time by tooling
+// and do not need the combined shape.
+//
+// The accumulators are plain locals declared after the early return, not
+// named results. Range's closure captures them, so they are heap-bound
+// wherever they are declared — as named results that is every call,
+// including the common one where the field carries no options at all,
+// which measured +71% allocs/op on BenchmarkPXFUnmarshal. Declared here
+// the cost lands only on fields that actually have options, which is
+// what getStringOption has always done.
+func pxfStringOptions(fd protoreflect.FieldDescriptor) (string, bool, string, bool) {
+	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
+	if !ok || opts == nil {
+		return "", false, "", false
+	}
+	rm := opts.ProtoReflect()
+
+	var key, def string
+	var keyOK, defOK bool
+
+	// Known fields first (protocompile stores resolved extensions here).
+	rm.Range(func(ofd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		switch ofd.Number() {
+		case extKey:
+			key, keyOK = v.String(), true
+		case extDefault:
+			def, defOK = v.String(), true
+		}
+		return !keyOK || !defOK
+	})
+	if keyOK && defOK {
+		return key, keyOK, def, defOK
+	}
+
+	// Fallback: parse raw unknown bytes (protoc / descriptor-based).
+	b := rm.GetUnknown()
+	for len(b) > 0 {
+		fnum, wtype, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			break
+		}
+		b = b[n:]
+		switch wtype {
+		case protowire.VarintType:
+			_, vn := protowire.ConsumeVarint(b)
+			if vn < 0 {
+				return key, keyOK, def, defOK
+			}
+			b = b[vn:]
+		case protowire.Fixed32Type:
+			if len(b) < 4 {
+				return key, keyOK, def, defOK
+			}
+			b = b[4:]
+		case protowire.Fixed64Type:
+			if len(b) < 8 {
+				return key, keyOK, def, defOK
+			}
+			b = b[8:]
+		case protowire.BytesType:
+			v, vn := protowire.ConsumeBytes(b)
+			if vn < 0 {
+				return key, keyOK, def, defOK
+			}
+			switch fnum {
+			case extKey:
+				if !keyOK {
+					key, keyOK = string(v), true
+				}
+			case extDefault:
+				if !defOK {
+					def, defOK = string(v), true
+				}
+			}
+			b = b[vn:]
+		default:
+			return key, keyOK, def, defOK
+		}
+	}
+	return key, keyOK, def, defOK
+}
+
 // getStringOption reads a string extension from field options.
 // Checks known fields first, then falls back to raw unknown bytes.
 func getStringOption(fd protoreflect.FieldDescriptor, num protoreflect.FieldNumber) (string, bool) {
