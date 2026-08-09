@@ -1691,6 +1691,10 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 // for strings, base64 for bytes, RFC3339 for timestamps inside their
 // inner fields, etc.
 //
+// Defaults are a singular-field feature: a repeated or map fd returns an
+// error, as does a message-typed fd outside the supported well-known
+// types.
+//
 // Exported for layered-config consumers (e.g. chameleon) that run a
 // post-merge defaults pass with [UnmarshalOptions.SkipPostDecode].
 // In-tree callers (postDecode) use the lowercase alias.
@@ -1705,6 +1709,18 @@ func applyDefault(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def
 }
 
 func applyDefaultImpl(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def string) error {
+	// (pxf.default) carries a single PXF literal, so it is meaningful
+	// only on singular fields: the kind switch below would hand a scalar
+	// to Set on a list field (protoreflect panics) and a map field's
+	// Kind() is its synthetic entry message. Reject the placement here
+	// rather than in postDecode so the exported ApplyDefault is covered
+	// too (#66).
+	switch {
+	case fd.IsMap():
+		return fmt.Errorf("default values not supported for map field %q", fd.Name())
+	case fd.IsList():
+		return fmt.Errorf("default values not supported for repeated field %q", fd.Name())
+	}
 	switch fd.Kind() {
 	case protoreflect.StringKind:
 		msg.Set(fd, protoreflect.ValueOfString(def))

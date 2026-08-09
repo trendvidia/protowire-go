@@ -67,6 +67,10 @@ func IsRequired(fd protoreflect.FieldDescriptor) bool {
 // a PXF literal (e.g. `42`, `true`, `"hello"`); callers parse it with
 // [ApplyDefault] or their own logic. Exported for layered-config
 // consumers running post-merge defaults passes.
+//
+// The annotation value is returned even when its placement is
+// meaningless — a single literal cannot populate a repeated or map
+// field, and [ApplyDefault] rejects those fds with an error.
 func Default(fd protoreflect.FieldDescriptor) (string, bool) {
 	return getStringOption(fd, extDefault)
 }
