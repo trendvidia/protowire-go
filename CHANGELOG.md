@@ -11,6 +11,24 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `encoding/pxf`: `(pxf.default)` on a repeated or map field returns an
+  error instead of panicking (#66). The annotation carries a single PXF
+  literal, so `applyDefaultImpl` switched on `fd.Kind()` — `StringKind`
+  for `repeated string` — and handed a scalar to `Message.Set`, which
+  protoreflect rejects with a panic; any schema with such a field
+  crashed `Unmarshal` / `UnmarshalFull` on its first decode of a
+  document that left the field absent. The guard sits in
+  `applyDefaultImpl`, so the exported `ApplyDefault` is covered too.
+  Map fields already errored, by accident — their `Kind()` is the
+  synthetic `MapEntry` message, so they landed in the unsupported-
+  message-type path; they now report the placement
+  (`default values not supported for map field "m"`) rather than the
+  entry type's name. Schemas whose annotated repeated field is always
+  present in the input are unaffected: a present field suppresses the
+  default, so the guard is unreachable.
+
 ## [1.3.2] — 2026-07-25
 
 proto3 conformance fixes for `encoding/pb`'s repeated fields: packed
