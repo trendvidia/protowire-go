@@ -46,6 +46,8 @@ msg, err := opts.UnmarshalDescriptor(data, desc)
 
 `UnmarshalFull` returns a `Result` that tracks which fields were set, null, or absent. It also validates required fields and applies defaults declared via `(pxf.required)` / `(pxf.default)` annotations. Defaults are applied only by the `UnmarshalFull*` entry points — plain `Unmarshal` / `UnmarshalDescriptor` decode the document as written. `(pxf.default)` carries a single literal, so it is valid only on fields one literal can denote; a misplaced annotation is a [bind-time schema violation](#schema-bind-time-checks) rejected by every entry point, not a decode-time surprise (within the bound file — see that section for the import-closure caveat).
 
+Inside a oneof, "absent" is read across the whole oneof rather than per field: a member's `(pxf.default)` applies only when *no* member of that oneof is present, since setting any member clears the rest and applying a default over a chosen arm would destroy the value the document wrote. A member bound to `null` counts as present, matching the rule that `null` suppresses a default.
+
 ```go
 result, err := pxf.UnmarshalFull(data, msg)
 
@@ -167,13 +169,15 @@ Both honor the three-state cell semantics (empty / `null` / value), bind WKT tim
 
 ### Schema bind-time checks
 
-Three families of schema defect are rejected before the decoder looks at the document:
+These families of schema defect are rejected before the decoder looks at the document:
 
 | Check | Rule |
 | --- | --- |
 | Reserved names | No field, oneof, or enum value named `null`, `true`, or `false` — those identifiers lex as PXF value keywords and produce silently-unreachable bindings. |
 | `(pxf.key)` placement | Valid only on a repeated message-typed field, and the value must name a singular string field of the element message. |
 | `(pxf.default)` placement | The annotation carries exactly one PXF literal, so it is valid only on singular scalars, enums, and the message types a literal can denote: `Timestamp`, `Duration`, the nine `*Value` wrappers, `pxf.BigInt`, `pxf.Decimal`, `pxf.BigFloat`. A repeated field, a map field, a group, or any other message type is a violation. |
+| `(pxf.default)` in a oneof | At most one member of any one oneof may carry it. Two or more is a violation — with two, some default must win, and deciding by declaration order would make reordering fields silently change what a document decodes to. |
+| `(pxf.required)` in a oneof | Not valid on a oneof member at all. Read per field it demands one specific arm always be chosen, which makes every other arm undecodable. |
 
 The `(pxf.default)` rule is placement only — a literal that does not parse as the field's type (`"abc"` on an `int32`) stays a decode-time error, since placement is decidable from the descriptor alone and the literal is not.
 

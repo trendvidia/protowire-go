@@ -431,16 +431,20 @@ func TestDecode_DefaultOnSingularFieldUnaffected(t *testing.T) {
 }
 
 // protocompile resolves (pxf.*) options into known extension fields, so
-// every other test in this file exercises only pxfStringOptions' fast
+// every other test in this file exercises only pxfFieldOptions' fast
 // path. protoc-produced descriptors — and anything parsed without
 // pxf/annotations.proto in the resolver — carry them as unknown bytes
 // instead, which is the fallback branch. Build a descriptor with the
 // options as raw wire bytes to reach it, interleaving a varint and a
 // fixed64 field so the skip arms run too, and set both annotations so
 // the single pass has to fill both accumulators.
+//
+// The field here is outside any oneof, so the (pxf.required) the walker
+// now reads is inert — TestValidateFile_RequiredOnOneofMemberFromUnknownBytes
+// is what pins the varint arm's effect.
 func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	var raw []byte
-	// (pxf.required) = true — varint, skipped.
+	// (pxf.required) = true — varint, read into pxfOptions.required.
 	raw = protowire.AppendVarint(protowire.AppendTag(raw, 50000, protowire.VarintType), 1)
 	// An unrelated fixed64 nobody reads — skipped.
 	raw = protowire.AppendFixed64(protowire.AppendTag(raw, 59999, protowire.Fixed64Type), 7)
@@ -562,7 +566,7 @@ message Root {
 	assert.NoError(t, err)
 }
 
-// The raw-unknown-bytes fallback shared by pxfStringOptions,
+// The raw-unknown-bytes fallback shared by pxfFieldOptions,
 // getStringOption and getBoolOption walks a buffer it does not own. A
 // truncated fixed32/fixed64 must end the walk, not slice past the end.
 func TestValidateFile_TruncatedUnknownOptionBytes(t *testing.T) {
@@ -605,7 +609,7 @@ func TestValidateFile_TruncatedUnknownOptionBytes(t *testing.T) {
 			fd := build(t, c.raw)
 			f := fd.Messages().Get(0).Fields().Get(0)
 			assert.NotPanics(t, func() {
-				pxf.ValidateFile(fd) // pxfStringOptions
+				pxf.ValidateFile(fd) // pxfFieldOptions
 				pxf.Default(f)       // getStringOption
 				pxf.KeyFieldName(f)  // getStringOption
 				pxf.IsRequired(f)    // getBoolOption

@@ -41,8 +41,16 @@ type UnmarshalOptions struct {
 
 	// SkipValidate disables the per-call bind-time schema checks. It is
 	// all-or-nothing: it bypasses every family [ValidateFile] reports,
-	// not one — reserved names (draft §3.13), (pxf.key) placement, and
-	// (pxf.default) placement (draft -01 §annotation-extensions).
+	// not one — reserved names (draft §3.13), (pxf.key) placement,
+	// (pxf.default) placement, and the two oneof rules of draft -01
+	// §annotation-extensions ("Oneof Members"): one (pxf.default) per
+	// oneof, and no (pxf.required) on a oneof member.
+	//
+	// The runtime rule that a oneof member's (pxf.default) is not
+	// applied over a present sibling is not a bind-time check and
+	// survives this option; the (pxf.required) rule has no runtime
+	// counterpart, so a schema bypassed here still rejects every
+	// document that chooses a different arm.
 	//
 	// The default behavior — running the checks on every decode call —
 	// is the safe one because they catch schemas that would silently

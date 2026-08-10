@@ -1667,7 +1667,7 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 			if isRequired(fd) {
 				return errorf(Position{Line: 1, Column: 1}, "required field %q is absent", path)
 			}
-			if def, ok := getDefault(fd); ok {
+			if def, ok := getDefault(fd); ok && !oneofAlreadyChosen(fd, result, pathPrefix) {
 				if err := applyDefault(msg, fd, def); err != nil {
 					return err
 				}
@@ -1683,6 +1683,43 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 		// null + default → do NOT apply default (null is intentional)
 	}
 	return nil
+}
+
+// oneofAlreadyChosen reports whether fd is a member of a oneof some
+// other member of which the document already supplied, in which case
+// fd's (pxf.default) MUST NOT be applied (draft -01
+// §annotation-extensions, "Oneof Members"). Setting any member of a
+// oneof clears the rest, so applying the default over a chosen sibling
+// does not shadow the supplied value — it destroys it (#72).
+//
+// Presence is read from the document, not from msg.WhichOneof: a default
+// applied earlier in this same pass would itself set the oneof case, so
+// asking the message would let the first annotated member suppress every
+// later one. The schema check caps a oneof at one (pxf.default), but
+// SkipValidate callers can still reach this with more, and "no member
+// was written" is the condition the spec states either way.
+//
+// A proto3 `optional` field's synthetic oneof is not a oneof for this
+// purpose — see [realOneof].
+func oneofAlreadyChosen(fd protoreflect.FieldDescriptor, result *Result, pathPrefix string) bool {
+	oo := realOneof(fd)
+	if oo == nil {
+		return false
+	}
+	members := oo.Fields()
+	for i := range members.Len() {
+		m := members.Get(i)
+		if m.Number() == fd.Number() {
+			continue
+		}
+		// markNull records into presentFields too, so a member bound to
+		// null counts as present — matching the spec, and matching the
+		// existing rule that null suppresses a default.
+		if _, present := result.presentFields[pathPrefix+string(m.Name())]; present {
+			return true
+		}
+	}
+	return false
 }
 
 // ApplyDefault parses a (pxf.default) value string and sets it on the
@@ -1707,6 +1744,15 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 // Exported for layered-config consumers (e.g. chameleon) that run a
 // post-merge defaults pass with [UnmarshalOptions.SkipPostDecode].
 // In-tree callers (postDecode) use the lowercase alias.
+//
+// Such a caller owes one guard this function cannot make for it: when fd
+// is a member of a non-synthetic oneof, do not call this unless *no*
+// member of that oneof is present (draft -01 §annotation-extensions,
+// "Oneof Members"). Setting one member of a oneof clears the rest, so
+// applying a default over a chosen sibling destroys the merged value
+// rather than shadowing it — the #72 bug, reachable through this entry
+// point. [Result.PresentFields] carries the presence set postDecode
+// tests, with a member bound to null counting as present.
 func ApplyDefault(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def string) error {
 	return applyDefaultImpl(msg, fd, def)
 }

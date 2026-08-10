@@ -59,6 +59,14 @@ func IsKeyed(fd protoreflect.FieldDescriptor) bool {
 // IsRequired reports whether the field has (pxf.required) = true.
 // Exported for layered-config consumers (e.g. chameleon) that run
 // their own post-merge required-validation pass with SkipPostDecode.
+//
+// The annotation is reported wherever the author wrote it, including on
+// a member of a oneof — a placement draft -01 §annotation-extensions
+// ("Oneof Members") forbids outright, because read per field it demands
+// that one specific arm always be chosen and so makes every other arm
+// undecodable. [ValidateFile] rejects that schema as
+// ViolationRequiredOption at bind time; this accessor reports what the
+// schema author wrote, which is what tooling needs for diagnostics.
 func IsRequired(fd protoreflect.FieldDescriptor) bool {
 	return getBoolOption(fd, extRequired)
 }
@@ -74,6 +82,16 @@ func IsRequired(fd protoreflect.FieldDescriptor) bool {
 // ViolationDefaultOption at bind time and [ApplyDefault] rejects those
 // fds at runtime; this accessor reports what the schema author wrote,
 // which is what tooling (protolsp, protocheck) needs for diagnostics.
+//
+// A caller applying the returned default itself owes the oneof rule of
+// draft -01 §annotation-extensions ("Oneof Members"): if fd is a member
+// of a non-synthetic oneof, the default MUST NOT be applied when any
+// member of that oneof is present, because setting one member clears the
+// rest and the default would destroy the chosen arm rather than shadow
+// it (#72). postDecode gets this from its own presence map; a
+// SkipPostDecode consumer has the same information in
+// [Result.PresentFields] (a member bound to null counts as present) and
+// must apply the same test. See [ApplyDefault].
 func Default(fd protoreflect.FieldDescriptor) (string, bool) {
 	return getStringOption(fd, extDefault)
 }
@@ -163,60 +181,83 @@ func getBoolOption(fd protoreflect.FieldDescriptor, num protoreflect.FieldNumber
 	return false
 }
 
-// pxfStringOptions reads the (pxf.key) and (pxf.default) string
-// extensions from fd's options in a single pass, returning each value
-// and whether it was set.
+// pxfOptions is every PXF annotation [ValidateFile] needs from one
+// field. required has no "set" flag because only `= true` is actionable:
+// an absent (pxf.required) and an explicit `= false` are the same thing
+// to every caller, which is also what [IsRequired] reports.
+type pxfOptions struct {
+	key      string
+	keySet   bool
+	def      string
+	defSet   bool
+	required bool
+}
+
+// settled reports whether nothing further in fd's options could change
+// the result, so a reader may stop where it stands. required needs no
+// "set" flag here for the same reason it has none on the struct: once it
+// is true, a later `= false` would not be actionable — while it is
+// false, the scan must go on, since an unread `= true` still would be.
+func (o pxfOptions) settled() bool { return o.keySet && o.defSet && o.required }
+
+// pxfFieldOptions reads the (pxf.key), (pxf.default) and (pxf.required)
+// extensions from fd's options in a single pass.
 //
 // [ValidateFile] runs per field on every decode that does not set
 // SkipValidate, so the number of passes over FieldOptions sits on the
-// hot path. Reading the two extensions with two [getStringOption] calls
-// measured +4.7% wall and +4 allocs/op on BenchmarkPXFUnmarshalKeyed
-// against the same benchmark before the (pxf.default) check existed:
-// protoreflect's Range takes a capturing closure, which escapes, so the
-// cost is per call and per field that carries any option at all. One
-// pass with two accumulators brings that back to no measurable
-// wall-clock change against the pre-check baseline and +1 alloc/op on
-// the keyed path — the combined closure captures four variables rather
-// than two.
+// hot path — one pass per field, not one per annotation. Reading two of
+// them with two [getStringOption] calls measured +4.7% wall and +4
+// allocs/op on BenchmarkPXFUnmarshalKeyed when the (pxf.default) check
+// was added (#68): protoreflect's Range takes a capturing closure, which
+// escapes, so the cost is per call and per field that carries any option
+// at all. (pxf.required) joined the walker for #72 and rides along here
+// rather than adding a third pass.
 //
-// The two public accessors ([KeyFieldName], [Default]) keep using
-// getStringOption — they are called one annotation at a time by tooling
-// and do not need the combined shape.
+// The public accessors ([KeyFieldName], [Default], [IsRequired]) keep
+// using getStringOption / getBoolOption — they are called one annotation
+// at a time by tooling and do not need the combined shape.
 //
-// The accumulators are plain locals declared after the early return, not
-// named results. Range's closure captures them, so they are heap-bound
-// wherever they are declared — as named results that is every call,
+// The accumulator is a plain local declared after the early return, not
+// a named result. Range's closure captures it, so it is heap-bound
+// wherever it is declared — as a named result that is every call,
 // including the common one where the field carries no options at all,
 // which measured +71% allocs/op on BenchmarkPXFUnmarshal. Declared here
 // the cost lands only on fields that actually have options, which is
 // what getStringOption has always done.
-func pxfStringOptions(fd protoreflect.FieldDescriptor) (string, bool, string, bool) {
+//
+// Both loops stop once [pxfOptions.settled] holds: there is nothing left
+// to learn, and neither loop is bounded by anything but the number of
+// options the author wrote.
+func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
 	if !ok || opts == nil {
-		return "", false, "", false
+		return pxfOptions{}
 	}
 	rm := opts.ProtoReflect()
 
-	var key, def string
-	var keyOK, defOK bool
+	var got pxfOptions
 
 	// Known fields first (protocompile stores resolved extensions here).
 	rm.Range(func(ofd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
 		switch ofd.Number() {
 		case extKey:
-			key, keyOK = v.String(), true
+			got.key, got.keySet = v.String(), true
 		case extDefault:
-			def, defOK = v.String(), true
+			got.def, got.defSet = v.String(), true
+		case extRequired:
+			got.required = v.Bool()
 		}
-		return !keyOK || !defOK
+		return !got.settled()
 	})
-	if keyOK && defOK {
-		return key, keyOK, def, defOK
+	if got.settled() {
+		return got
 	}
 
-	// Fallback: parse raw unknown bytes (protoc / descriptor-based).
+	// Fallback: parse raw unknown bytes (protoc / descriptor-based). Fills
+	// only what the known-field pass did not, and is skipped entirely when
+	// there are no unknown bytes — the protocompile case.
 	b := rm.GetUnknown()
-	for len(b) > 0 {
+	for len(b) > 0 && !got.settled() {
 		fnum, wtype, n := protowire.ConsumeTag(b)
 		if n < 0 {
 			break
@@ -224,42 +265,45 @@ func pxfStringOptions(fd protoreflect.FieldDescriptor) (string, bool, string, bo
 		b = b[n:]
 		switch wtype {
 		case protowire.VarintType:
-			_, vn := protowire.ConsumeVarint(b)
+			v, vn := protowire.ConsumeVarint(b)
 			if vn < 0 {
-				return key, keyOK, def, defOK
+				return got
+			}
+			if fnum == extRequired && !got.required {
+				got.required = v != 0
 			}
 			b = b[vn:]
 		case protowire.Fixed32Type:
 			if len(b) < 4 {
-				return key, keyOK, def, defOK
+				return got
 			}
 			b = b[4:]
 		case protowire.Fixed64Type:
 			if len(b) < 8 {
-				return key, keyOK, def, defOK
+				return got
 			}
 			b = b[8:]
 		case protowire.BytesType:
 			v, vn := protowire.ConsumeBytes(b)
 			if vn < 0 {
-				return key, keyOK, def, defOK
+				return got
 			}
 			switch fnum {
 			case extKey:
-				if !keyOK {
-					key, keyOK = string(v), true
+				if !got.keySet {
+					got.key, got.keySet = string(v), true
 				}
 			case extDefault:
-				if !defOK {
-					def, defOK = string(v), true
+				if !got.defSet {
+					got.def, got.defSet = string(v), true
 				}
 			}
 			b = b[vn:]
 		default:
-			return key, keyOK, def, defOK
+			return got
 		}
 	}
-	return key, keyOK, def, defOK
+	return got
 }
 
 // getStringOption reads a string extension from field options.
