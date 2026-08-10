@@ -493,21 +493,19 @@ func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	assert.Contains(t, key.Detail, "(pxf.key) is valid only on repeated message-typed fields")
 }
 
-// ValidateFile walks one file, not the transitive import closure, while
-// postDecode recurses into nested messages — so a misplaced
-// (pxf.default) on a type declared in an IMPORTED .proto binds clean and
-// falls through to the #66 decode-time guard. That is the one hole left
-// in #68's "bind-time, independently of what any document contains"
-// promise: a schema whose imported annotated field is present in every
-// document still carries a dead annotation with no diagnostic, which is
-// exactly the failure mode #68 was filed about.
+// ValidateFile walks the transitive import closure, so a misplaced
+// (pxf.default) on a type declared in an IMPORTED .proto is a bind-time
+// violation like any other (#71, spec side trendvidia/protowire#228).
 //
-// Pinned, not fixed: widening the walk to the import closure runs on
-// every decode that does not set SkipValidate, so it is a hot-path and
-// compatibility decision that wants the same spec-first treatment #68
-// got. The same hole applies to the reserved-name and (pxf.key) checks,
-// which have always been file-scoped.
-func TestValidateDescriptor_ImportedFileIsNotWalked(t *testing.T) {
+// This inverts TestValidateDescriptor_ImportedFileIsNotWalked, which
+// pinned the previous file-scoped behaviour. Before, the annotation
+// bound clean through Root and fell through to the #66 decode-time
+// guard — and only for a document that made `inner` present, so a
+// schema whose imported annotated field was populated in every document
+// carried a dead annotation forever with no diagnostic. That was the
+// one hole left in #68's "bind-time, independently of what any document
+// contains" promise, and closing it is what #71 was filed for.
+func TestValidateDescriptor_ImportedFileIsWalked(t *testing.T) {
 	const importedSrc = `
 syntax = "proto3";
 package defaultimported_test.v1;
@@ -544,26 +542,37 @@ message Root {
 	require.NoError(t, err)
 	desc := d.(protoreflect.MessageDescriptor)
 
-	assert.Empty(t, pxf.ValidateDescriptor(desc),
-		"the imported file's violation is out of ValidateFile's scope")
-
-	// Binding Inner's own file does report it, so the walker is right and
-	// only its scope is narrow.
-	inner := desc.Fields().ByName("inner").Message()
-	require.Equal(t, protoreflect.FullName("defaultimported_test.v1.Inner"), inner.FullName())
-	vs := pxf.ValidateDescriptor(inner)
+	// Binding Root reports the violation the imported file declares, and
+	// attributes it to the file that declares it rather than to the file
+	// that was bound.
+	vs := pxf.ValidateDescriptor(desc)
 	require.Len(t, vs, 1)
 	assert.Equal(t, pxf.ViolationDefaultOption, vs[0].Kind)
+	assert.Equal(t, "imported.proto", vs[0].File)
+	assert.Equal(t, "defaultimported_test.v1.Inner.tags", vs[0].Element)
 
-	// Through Root, the diagnostic is the #66 decode-time guard instead,
-	// and only for a document that makes `inner` present.
-	_, _, err = pxf.UnmarshalFullDescriptor([]byte(`inner { }`), desc)
+	// Binding Inner's own file reports the same one violation — the
+	// closure of a file that imports nothing is that file.
+	inner := desc.Fields().ByName("inner").Message()
+	require.Equal(t, protoreflect.FullName("defaultimported_test.v1.Inner"), inner.FullName())
+	assert.Equal(t, vs, pxf.ValidateDescriptor(inner))
+
+	// Both documents now fail at bind time, where before only the first
+	// failed and only at decode time. The second is the case #71 was
+	// filed about: nothing in the document mentions the annotated field.
+	for _, doc := range []string{`inner { }`, ``} {
+		_, _, err = pxf.UnmarshalFullDescriptor([]byte(doc), desc)
+		require.Error(t, err, "document %q", doc)
+		assert.Contains(t, err.Error(), "PXF schema violations")
+		assert.Contains(t, err.Error(), `invalid (pxf.default) = "ignored"`)
+		assert.NotContains(t, err.Error(), "default values not supported",
+			"bind-time violation should preempt the #66 decode-time guard")
+	}
+
+	// Plain Unmarshal never applied defaults at all, and now rejects too.
+	_, err = pxf.UnmarshalDescriptor([]byte(``), desc)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `default values not supported for repeated field "tags"`)
-
-	// And with `inner` absent there is no diagnostic at all.
-	_, _, err = pxf.UnmarshalFullDescriptor([]byte(``), desc)
-	assert.NoError(t, err)
+	assert.Contains(t, err.Error(), "PXF schema violations")
 }
 
 // The raw-unknown-bytes fallback shared by pxfFieldOptions,

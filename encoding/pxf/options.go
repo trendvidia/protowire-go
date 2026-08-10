@@ -44,7 +44,10 @@ type UnmarshalOptions struct {
 	// not one — reserved names (draft §3.13), (pxf.key) placement,
 	// (pxf.default) placement, and the two oneof rules of draft -01
 	// §annotation-extensions ("Oneof Members"): one (pxf.default) per
-	// oneof, and no (pxf.required) on a oneof member.
+	// oneof, and no (pxf.required) on a oneof member. It bypasses them
+	// across the whole import closure those checks cover (draft -01
+	// §schema-constraints, "Scope of Bind-Time Checks"), not just the
+	// file declaring the bound descriptor.
 	//
 	// The runtime rule that a oneof member's (pxf.default) is not
 	// applied over a present sibling is not a bind-time check and
