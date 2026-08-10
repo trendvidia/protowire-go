@@ -11,6 +11,53 @@ format changes.
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-08-09
+
+The `(pxf.default)` family, end to end. It began as a panic — the
+annotation on a `repeated` field handed a scalar to `Message.Set` and
+crashed the decoder on its first document (#66) — and ended with the
+placement rules the draft had never stated. `(pxf.default)` is now
+rejected at bind time wherever one literal cannot denote the field
+(#68); `(pxf.required)` is rejected on any oneof member and a second
+`(pxf.default)` in one oneof likewise (#72); and all of these checks,
+plus the reserved-name and `(pxf.key)` checks that predate them, now
+cover the bound descriptor's **transitive import closure** rather than
+the single file declaring it (#71).
+
+**One change alters decoded output**, and it is the reason to read
+before upgrading: a oneof member's `(pxf.default)` is applied only when
+no member of that oneof is present (#72). Before, it was applied
+whenever that member specifically was absent — which, since setting any
+member clears its siblings, overwrote the arm the document actually
+chose. A document that decoded to the *correct* arm is unaffected; only
+the cases that were silently losing input change.
+
+Everything else narrows what binds, never what a bound schema decodes
+to. No PXF, `pb`, SBE or envelope wire-format change: a schema that
+bound under v1.3.2 and still binds decodes every document to identical
+bytes. Every newly-rejected placement is one no implementation could
+ever honor, so the alternative was carrying a dead annotation in
+silence; each diagnostic names the offending field by fully-qualified
+name, and migration is deleting the annotation or moving it to a field
+one literal can denote. The import-closure widening has the widest
+blast radius of the set — one bad placement now fails every file that
+transitively imports it, not just its own — so budget for a repo-wide
+pass rather than a per-file one.
+
+Decoding got *faster* despite checking strictly more, because bind-time
+validation is now memoized per descriptor: measured against the
+immediately preceding commit, `BenchmarkPXFUnmarshal` −6.5% and
+`BenchmarkPXFUnmarshalKeyed` −7.3% (`benchstat`, n=10), allocations
+unchanged.
+
+Spec text landed first in every case and in the same cycle
+(trendvidia/protowire#223, #226, #228 — draft `-01`
+§annotation-extensions "Default Placement" and "Oneof Members", and
+§schema-constraints "Scope of Bind-Time Checks"). That sequencing was
+the point: measured before any of it was written, four ports had each
+invented a different answer where the draft was silent, one of them
+emitting `pb` bytes no other port produced.
+
 ### Fixed
 
 - `encoding/pxf`: bind-time schema checks now cover the **transitive
@@ -120,6 +167,53 @@ format changes.
   uniformly rather than a divergence, and the other three will each want
   the same fix (spec side: trendvidia/protowire#226).
 
+- `encoding/pxf`: a `(pxf.default)` on a `google.protobuf.BytesValue`
+  field now applies instead of failing the decode (#68).
+  `parseScalarDefault` — the wrapper-defaults path — had no `BytesKind`
+  branch, so the literal fell to its `default` arm and reported
+  `unsupported default kind bytes`, even though `applyDefaultImpl`'s own
+  `BytesKind` arm has always accepted a base64 literal for a plain
+  `bytes` field. Found while building #68's bind-time check: the walker
+  admits every wrapper type, so the gap would have let a schema bind
+  clean and then fail at decode. It was a documented divergence pinned in
+  `TestApplyDefault_WKTInvalidValue` ("a future change either supports it
+  or stays explicit about rejecting it"); this takes the supports-it
+  branch. Both `StdEncoding` and the URL/raw alphabets are accepted, as
+  everywhere else `decodeBase64Lenient` is used.
+
+- `encoding/pxf`: `getStringOption` and `getBoolOption` no longer panic
+  on a truncated fixed32/fixed64 field in a `FieldOptions` unknown-bytes
+  buffer. Both walked past the end of the slice on the skip arms; the
+  new `pxfFieldOptions` reader added the length checks for itself, and
+  these are its two siblings reading the same buffer through the public
+  `Default` / `KeyFieldName` / `IsRequired` accessors. Pinned by
+  `TestValidateFile_TruncatedUnknownOptionBytes`.
+
+- `encoding/pxf`: `(pxf.default)` on a repeated or map field returns an
+  error instead of panicking (#66, #67). The annotation carries a single
+  PXF literal, so `applyDefaultImpl` switched on `fd.Kind()` —
+  `StringKind` for `repeated string` — and handed a scalar to
+  `Message.Set`, which protoreflect rejects with a panic; any schema
+  with such a field crashed on its first decode of a document that left
+  the field absent. Defaults are an `UnmarshalFull` feature, so the
+  blast radius was `UnmarshalFull` / `UnmarshalFullDescriptor` and the
+  exported `ApplyDefault` — never plain `Unmarshal` /
+  `UnmarshalDescriptor`, which skip `postDecode` and so never apply
+  defaults at all. The guard sits in `applyDefaultImpl`, the shared body
+  behind both the in-tree and the exported entry point. Map fields
+  already errored, by accident — their `Kind()` is the synthetic
+  `MapEntry` message, so they landed in the unsupported-message-type
+  path; they now report the placement
+  (`default values not supported for map field "m"`) rather than the
+  entry type's name. Schemas whose annotated repeated field is always
+  present in the input are unaffected: a present field suppresses the
+  default, so the guard is unreachable. That last point is what #68
+  above supersedes — the placement is now a bind-time violation too, so
+  such a schema no longer lints green. The runtime guard stays
+  load-bearing for the exported `ApplyDefault`, which takes an arbitrary
+  descriptor its caller may never have validated, and for `SkipValidate`
+  callers.
+
 ### Added
 
 - `encoding/pxf`: `(pxf.default)` placement is a bind-time schema
@@ -217,55 +311,6 @@ format changes.
   one-element list, emitting `pb` bytes no other port emitted
   (trendvidia/protowire-rust#23, trendvidia/protowire-java#52,
   trendvidia/chameleon#131).
-
-### Fixed
-
-- `encoding/pxf`: a `(pxf.default)` on a `google.protobuf.BytesValue`
-  field now applies instead of failing the decode (#68).
-  `parseScalarDefault` — the wrapper-defaults path — had no `BytesKind`
-  branch, so the literal fell to its `default` arm and reported
-  `unsupported default kind bytes`, even though `applyDefaultImpl`'s own
-  `BytesKind` arm has always accepted a base64 literal for a plain
-  `bytes` field. Found while building #68's bind-time check: the walker
-  admits every wrapper type, so the gap would have let a schema bind
-  clean and then fail at decode. It was a documented divergence pinned in
-  `TestApplyDefault_WKTInvalidValue` ("a future change either supports it
-  or stays explicit about rejecting it"); this takes the supports-it
-  branch. Both `StdEncoding` and the URL/raw alphabets are accepted, as
-  everywhere else `decodeBase64Lenient` is used.
-
-- `encoding/pxf`: `getStringOption` and `getBoolOption` no longer panic
-  on a truncated fixed32/fixed64 field in a `FieldOptions` unknown-bytes
-  buffer. Both walked past the end of the slice on the skip arms; the
-  new `pxfFieldOptions` reader added the length checks for itself, and
-  these are its two siblings reading the same buffer through the public
-  `Default` / `KeyFieldName` / `IsRequired` accessors. Pinned by
-  `TestValidateFile_TruncatedUnknownOptionBytes`.
-
-- `encoding/pxf`: `(pxf.default)` on a repeated or map field returns an
-  error instead of panicking (#66, #67). The annotation carries a single
-  PXF literal, so `applyDefaultImpl` switched on `fd.Kind()` —
-  `StringKind` for `repeated string` — and handed a scalar to
-  `Message.Set`, which protoreflect rejects with a panic; any schema
-  with such a field crashed on its first decode of a document that left
-  the field absent. Defaults are an `UnmarshalFull` feature, so the
-  blast radius was `UnmarshalFull` / `UnmarshalFullDescriptor` and the
-  exported `ApplyDefault` — never plain `Unmarshal` /
-  `UnmarshalDescriptor`, which skip `postDecode` and so never apply
-  defaults at all. The guard sits in `applyDefaultImpl`, the shared body
-  behind both the in-tree and the exported entry point. Map fields
-  already errored, by accident — their `Kind()` is the synthetic
-  `MapEntry` message, so they landed in the unsupported-message-type
-  path; they now report the placement
-  (`default values not supported for map field "m"`) rather than the
-  entry type's name. Schemas whose annotated repeated field is always
-  present in the input are unaffected: a present field suppresses the
-  default, so the guard is unreachable. That last point is what #68
-  above supersedes — the placement is now a bind-time violation too, so
-  such a schema no longer lints green. The runtime guard stays
-  load-bearing for the exported `ApplyDefault`, which takes an arbitrary
-  descriptor its caller may never have validated, and for `SkipValidate`
-  callers.
 
 ## [1.3.2] — 2026-07-25
 
@@ -1267,7 +1312,10 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/trendvidia/protowire-go/compare/v1.3.2...v1.4.0
+[1.3.2]: https://github.com/trendvidia/protowire-go/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/trendvidia/protowire-go/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/trendvidia/protowire-go/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/trendvidia/protowire-go/compare/v1.2.1...v1.2.2
 [1.2.1]: https://github.com/trendvidia/protowire-go/compare/v1.2.0...v1.2.1
