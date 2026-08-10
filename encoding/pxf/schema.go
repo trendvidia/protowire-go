@@ -3,7 +3,7 @@
 
 package pxf
 
-// PXF schema-level conformance checks. Three families, all reported as
+// PXF schema-level conformance checks. Four families, all reported as
 // [Violation] and all enforced at descriptor-bind time:
 //
 //   - Reserved names (draft-trendvidia-protowire-00 §3.13). A protobuf
@@ -13,7 +13,11 @@ package pxf
 //     so the declared element is unreachable from PXF surface syntax.
 //   - (pxf.key) placement (draft -01 §3.13), see [checkKeyOption].
 //   - (pxf.default) placement (draft -01 §annotation-extensions,
-//     "Default Placement"), see [checkDefaultOption].
+//     "Default Placement"), see [checkDefaultOption]; plus the cap of
+//     one (pxf.default) per oneof (same section, "Oneof Members"), see
+//     [checkOneofDefaultCap].
+//   - (pxf.required) placement (draft -01 §annotation-extensions,
+//     "Oneof Members"): not valid on a member of a oneof at all.
 //
 // Enforcement runs at descriptor-bind time inside [Unmarshal] /
 // [UnmarshalDescriptor] / [UnmarshalFull] / [UnmarshalFullDescriptor].
@@ -113,7 +117,7 @@ func (k ViolationKind) String() string {
 
 // Violation describes one schema element that fails a PXF bind-time
 // check: a name colliding with a reserved PXF keyword, or an invalid
-// (pxf.key) or (pxf.default) placement. Returned by
+// (pxf.key), (pxf.default) or (pxf.required) placement. Returned by
 // [ValidateDescriptor].
 type Violation struct {
 	// File is the .proto file path the offending element is declared in.
@@ -123,13 +127,18 @@ type Violation struct {
 	Element string
 	// Name is the bare reserved identifier ("null" / "true" / "false")
 	// for reserved-name violations, the (pxf.key) annotation value for
-	// ViolationKeyOption, or the (pxf.default) literal for
-	// ViolationDefaultOption.
+	// ViolationKeyOption, the (pxf.default) literal for
+	// ViolationDefaultOption, or the containing oneof's bare name for
+	// ViolationRequiredOption. [Violation.String] does not render it in
+	// the last case — Detail already names the oneof — so a caller
+	// formatting violations itself should print one or the other, not
+	// both.
 	Name string
 	// Kind is the kind of element that collided.
 	Kind ViolationKind
-	// Detail is a human-readable explanation; set only for
-	// ViolationKeyOption and ViolationDefaultOption.
+	// Detail is a human-readable explanation; set for ViolationKeyOption,
+	// ViolationDefaultOption and ViolationRequiredOption, empty for the
+	// reserved-name kinds.
 	Detail string
 }
 
@@ -153,10 +162,13 @@ func (v Violation) String() string {
 // ValidateDescriptor walks the file containing desc and returns every
 // bind-time violation declared in that file: reserved-name collisions
 // among messages, oneofs, and enum values; invalid (pxf.key) placements
-// (draft -01 §3.13); and invalid (pxf.default) placements (draft -01
-// §annotation-extensions, "Default Placement"). The returned slice is
-// sorted by element fully-qualified name for stable output. A nil/empty
-// slice means the schema is conformant.
+// (draft -01 §3.13); invalid (pxf.default) placements (draft -01
+// §annotation-extensions, "Default Placement"); and the two oneof rules
+// of that section's "Oneof Members" — at most one member of any one
+// oneof may carry (pxf.default), and (pxf.required) is not valid on a
+// oneof member at all. The returned slice is sorted by element
+// fully-qualified name for stable output. A nil/empty slice means the
+// schema is conformant.
 //
 // The reserved-name check is case-sensitive: identifiers such as "NULL"
 // or "True" lex as ordinary identifiers and are accepted.
@@ -181,10 +193,12 @@ func ValidateFile(fd protoreflect.FileDescriptor) []Violation {
 	var out []Violation
 	walkMessages(fd.Path(), fd.Messages(), &out)
 	walkEnums(fd.Path(), fd.Enums(), &out)
-	// SliceStable, not Slice: one field can now yield up to three
+	// SliceStable, not Slice: one field can now yield up to four
 	// violations sharing an Element (reserved name, (pxf.key),
-	// (pxf.default)), and only a stable sort makes the documented
-	// "sorted for stable output" true for those ties.
+	// (pxf.default) placement, and one of the two oneof rules), and only
+	// a stable sort makes the documented "sorted for stable output" true
+	// for those ties. walkMessages appends in a deterministic order, so
+	// stability is enough — see [checkOneofDefaultCap].
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].Element < out[j].Element
 	})
@@ -192,14 +206,14 @@ func ValidateFile(fd protoreflect.FileDescriptor) []Violation {
 }
 
 func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Violation) {
-	// Members of each oneof that carry (pxf.default), collected during the
-	// field pass and checked once the message's fields are known. Declared
-	// out here and cleared per message so the common schema — no oneof
-	// defaults anywhere — never allocates it.
-	var oneofDefaults map[protoreflect.FullName][]protoreflect.FieldDescriptor
 	for i := range msgs.Len() {
 		md := msgs.Get(i)
 		fields := md.Fields()
+		// Members of this message's oneofs that carry (pxf.default),
+		// collected during the field pass and capped once the message's
+		// fields are known. nil until some member has one, so the common
+		// schema — no oneof defaults anywhere — never allocates.
+		var oneofDefaults []oneofDefault
 		for j := range fields.Len() {
 			f := fields.Get(j)
 			name := string(f.Name())
@@ -233,41 +247,11 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 					})
 				}
 				if opts.defSet {
-					if oneofDefaults == nil {
-						oneofDefaults = map[protoreflect.FullName][]protoreflect.FieldDescriptor{}
-					}
-					oneofDefaults[oo.FullName()] = append(oneofDefaults[oo.FullName()], f)
+					oneofDefaults = append(oneofDefaults, oneofDefault{oneof: oo, field: f, def: opts.def})
 				}
 			}
 		}
-		// A oneof may carry at most one (pxf.default) among its members
-		// (draft -01 §annotation-extensions, "Oneof Members"). Reported on
-		// every offending member rather than on the oneof, so the author
-		// sees each annotation to remove and Violation.String stays a
-		// field-shaped message.
-		for _, members := range oneofDefaults {
-			if len(members) < 2 {
-				continue
-			}
-			names := make([]string, len(members))
-			for k, m := range members {
-				names[k] = string(m.Name())
-			}
-			oo := members[0].ContainingOneof()
-			for _, m := range members {
-				def, _ := Default(m)
-				*out = append(*out, Violation{
-					File:    path,
-					Element: string(m.FullName()),
-					Name:    def,
-					Kind:    ViolationDefaultOption,
-					Detail: fmt.Sprintf(
-						"at most one member of oneof %q may carry (pxf.default); %d do (%s)",
-						oo.Name(), len(members), strings.Join(names, ", ")),
-				})
-			}
-		}
-		clear(oneofDefaults)
+		checkOneofDefaultCap(path, oneofDefaults, out)
 		oneofs := md.Oneofs()
 		for j := range oneofs.Len() {
 			o := oneofs.Get(j)
@@ -286,6 +270,65 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 		}
 		walkMessages(path, md.Messages(), out)
 		walkEnums(path, md.Enums(), out)
+	}
+}
+
+// oneofDefault is one oneof member carrying (pxf.default), recorded
+// during walkMessages' field pass. def rides along because
+// [pxfFieldOptions] already read it — re-deriving it with [Default]
+// would spend a second full pass over the field's options, which is the
+// cost pxfFieldOptions exists to avoid.
+type oneofDefault struct {
+	oneof protoreflect.OneofDescriptor
+	field protoreflect.FieldDescriptor
+	def   string
+}
+
+// checkOneofDefaultCap reports every member of a oneof that carries
+// (pxf.default) when a sibling carries one too: at most one member of
+// any one oneof may carry it (draft -01 §annotation-extensions, "Oneof
+// Members"). With two, some default must win, and deciding by
+// declaration order or field number would attach meaning to a detail
+// authors are free to change — so the schema is rejected instead.
+//
+// Reported on every offending member rather than once on the oneof, so
+// the author sees each annotation to remove and [Violation.String] stays
+// a field-shaped message.
+//
+// annotated holds one entry per annotated oneof member of a single
+// message in field-declaration order; entries for one oneof need not be
+// adjacent, so grouping needs the map. Groups are emitted at their first
+// member's position, which keeps the appended order independent of map
+// iteration order.
+func checkOneofDefaultCap(path string, annotated []oneofDefault, out *[]Violation) {
+	if len(annotated) < 2 {
+		return // no oneof in this message can hold two
+	}
+	byOneof := make(map[protoreflect.FullName][]oneofDefault, len(annotated))
+	for _, a := range annotated {
+		byOneof[a.oneof.FullName()] = append(byOneof[a.oneof.FullName()], a)
+	}
+	for _, a := range annotated {
+		members := byOneof[a.oneof.FullName()]
+		if len(members) < 2 || members[0].field.Number() != a.field.Number() {
+			continue // conformant, or already reported from its first member
+		}
+		names := make([]string, len(members))
+		for k, m := range members {
+			names[k] = string(m.field.Name())
+		}
+		detail := fmt.Sprintf(
+			"at most one member of oneof %q may carry (pxf.default); %d do (%s)",
+			a.oneof.Name(), len(members), strings.Join(names, ", "))
+		for _, m := range members {
+			*out = append(*out, Violation{
+				File:    path,
+				Element: string(m.field.FullName()),
+				Name:    m.def,
+				Kind:    ViolationDefaultOption,
+				Detail:  detail,
+			})
+		}
 	}
 }
 

@@ -59,6 +59,14 @@ func IsKeyed(fd protoreflect.FieldDescriptor) bool {
 // IsRequired reports whether the field has (pxf.required) = true.
 // Exported for layered-config consumers (e.g. chameleon) that run
 // their own post-merge required-validation pass with SkipPostDecode.
+//
+// The annotation is reported wherever the author wrote it, including on
+// a member of a oneof — a placement draft -01 §annotation-extensions
+// ("Oneof Members") forbids outright, because read per field it demands
+// that one specific arm always be chosen and so makes every other arm
+// undecodable. [ValidateFile] rejects that schema as
+// ViolationRequiredOption at bind time; this accessor reports what the
+// schema author wrote, which is what tooling needs for diagnostics.
 func IsRequired(fd protoreflect.FieldDescriptor) bool {
 	return getBoolOption(fd, extRequired)
 }
@@ -74,6 +82,16 @@ func IsRequired(fd protoreflect.FieldDescriptor) bool {
 // ViolationDefaultOption at bind time and [ApplyDefault] rejects those
 // fds at runtime; this accessor reports what the schema author wrote,
 // which is what tooling (protolsp, protocheck) needs for diagnostics.
+//
+// A caller applying the returned default itself owes the oneof rule of
+// draft -01 §annotation-extensions ("Oneof Members"): if fd is a member
+// of a non-synthetic oneof, the default MUST NOT be applied when any
+// member of that oneof is present, because setting one member clears the
+// rest and the default would destroy the chosen arm rather than shadow
+// it (#72). postDecode gets this from its own presence map; a
+// SkipPostDecode consumer has the same information in
+// [Result.PresentFields] (a member bound to null counts as present) and
+// must apply the same test. See [ApplyDefault].
 func Default(fd protoreflect.FieldDescriptor) (string, bool) {
 	return getStringOption(fd, extDefault)
 }
@@ -175,6 +193,13 @@ type pxfOptions struct {
 	required bool
 }
 
+// settled reports whether nothing further in fd's options could change
+// the result, so a reader may stop where it stands. required needs no
+// "set" flag here for the same reason it has none on the struct: once it
+// is true, a later `= false` would not be actionable — while it is
+// false, the scan must go on, since an unread `= true` still would be.
+func (o pxfOptions) settled() bool { return o.keySet && o.defSet && o.required }
+
 // pxfFieldOptions reads the (pxf.key), (pxf.default) and (pxf.required)
 // extensions from fd's options in a single pass.
 //
@@ -199,6 +224,10 @@ type pxfOptions struct {
 // which measured +71% allocs/op on BenchmarkPXFUnmarshal. Declared here
 // the cost lands only on fields that actually have options, which is
 // what getStringOption has always done.
+//
+// Both loops stop once [pxfOptions.settled] holds: there is nothing left
+// to learn, and neither loop is bounded by anything but the number of
+// options the author wrote.
 func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
 	if !ok || opts == nil {
@@ -218,14 +247,17 @@ func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 		case extRequired:
 			got.required = v.Bool()
 		}
-		return true
+		return !got.settled()
 	})
+	if got.settled() {
+		return got
+	}
 
 	// Fallback: parse raw unknown bytes (protoc / descriptor-based). Fills
 	// only what the known-field pass did not, and is skipped entirely when
 	// there are no unknown bytes — the protocompile case.
 	b := rm.GetUnknown()
-	for len(b) > 0 {
+	for len(b) > 0 && !got.settled() {
 		fnum, wtype, n := protowire.ConsumeTag(b)
 		if n < 0 {
 			break

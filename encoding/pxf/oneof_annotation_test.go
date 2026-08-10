@@ -10,7 +10,11 @@ import (
 	"github.com/bufbuild/protocompile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
@@ -236,6 +240,95 @@ func TestValidateDescriptor_RequiredOnOneofMember(t *testing.T) {
 
 func TestViolationKind_RequiredOptionString(t *testing.T) {
 	assert.Equal(t, "required field option", pxf.ViolationRequiredOption.String())
+}
+
+// requiredFromUnknownBytes is a FieldOptions carrying only
+// (pxf.required) = true as raw wire bytes — the shape a protoc-produced
+// FileDescriptorSet has, where nothing resolved the extension into a
+// known field.
+func requiredFromUnknownBytes() *descriptorpb.FieldOptions {
+	raw := protowire.AppendVarint(protowire.AppendTag(nil, 50000, protowire.VarintType), 1)
+	opts := &descriptorpb.FieldOptions{}
+	opts.ProtoReflect().SetUnknown(protoreflect.RawFields(raw))
+	return opts
+}
+
+// Every other (pxf.required) test compiles with protocompile, which
+// resolves the extension into a known field — so only pxfFieldOptions'
+// Range arm runs. protoc-produced descriptors reach the same annotation
+// through the unknown-bytes varint arm instead, which is the path a real
+// FileDescriptorSet takes. Without this the arm could be inverted,
+// mis-numbered or absent and the whole package would still pass.
+func TestValidateFile_RequiredOnOneofMemberFromUnknownBytes(t *testing.T) {
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("unknownrequired.proto"),
+		Package: proto.String("unknownrequired_test.v1"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name:      proto.String("RequiredMember"),
+			OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("choice")}},
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:       proto.String("a"),
+				Number:     proto.Int32(1),
+				JsonName:   proto.String("a"),
+				Label:      descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:       descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				OneofIndex: proto.Int32(0),
+				Options:    requiredFromUnknownBytes(),
+			}, {
+				Name:       proto.String("b"),
+				Number:     proto.Int32(2),
+				JsonName:   proto.String("b"),
+				Label:      descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:       descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				OneofIndex: proto.Int32(0),
+			}},
+		}},
+	}
+	fd, err := protodesc.NewFile(fdp, nil)
+	require.NoError(t, err)
+
+	vs := pxf.ValidateFile(fd)
+	require.Len(t, vs, 1, "%v", vs)
+	assert.Equal(t, pxf.ViolationRequiredOption, vs[0].Kind)
+	assert.Equal(t, "unknownrequired_test.v1.RequiredMember.a", vs[0].Element)
+	assert.Equal(t, "choice", vs[0].Name)
+	assert.Contains(t, vs[0].Detail, `(pxf.required) is not valid on a member of oneof "choice"`)
+}
+
+// The synthetic oneof a proto3 `optional` field sits in is excluded from
+// the oneof rules for (pxf.required) exactly as it is for
+// (pxf.default): nothing else can clear the field, so the per-field
+// reading of "absent" still holds and the annotation stays legal.
+// Reached through the unknown-bytes arm, so realOneof's IsSynthetic
+// guard is pinned on both option-reading paths.
+func TestValidateFile_RequiredOnProto3OptionalIsClean(t *testing.T) {
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name:    proto.String("syntheticrequired.proto"),
+		Package: proto.String("syntheticrequired_test.v1"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name:      proto.String("OptionalMember"),
+			OneofDecl: []*descriptorpb.OneofDescriptorProto{{Name: proto.String("_opt")}},
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:           proto.String("opt"),
+				Number:         proto.Int32(1),
+				JsonName:       proto.String("opt"),
+				Label:          descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:           descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				OneofIndex:     proto.Int32(0),
+				Proto3Optional: proto.Bool(true),
+				Options:        requiredFromUnknownBytes(),
+			}},
+		}},
+	}
+	fd, err := protodesc.NewFile(fdp, nil)
+	require.NoError(t, err)
+	require.True(t, fd.Messages().Get(0).Oneofs().Get(0).IsSynthetic(), "fixture must be a synthetic oneof")
+
+	assert.Empty(t, pxf.ValidateFile(fd))
+	assert.True(t, pxf.IsRequired(fd.Messages().Get(0).Fields().Get(0)),
+		"the annotation is still read — it is the oneof rule that does not apply")
 }
 
 // SkipValidate bypasses the bind-time cap, so an invalid two-default

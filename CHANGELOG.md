@@ -117,9 +117,22 @@ format changes.
   unusable. Its only coherent reading, "the oneof must be set", is a
   property of the oneof, and neither the spec nor this port has an
   annotation at that scope; forbidding the member placement keeps a
-  future oneof-scoped annotation additive. Both narrow what binds, and
-  `SkipValidate` remains the all-or-nothing escape hatch — the runtime
-  rule above still protects written input under it.
+  future oneof-scoped annotation additive.
+
+  Both narrow what binds, and `SkipValidate` remains the all-or-nothing
+  escape hatch — but the two are not equally defended under it. The
+  `(pxf.default)` rule above is a *runtime* rule as well, so written
+  input survives `SkipValidate`. `(pxf.required)` on a oneof member has
+  no runtime counterpart, deliberately: the spec's answer for a rejected
+  placement is to reject the schema, and implementations MUST NOT invent
+  a semantics for one (draft `-01` §annotation-extensions). Reading it as
+  "some arm must be chosen" is a plausible invention, and a port-only one
+  would be a sixth divergent answer rather than a fix. So under
+  `SkipValidate` — and, until #71 lands, for an annotated field of a type
+  declared in an *imported* `.proto`, which the file-scoped walker never
+  sees — such a schema still rejects every document that chooses another
+  arm, with `required field "a" is absent`. That is the pre-existing
+  behaviour this release forbids at bind time, not a new one.
 
   Spec text landed first, in the same cycle: trendvidia/protowire#223
   states the constraint (draft `-01` §annotation-extensions, "Default
@@ -152,7 +165,7 @@ format changes.
 - `encoding/pxf`: `getStringOption` and `getBoolOption` no longer panic
   on a truncated fixed32/fixed64 field in a `FieldOptions` unknown-bytes
   buffer. Both walked past the end of the slice on the skip arms; the
-  new `pxfStringOptions` reader added the length checks for itself, and
+  new `pxfFieldOptions` reader added the length checks for itself, and
   these are its two siblings reading the same buffer through the public
   `Default` / `KeyFieldName` / `IsRequired` accessors. Pinned by
   `TestValidateFile_TruncatedUnknownOptionBytes`.

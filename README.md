@@ -169,7 +169,7 @@ Both honor the three-state cell semantics (empty / `null` / value), bind WKT tim
 
 ### Schema bind-time checks
 
-Three families of schema defect are rejected before the decoder looks at the document:
+These families of schema defect are rejected before the decoder looks at the document:
 
 | Check | Rule |
 | --- | --- |

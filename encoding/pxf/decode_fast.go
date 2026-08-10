@@ -1744,6 +1744,15 @@ func oneofAlreadyChosen(fd protoreflect.FieldDescriptor, result *Result, pathPre
 // Exported for layered-config consumers (e.g. chameleon) that run a
 // post-merge defaults pass with [UnmarshalOptions.SkipPostDecode].
 // In-tree callers (postDecode) use the lowercase alias.
+//
+// Such a caller owes one guard this function cannot make for it: when fd
+// is a member of a non-synthetic oneof, do not call this unless *no*
+// member of that oneof is present (draft -01 §annotation-extensions,
+// "Oneof Members"). Setting one member of a oneof clears the rest, so
+// applying a default over a chosen sibling destroys the merged value
+// rather than shadowing it — the #72 bug, reachable through this entry
+// point. [Result.PresentFields] carries the presence set postDecode
+// tests, with a member bound to null counting as present.
 func ApplyDefault(msg protoreflect.Message, fd protoreflect.FieldDescriptor, def string) error {
 	return applyDefaultImpl(msg, fd, def)
 }
