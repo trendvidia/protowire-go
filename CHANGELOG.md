@@ -13,6 +13,81 @@ format changes.
 
 ### Fixed
 
+- `encoding/pxf`: bind-time schema checks now cover the **transitive
+  import closure**, not just the file declaring the bound descriptor
+  (#71). `ValidateFile` walked `fd.Messages()` and `fd.Enums()` of one
+  file, while `postDecode` recurses into every present message-typed
+  field — so a defect on a type declared in an imported `.proto` was
+  never reported:
+
+  ```proto
+  // imported.proto
+  message Inner { repeated string tags = 1 [(pxf.default) = "ignored"]; }
+  // test.proto
+  message Root  { defaultimported_test.v1.Inner inner = 1; }
+  ```
+
+  `ValidateDescriptor(Root)` returned clean; decoding `inner { }` hit
+  the #66 decode-time guard; and decoding an **empty document** produced
+  no error and no diagnostic at all. That last case is what #68's
+  premise rules out — a schema whose annotated field happens to be
+  absent from, or present in, every document it sees carries a dead
+  annotation indefinitely without one — and draft `-01`
+  §default-schema-placement answers it with *"MUST reject … at bind
+  time, independently of what any document contains"*. Through an
+  imported type the MUST was not met.
+
+  The widening is not specific to `(pxf.default)`: the same file
+  scoping had applied to the reserved-name check since it landed and to
+  `(pxf.key)` since keyed repeated fields landed, so a field named
+  `null` in an imported message was equally unreported and is now
+  caught. A file reached twice through the import graph is checked once,
+  and `Violation.File` names the file that *declares* the element rather
+  than the file that was bound. `ValidateFile`'s output is now sorted by
+  declaring file and then by element, so one file's violations stay
+  together; within a single file the order is exactly what it was.
+
+  **This narrows what binds, and it is the widest narrowing of the
+  #66/#67/#68/#69/#72 family.** Before, one bad placement made one file
+  non-bindable; now it makes every file that transitively imports it
+  non-bindable, so a stale annotation in a widely-imported `common.proto`
+  fails a whole schema set at once. That is the intent rather than a
+  side effect — a widely-imported file is where a dead annotation does
+  the most damage — but it means the cleanup before upgrading is larger
+  than the per-file diagnostics of previous releases suggest. Migration
+  is unchanged: the error names the offending field by fully-qualified
+  name, and the fix is deleting the annotation or moving it to a
+  singular field.
+
+  **Decoding got faster, not slower**, which inverts the hot-path
+  objection that kept this out of #69. `ValidateFile` runs per decode
+  for every caller that does not set `SkipValidate`, and an unmemoized
+  closure walk costs ~10.4 µs against a ~6 µs decode — every schema
+  using the annotations imports `pxf/annotations.proto` and through it
+  `google/protobuf/descriptor.proto`, 54 messages and enums no PXF
+  document can name. Results are therefore memoized at two grains: the
+  finished closure result per bound file (the hot path, ~9 ns and no
+  allocation), and each file's own violations underneath it, so a miss
+  costs a traversal rather than a walk and a registry-load pass pays for
+  `descriptor.proto` once. Measured with `benchstat`, n=10:
+  `PXFUnmarshal` −5.61% (p=0.001), `PXFUnmarshalKeyed` −8.53%
+  (p=0.000), allocations unchanged. The memo is keyed on descriptor
+  identity, not path — two registries can hold different files at one
+  path — and is bounded, because a live entry keeps a descriptor's whole
+  graph alive; callers that compile descriptors per request should
+  pre-validate and set `SkipValidate`.
+
+  Spec side: trendvidia/protowire#228 adds draft `-01`
+  §schema-constraints "Scope of Bind-Time Checks", which states the
+  scope once for every bind-time check rather than per annotation, and
+  records why reachability-scoping was rejected — a
+  `google.protobuf.Any` payload type is named by the document and
+  resolved at decode time, so the reachable set is not a function of the
+  descriptor. Measured before drafting: all four ports scoped to the
+  declaring file, and protowire-rust, protowire-java and
+  protowire-typescript have not implemented the placement checks at all
+  yet, so they can adopt the closure scope directly.
+
 - `encoding/pxf`: a `(pxf.default)` on a oneof member no longer destroys
   the arm the document chose (#72). Setting any member of a oneof clears
   the others, and `postDecode` tested presence *per field* with no notion
@@ -80,20 +155,17 @@ format changes.
   it to a singular field; the error names the offending field by
   fully-qualified name.
 
-  **One hole is left open deliberately.** `ValidateFile` walks a single
-  file, not the transitive import closure, so a misplaced `(pxf.default)`
-  on a message type declared in an *imported* `.proto` is not reported at
-  bind time — even though `postDecode` recurses into that type and
-  applies its defaults. Through such a field the pre-#68 behaviour is
-  what remains: the #66 decode-time error for a document that leaves the
-  field absent, and no diagnostic at all for one that does not. The same
-  scoping has always applied to the reserved-name and `(pxf.key)` checks.
-  Widening the walk to the import closure runs on every decode that does
-  not set `SkipValidate`, so it is a hot-path and compatibility decision
-  wanting the same spec-first treatment #68 got; pinned meanwhile by
-  `TestValidateDescriptor_ImportedFileIsNotWalked`. Callers that need the
-  whole closure covered can call `ValidateFile` per `FileDescriptor` in a
-  registry-load pass.
+  **One hole was left open deliberately, and #71 below closes it.** As
+  shipped for #68, `ValidateFile` walked a single file rather than the
+  transitive import closure, so a misplaced `(pxf.default)` on a message
+  type declared in an *imported* `.proto` went unreported at bind time
+  even though `postDecode` recurses into that type and applies its
+  defaults — as did a reserved name or a bad `(pxf.key)` there, both
+  file-scoped since they landed. Widening the walk was held for the
+  spec-first treatment #68 got, and pinned meanwhile by
+  `TestValidateDescriptor_ImportedFileIsNotWalked`. Both happened: the
+  scope is now normative (trendvidia/protowire#228) and the walk covers
+  the closure, so within this release the hole never reaches a user.
 
   The walker reads every annotation in a single pass over each field's
   options (`pxfFieldOptions`), because `ValidateFile` runs per field on
@@ -128,11 +200,11 @@ format changes.
   a semantics for one (draft `-01` §annotation-extensions). Reading it as
   "some arm must be chosen" is a plausible invention, and a port-only one
   would be a sixth divergent answer rather than a fix. So under
-  `SkipValidate` — and, until #71 lands, for an annotated field of a type
-  declared in an *imported* `.proto`, which the file-scoped walker never
-  sees — such a schema still rejects every document that chooses another
-  arm, with `required field "a" is absent`. That is the pre-existing
-  behaviour this release forbids at bind time, not a new one.
+  `SkipValidate` — the only remaining gap, now that #71 has the walker
+  covering imported types too — such a schema still rejects every
+  document that chooses another arm, with `required field "a" is
+  absent`. That is the pre-existing behaviour this release forbids at
+  bind time, not a new one.
 
   Spec text landed first, in the same cycle: trendvidia/protowire#223
   states the constraint (draft `-01` §annotation-extensions, "Default

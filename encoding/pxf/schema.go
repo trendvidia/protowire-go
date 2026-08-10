@@ -24,11 +24,22 @@ package pxf
 // Callers that have already validated their descriptors (typically via
 // [ValidateDescriptor] in a one-time codegen or registry-load pass) may
 // set [UnmarshalOptions.SkipValidate] to bypass the per-call recheck.
+//
+// All three families are scoped to the import closure of the bound
+// descriptor, not to the file declaring it (draft -01
+// §schema-constraints, "Scope of Bind-Time Checks"): a violation in an
+// imported .proto is reported, and [Violation.File] names the file that
+// declares it. Per-file results are memoized, so the closure walk costs
+// less than the single-file walk it replaced.
 
 import (
 	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -159,24 +170,30 @@ func (v Violation) String() string {
 		v.File, v.Kind, v.Element, v.Name)
 }
 
-// ValidateDescriptor walks the file containing desc and returns every
-// bind-time violation declared in that file: reserved-name collisions
-// among messages, oneofs, and enum values; invalid (pxf.key) placements
-// (draft -01 §3.13); invalid (pxf.default) placements (draft -01
-// §annotation-extensions, "Default Placement"); and the two oneof rules
-// of that section's "Oneof Members" — at most one member of any one
-// oneof may carry (pxf.default), and (pxf.required) is not valid on a
-// oneof member at all. The returned slice is sorted by element
-// fully-qualified name for stable output. A nil/empty slice means the
-// schema is conformant.
+// ValidateDescriptor walks the file containing desc together with its
+// transitive imports, and returns every bind-time violation in that
+// closure: reserved-name collisions among messages, oneofs, and enum
+// values; invalid (pxf.key) placements (draft -01 §3.13); invalid
+// (pxf.default) placements (draft -01 §annotation-extensions, "Default
+// Placement"); and the two oneof rules of that section's "Oneof
+// Members" — at most one member of any one oneof may carry
+// (pxf.default), and (pxf.required) is not valid on a oneof member at
+// all. The returned slice is sorted by declaring file path and then by
+// element fully-qualified name, for stable output. A nil/empty slice
+// means the schema is conformant.
 //
 // The reserved-name check is case-sensitive: identifiers such as "NULL"
 // or "True" lex as ordinary identifiers and are accepted.
 //
-// Scope is desc's own file, not the transitive import closure: a
-// violation on a message type declared in an imported .proto is not
-// reported here, even when a field of desc refers to it. The decode-time
-// guards in [ApplyDefault] and postDecode are what remain for those.
+// Scope is the import closure, per draft -01 §schema-constraints ("Scope
+// of Bind-Time Checks"): a misplaced annotation on a message type
+// declared in an imported .proto is reported here, whether or not any
+// field of desc refers to that type. [Violation.File] names the file
+// that declares the offending element, which need not be desc's own.
+//
+// Results are memoized per descriptor, so this costs less than the
+// single-file walk it replaced. The returned slice is a fresh copy on
+// every call and callers may modify it.
 func ValidateDescriptor(desc protoreflect.MessageDescriptor) []Violation {
 	if desc == nil {
 		return nil
@@ -184,24 +201,161 @@ func ValidateDescriptor(desc protoreflect.MessageDescriptor) []Violation {
 	return ValidateFile(desc.ParentFile())
 }
 
-// ValidateFile walks fd and returns every bind-time violation in the
-// file. See [ValidateDescriptor] for the rules and semantics.
+// ValidateFile walks fd and its transitive imports, and returns every
+// bind-time violation in that closure. See [ValidateDescriptor] for the
+// rules and the scope.
+//
+// Deduplication is by path rather than by descriptor identity: within
+// one closure a path names one file, and the diamond — A imports B and
+// C, both importing D — is the common shape that would otherwise report
+// D's violations twice.
 func ValidateFile(fd protoreflect.FileDescriptor) []Violation {
 	if fd == nil {
 		return nil
 	}
+	if vs, hit := loadCached(&closureValidationCache, fd); hit {
+		// Clone so the result stays caller-owned. A conformant closure
+		// caches as nil, and cloning nil neither allocates nor copies —
+		// which is the whole hot path, since a non-empty result fails
+		// the decode that asked for it.
+		return slices.Clone(vs)
+	}
+	var w closureWalk
+	w.walk(fd)
+	out := w.out
+	// SliceStable, not Slice: one field can yield up to four violations
+	// sharing an Element (reserved name, (pxf.key), (pxf.default)
+	// placement, and one of the two oneof rules), and only a stable sort
+	// makes the documented "sorted for stable output" true for those
+	// ties. [fileViolations] appends in walk order and leaves sorting to
+	// here, so stability is enough — see [checkOneofDefaultCap]. File
+	// first, so a multi-file closure reports one file's violations
+	// together; within a file this orders exactly as the single-file
+	// walk did before the closure landed.
+	if len(out) > 1 {
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].File != out[j].File {
+				return out[i].File < out[j].File
+			}
+			return out[i].Element < out[j].Element
+		})
+	}
+	out = slices.Clip(out)
+	storeCached(&closureValidationCache, &closureValidationCount, fd, out)
+	return slices.Clone(out)
+}
+
+// closureWalk carries the state of one [ValidateFile] traversal. It is a
+// struct with a method rather than a recursive closure literal because
+// the latter heap-allocates its func value per call — which mattered
+// before the closure cache landed in front of it, and costs nothing to
+// keep.
+type closureWalk struct {
+	// seen holds the paths already walked. Import closures are small — a
+	// handful of files even for schemas that import widely — so a linear
+	// scan beats a map.
+	seen []string
+	out  []Violation
+}
+
+func (w *closureWalk) walk(fd protoreflect.FileDescriptor) {
+	// A placeholder stands in for an import that failed to resolve. It
+	// declares nothing and imports nothing, so there is neither anything
+	// to check nor anywhere to recurse.
+	if fd == nil || fd.IsPlaceholder() {
+		return
+	}
+	path := fd.Path()
+	if slices.Contains(w.seen, path) {
+		return
+	}
+	w.seen = append(w.seen, path)
+	w.out = append(w.out, fileViolations(fd)...)
+	imps := fd.Imports()
+	for i := range imps.Len() {
+		w.walk(imps.Get(i).FileDescriptor)
+	}
+}
+
+// Bind-time validation is memoized at two grains, because [ValidateFile]
+// runs per decode for every caller that does not set SkipValidate and
+// the closure walk is far too expensive to repeat there. Measured on an
+// ordinary annotated schema, walking the closure costs ~10us — more than
+// a whole decode of a comparable document — because every schema using
+// the annotations imports pxf/annotations.proto and through it
+// google/protobuf/descriptor.proto, 54 messages and enums no PXF
+// document can name.
+//
+//   - closureValidationCache holds the finished result for a bound file.
+//     It is the hot path: a hit skips the traversal outright.
+//   - fileValidationCache holds one file's own violations, and is what
+//     the traversal consults. It makes a closure-cache miss cheap rather
+//     than catastrophic — the shared imports are walked once per process
+//     however many schemas pull them in — so a registry-load pass over
+//     many descriptors pays for descriptor.proto once, not once per
+//     descriptor, and a caller past the bound below still decodes at
+//     traversal cost rather than at walk cost.
+//
+// The bound exists because the key is a descriptor, and a live entry
+// keeps that descriptor's whole graph alive. Callers that compile
+// descriptors dynamically would otherwise hand these maps an unbounded
+// number of them; they are also the callers for whom re-walking is
+// noise, having just paid milliseconds to compile. Callers with a fixed
+// schema set never approach the bound, and hold their descriptors
+// anyway.
+//
+// Descriptors are immutable, so a cached result never goes stale.
+const maxCachedDescriptors = 4096
+
+var (
+	closureValidationCache sync.Map // protoreflect.FileDescriptor -> []Violation
+	closureValidationCount atomic.Int64
+	fileValidationCache    sync.Map // protoreflect.FileDescriptor -> []Violation
+	fileValidationCount    atomic.Int64
+)
+
+// loadCached reads fd's entry from c. The comparability guard is not
+// decoration: a sync.Map panics on an unhashable key, and
+// protoreflect.FileDescriptor is an interface any caller may implement.
+// Every implementation in practice is pointer-backed and hashes fine;
+// one that is not simply goes uncached.
+func loadCached(c *sync.Map, fd protoreflect.FileDescriptor) ([]Violation, bool) {
+	if !reflect.TypeOf(fd).Comparable() {
+		return nil, false
+	}
+	vs, hit := c.Load(fd)
+	if !hit {
+		return nil, false
+	}
+	return vs.([]Violation), true
+}
+
+func storeCached(c *sync.Map, n *atomic.Int64, fd protoreflect.FileDescriptor, vs []Violation) {
+	if !reflect.TypeOf(fd).Comparable() || n.Load() >= maxCachedDescriptors {
+		return
+	}
+	if _, loaded := c.LoadOrStore(fd, vs); !loaded {
+		n.Add(1)
+	}
+}
+
+// fileViolations returns the violations declared in fd itself, ignoring
+// its imports. The result is memoized and shared between callers and
+// must not be modified; [closureWalk.walk] only ever appends it into a
+// slice of its own.
+func fileViolations(fd protoreflect.FileDescriptor) []Violation {
+	if vs, hit := loadCached(&fileValidationCache, fd); hit {
+		return vs
+	}
 	var out []Violation
-	walkMessages(fd.Path(), fd.Messages(), &out)
-	walkEnums(fd.Path(), fd.Enums(), &out)
-	// SliceStable, not Slice: one field can now yield up to four
-	// violations sharing an Element (reserved name, (pxf.key),
-	// (pxf.default) placement, and one of the two oneof rules), and only
-	// a stable sort makes the documented "sorted for stable output" true
-	// for those ties. walkMessages appends in a deterministic order, so
-	// stability is enough — see [checkOneofDefaultCap].
-	sort.SliceStable(out, func(i, j int) bool {
-		return out[i].Element < out[j].Element
-	})
+	path := fd.Path()
+	walkMessages(path, fd.Messages(), &out)
+	walkEnums(path, fd.Enums(), &out)
+	// Deliberately unsorted: [ValidateFile] sorts the assembled closure
+	// once, and walkMessages appends deterministically, so a per-file
+	// sort here would be redundant work on the miss path.
+	out = slices.Clip(out)
+	storeCached(&fileValidationCache, &fileValidationCount, fd, out)
 	return out
 }
 
@@ -389,10 +543,9 @@ func checkKeyOption(path string, f protoreflect.FieldDescriptor, keyName string,
 // lockstep: the message-type arm defers to [defaultableMessage], which is
 // the same predicate applyMessageDefault's dispatch chain implements.
 //
-// Agreeing on the set is not the same as covering the same fields.
-// [ValidateFile] walks one file, while postDecode recurses into nested
-// messages, so a bad placement on a type declared in an imported .proto
-// still reaches the decode-time guard unreported.
+// Both now cover the same fields too: [ValidateFile] walks the import
+// closure (#71), so a bad placement on a message type postDecode
+// recurses into is reported at bind time wherever it was declared.
 //
 // Placement only — a literal that does not parse as the field's type
 // ("abc" on an int32) stays a decode-time error. Placement is decidable

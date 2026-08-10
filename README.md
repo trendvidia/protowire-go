@@ -198,9 +198,11 @@ opts := pxf.UnmarshalOptions{SkipValidate: true}
 err := opts.Unmarshal(data, &msg)
 ```
 
-The reserved-name check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. `ValidateFile` walks the whole `.proto` file, so one bad element makes every message declared beside it non-bindable. `SkipValidate` is all-or-nothing — it bypasses all three checks, not one. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the reserved-name and `(pxf.key)` rules, and draft `-01` §annotation-extensions ("Default Placement") for `(pxf.default)`.
+The reserved-name check is case-sensitive: `NULL`, `True`, `FALSE` lex as ordinary identifiers and are accepted. `SkipValidate` is all-or-nothing — it bypasses every row of the table above, not one. See [draft §3.13](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the reserved-name and `(pxf.key)` rules, and draft `-01` §annotation-extensions ("Default Placement" and "Oneof Members") for `(pxf.default)` and `(pxf.required)`.
 
-The scope is one file, not the transitive import closure: a defect on a message type declared in an *imported* `.proto` is not reported, even when a field of the message being decoded refers to it. `UnmarshalFull*` still catches a misplaced `(pxf.default)` there when it comes to apply the default, with the decode-time error rather than the bind-time violation. Pre-validate each file you bind (`pxf.ValidateFile` per `FileDescriptor`) if you need the whole closure covered.
+The scope is the **transitive import closure** of the descriptor you bind, not just the file declaring it (draft `-01` §schema-constraints, "Scope of Bind-Time Checks"). A defect on a type declared in an imported `.proto` is reported, whether or not any field of the message being decoded refers to that type, and `Violation.File` names the file that *declares* the offending element rather than the one you bound. One bad element therefore makes every file that transitively imports it non-bindable — deliberately, since that is where a dead annotation does the most damage.
+
+Results are memoized per descriptor, so the closure walk costs less than the single-file walk it replaced: `BenchmarkPXFUnmarshal` is 5.6% faster and `BenchmarkPXFUnmarshalKeyed` 8.5% faster than before the closure landed, with allocations unchanged. Callers that build descriptors dynamically at high volume (a fresh `protocompile` result per request) should pre-validate once and set `SkipValidate`, since the memo is bounded and such callers can outgrow it.
 
 ## Data validation (`check`)
 
