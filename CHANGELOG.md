@@ -11,9 +11,26 @@ format changes.
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-08-15
+
+One fix, and it is the reason to upgrade if you decode anything with a
+measured `google.protobuf.Duration`: the PXF lexer could not read the
+fractional and `µs` duration literals that `pxf.Marshal` itself writes
+(#75). Lexer-only; no PXF, `pb`, SBE or envelope wire-format change, no
+API change, and nothing that bound or decoded under v1.4.0 changes —
+inputs that used to fail now decode.
+
+The same two lexer decisions were ported into every sibling
+implementation, so the fix is mirrored as an issue per port
+(trendvidia/protowire-rust#26, protowire-java#55, protowire-typescript#34,
+protowire-cpp#20, protowire-csharp#19, protowire-dart#11,
+protowire-swift#8), and the spec-side edges it surfaced — the `duration`
+production carries no sign though every encoder writes `-`, and §3.3's
+"`5seconds` is an identifier" prose — are trendvidia/protowire#234.
+
 ### Fixed
 
-- `encoding/pxf`: fractional and `µs` duration literals lex (#75). The
+- `encoding/pxf`: fractional and `µs` duration literals lex (#75, #76). The
   lexer decided FLOAT on seeing `.` before it looked for a time unit,
   so `1.5ms` tokenised as `1.5` + identifier `ms` (the decoder then
   reported `expected '{'` for the Duration field), and it never
@@ -1329,7 +1346,8 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...HEAD
+[1.4.1]: https://github.com/trendvidia/protowire-go/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/trendvidia/protowire-go/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/trendvidia/protowire-go/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/trendvidia/protowire-go/compare/v1.3.0...v1.3.1
