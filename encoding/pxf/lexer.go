@@ -438,13 +438,29 @@ func (l *lexer) lexNumber(pos Position) Token {
 	if !neg && digitCount == 4 && l.pos < len(l.input) && l.peek() == '-' {
 		return l.lexTimestamp(pos, start)
 	}
-	// Float: '.' or 'e'/'E'
-	if l.pos < len(l.input) && (l.peek() == '.' || l.peek() == 'e' || l.peek() == 'E') {
-		return l.lexFloat(pos, start)
+	// Fraction: '.' followed by at least one digit. Floats and durations
+	// both admit one (draft §3.3: duration-segment = 1*DIGIT [ "." 1*DIGIT ]
+	// time-unit), so it is consumed here and the two are told apart by
+	// what follows it. A '.' with no digit after it is not a
+	// duration-segment; the float branch below keeps it as it always has.
+	frac := false
+	if l.peek() == '.' && isDigit(l.peekAt(1)) {
+		frac = true
+		l.advance() // .
+		for l.pos < len(l.input) && isDigit(l.peek()) {
+			l.advance()
+		}
 	}
-	// Duration: digits followed by a time unit letter
-	if l.pos < len(l.input) && isDurationUnit(l.peek()) {
+	// Duration: magnitude followed by a time unit (§3.10). Checked before
+	// the float branch so "1.5ms" is one DURATION token rather than FLOAT
+	// "1.5" followed by IDENT "ms" — which is what pxf.Marshal writes for
+	// any Duration that is not a whole multiple of its largest unit (#75).
+	if l.atDurationUnit() {
 		return l.lexDuration(pos, start)
+	}
+	// Float: fraction, or 'e'/'E' exponent, or a bare trailing '.'
+	if frac || (l.pos < len(l.input) && (l.peek() == '.' || l.peek() == 'e' || l.peek() == 'E')) {
+		return l.lexFloat(pos, start)
 	}
 
 	return Token{Kind: INT, Value: l.viewString(start, l.pos), Pos: pos}
@@ -491,9 +507,49 @@ func (l *lexer) lexTimestamp(pos Position, start int) Token {
 	return Token{Kind: TIMESTAMP, Value: raw, Pos: pos}
 }
 
+// atDurationUnit reports whether the input at the current position
+// begins a time-unit (draft §3.3): one of the ASCII unit letters, or the
+// two-byte UTF-8 encoding of "µ" (U+00B5 MICRO SIGN, %xC2.B5) that opens
+// micro-us. Only the first byte(s) are inspected; lexDuration consumes the
+// candidate and time.ParseDuration decides whether it was a unit at all.
+// Does not advance.
+func (l *lexer) atDurationUnit() bool {
+	if l.pos >= len(l.input) {
+		return false
+	}
+	return isDurationUnit(l.peek()) || l.atMicroSign()
+}
+
+// atMicroSign reports whether the next two bytes are the UTF-8 encoding
+// of U+00B5 MICRO SIGN. This is the only non-ASCII byte sequence the
+// duration grammar admits (micro-us = %xC2.B5 %x73); U+03BC GREEK SMALL
+// LETTER MU, which time.ParseDuration would also accept, is deliberately
+// not recognised. Does not advance.
+func (l *lexer) atMicroSign() bool {
+	return l.peek() == 0xC2 && l.peekAt(1) == 0xB5
+}
+
+// lexDuration consumes a duration literal — one or more segments of
+// digits, an optional "." fraction, and a unit (§3.3) — starting from
+// start, and validates the whole with time.ParseDuration. The scan is
+// deliberately loose (any run of digits, unit letters, "." followed by a
+// digit, and "µ") so that a malformed literal such as "5min" is reported
+// as one invalid duration rather than tokenised as a duration plus an
+// identifier.
 func (l *lexer) lexDuration(pos Position, start int) Token {
-	for l.pos < len(l.input) && (isDigit(l.peek()) || isLowerAlpha(l.peek())) {
-		l.advance()
+scan:
+	for l.pos < len(l.input) {
+		switch {
+		case isDigit(l.peek()) || isLowerAlpha(l.peek()):
+			l.advance()
+		case l.peek() == '.' && isDigit(l.peekAt(1)):
+			l.advance()
+		case l.atMicroSign():
+			l.advance()
+			l.advance()
+		default:
+			break scan
+		}
 	}
 	raw := l.viewString(start, l.pos)
 	if _, err := time.ParseDuration(raw); err != nil {

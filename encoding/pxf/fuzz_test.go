@@ -26,6 +26,13 @@ func FuzzParse(f *testing.F) {
 		`name = "value"`,
 		`count = 42`,
 		`weight = 3.14`,
+		// Durations, including the fractional and "µs" forms pxf.Marshal
+		// writes (#75); the fraction/unit split is a lexer decision worth
+		// mutating around.
+		`timeout = 1h30m`,
+		`latency = 1.234567ms`,
+		`latency = 312.5µs`,
+		`latency = -1.5s`,
 		`flag = true`,
 		`tags = ["a", "b", "c"]`,
 		`nested {

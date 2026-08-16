@@ -11,6 +11,23 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- `encoding/pxf`: fractional and `µs` duration literals lex (#75). The
+  lexer decided FLOAT on seeing `.` before it looked for a time unit,
+  so `1.5ms` tokenised as `1.5` + identifier `ms` (the decoder then
+  reported `expected '{'` for the Duration field), and it never
+  admitted the two-byte `µ`, so `2µs` was `2` + an illegal byte. Both
+  are what `pxf.Marshal` writes for any `google.protobuf.Duration` that
+  is not a whole multiple of its largest unit (`time.Duration.String()`:
+  `1.234567ms`, `312.5µs`, `1h30m0.5s`), so a measured latency did not
+  round-trip through the reference codec. Draft `-01` §3.3 has always
+  admitted them (`duration-segment = 1*DIGIT [ "." 1*DIGIT ] time-unit`,
+  `micro-us = %xC2.B5 %x73`; §3.10 lists `1.5h` and `2µs`); the fix is
+  lexer-only, no wire or grammar change. `1.5` is still a float, `1.5x`
+  still a float followed by an identifier, and U+03BC GREEK SMALL
+  LETTER MU is still not a unit — only U+00B5 MICRO SIGN is.
+
 ## [1.4.0] — 2026-08-09
 
 The `(pxf.default)` family, end to end. It began as a panic — the

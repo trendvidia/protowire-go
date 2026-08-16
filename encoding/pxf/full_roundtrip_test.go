@@ -29,6 +29,7 @@ package pxf_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -201,6 +202,64 @@ func TestFullRoundTripNegativeDuration(t *testing.T) {
 	desc := msgDesc(t, "AllTypes")
 	tr := runFullPipeline(t, desc, `dur_field = -30s`)
 	expectFullEquality(t, tr)
+}
+
+// TestFullRoundTripFractionalDuration (#75): pxf.Marshal writes a
+// Duration as time.Duration.String(), so any measured value comes out as
+// "1.234567ms", "312.5µs", "1h30m0.5s" — forms the lexer could not read
+// back. m2 → text1 → m3 is the leg that failed.
+func TestFullRoundTripFractionalDuration(t *testing.T) {
+	desc := msgDesc(t, "AllTypes")
+	for _, lit := range []string{
+		"1.234567ms", "1.5h", "2µs", "1.5ms", "312.5µs", "1.234µs",
+		"1h30m500ms", "1ms234us567ns", "-1.5s", "-312.5µs", "1ns", "999.999999ms",
+	} {
+		t.Run(lit, func(t *testing.T) {
+			tr := runFullPipeline(t, desc, "dur_field = "+lit)
+			expectFullEquality(t, tr)
+		})
+	}
+}
+
+// TestMarshalDurationReadsBack pins the property the issue is about:
+// whatever pxf.Marshal writes for a Duration, pxf.Unmarshal reads to the
+// same (seconds, nanos). Values are chosen to hit every branch of
+// time.Duration.String(): sub-microsecond, fractional µs / ms, whole
+// units, fractional seconds inside an h/m/s form, negatives, zero, and
+// the extremes.
+func TestMarshalDurationReadsBack(t *testing.T) {
+	desc := msgDesc(t, "AllTypes")
+	fd := desc.Fields().ByName("dur_field")
+	durDesc := fd.Message()
+	secsFd := durDesc.Fields().ByName("seconds")
+	nanosFd := durDesc.Fields().ByName("nanos")
+
+	for _, d := range []time.Duration{
+		0, 1, 999, 1000, 1234, 1500, 312500, 1234567, 1500000, 250 * time.Millisecond,
+		time.Second, 1500 * time.Millisecond, 90 * time.Minute, 90*time.Minute + 500*time.Millisecond,
+		time.Hour + 30*time.Minute + 45*time.Second + 123456789, 100 * time.Hour,
+		-1, -1500, -312500, -1500 * time.Millisecond, -90*time.Minute - 500*time.Millisecond,
+		time.Duration(1<<63 - 1), time.Duration(-1 << 63),
+	} {
+		t.Run(d.String(), func(t *testing.T) {
+			m := dynamicpb.NewMessage(desc)
+			sub := m.Mutable(fd).Message()
+			secs := int64(d / time.Second)
+			nanos := int64(d % time.Second)
+			sub.Set(secsFd, protoreflect.ValueOfInt64(secs))
+			sub.Set(nanosFd, protoreflect.ValueOfInt32(int32(nanos)))
+
+			text, err := pxf.Marshal(m)
+			require.NoError(t, err)
+			assert.Contains(t, string(text), "dur_field = "+d.String())
+
+			back, err := pxf.UnmarshalDescriptor(text, desc)
+			require.NoError(t, err, "text:\n%s", text)
+			got := back.ProtoReflect().Get(fd).Message()
+			assert.Equal(t, secs, got.Get(secsFd).Int(), "seconds")
+			assert.Equal(t, nanos, got.Get(nanosFd).Int(), "nanos")
+		})
+	}
 }
 
 func TestFullRoundTripOneofTextBranch(t *testing.T) {
