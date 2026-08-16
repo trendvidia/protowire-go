@@ -527,3 +527,68 @@ func TestNegativeDuration(t *testing.T) {
 	secs := sub.Get(durDesc.Fields().ByName("seconds")).Int()
 	assert.Equal(t, int64(-30), secs)
 }
+
+// decodeDuration decodes `dur_field = <literal>` and returns the bound
+// Duration's (seconds, nanos).
+func decodeDuration(t *testing.T, literal string) (int64, int32, error) {
+	t.Helper()
+	desc := msgDesc(t, "AllTypes")
+	msg, err := pxf.UnmarshalDescriptor([]byte("dur_field = "+literal), desc)
+	if err != nil {
+		return 0, 0, err
+	}
+	fd := desc.Fields().ByName("dur_field")
+	sub := msg.ProtoReflect().Get(fd).Message()
+	durDesc := fd.Message()
+	secs := sub.Get(durDesc.Fields().ByName("seconds")).Int()
+	nanos := sub.Get(durDesc.Fields().ByName("nanos")).Int()
+	return secs, int32(nanos), nil
+}
+
+// TestDurationFractionalAndMicro: draft-01 §3.3 admits a fraction in any
+// duration segment and the two-byte "µs" unit; §3.10 lists "1.5h" and
+// "2µs" as examples. Before #75 the lexer split "1.5ms" into FLOAT + IDENT
+// and rejected "µ" outright, so the decoder reported `expected '{'` for
+// exactly the forms pxf.Marshal writes.
+func TestDurationFractionalAndMicro(t *testing.T) {
+	cases := []struct {
+		literal string
+		secs    int64
+		nanos   int32
+	}{
+		{"1.5h", 5400, 0},
+		{"2µs", 0, 2000},
+		{"2us", 0, 2000},
+		{"1.234567ms", 0, 1234567},
+		{"1.5ms", 0, 1500000},
+		{"312.5µs", 0, 312500},
+		{"1.234µs", 0, 1234},
+		{"1h30m500ms", 5400, 500000000},
+		{"1h30m0.5s", 5400, 500000000},
+		{"1.5s", 1, 500000000},
+		{"-1.5s", -1, -500000000},
+		{"-312.5µs", 0, -312500},
+		{"0.000000001s", 0, 1},
+		{"1.5h30.5m", 7230, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.literal, func(t *testing.T) {
+			secs, nanos, err := decodeDuration(t, tc.literal)
+			require.NoError(t, err)
+			assert.Equal(t, tc.secs, secs, "seconds")
+			assert.Equal(t, tc.nanos, nanos, "nanos")
+		})
+	}
+}
+
+// TestDurationFractionalNegatives: a fraction with no unit is still a
+// float, and a non-unit suffix is still not a duration — neither may
+// bind to a Duration field.
+func TestDurationFractionalNegatives(t *testing.T) {
+	for _, literal := range []string{"1.5", "1.5x", "1.5e3ms", "1.5min", "2μs" /* U+03BC, not µ */} {
+		t.Run(literal, func(t *testing.T) {
+			_, _, err := decodeDuration(t, literal)
+			require.Error(t, err)
+		})
+	}
+}

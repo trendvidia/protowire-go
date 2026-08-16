@@ -313,7 +313,9 @@ func (*TimestampVal) valueNode()      {}
 func (v *TimestampVal) pos() Position { return v.Pos }
 func (v *TimestampVal) end() Position { return v.End }
 
-// DurationVal is a Go-style duration literal (e.g. 30s, 1h30m).
+// DurationVal is a duration literal (draft §3.3 / §3.10): one or more
+// segments of a magnitude — optionally fractional — and a unit, e.g. 30s,
+// 1h30m, 1.5ms, 2µs.
 type DurationVal struct {
 	Pos   Position
 	End   Position // just past the literal's last byte

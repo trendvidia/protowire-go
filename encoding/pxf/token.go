@@ -22,7 +22,7 @@ const (
 	NULL      // null
 	BYTES     // b"base64..."
 	TIMESTAMP // 2024-01-15T10:30:00Z
-	DURATION  // 30s, 1h30m
+	DURATION  // 30s, 1h30m, 1.5ms, 2µs
 
 	LBRACE   // {
 	RBRACE   // }
