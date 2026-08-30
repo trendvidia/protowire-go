@@ -2,7 +2,7 @@
 
 Cross-port conformance fixtures for **keyed repeated fields**
 ([issue #116](https://github.com/trendvidia/protowire/issues/116);
-IETF draft `-01` §3.13 "Keyed Repeated Fields"; `(pxf.key) = 50002` in
+IETF draft `-01` §3.13 "Keyed Repeated Fields"; `(pxf.key) = 1316` in
 [`proto/pxf/annotations.proto`](../../proto/pxf/annotations.proto)).
 
 Every port implementing the keyed grammar + semantics (reference:
