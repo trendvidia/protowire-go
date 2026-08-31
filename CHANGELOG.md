@@ -11,6 +11,23 @@ format changes.
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-08-31
+
+Dependency bumps only — no source change, no API change, and no change to
+any wire format. Cut so consumers pinning this module pick up the updated
+`google.golang.org/protobuf`, which is a direct runtime dependency rather
+than a test-only one.
+
+### Changed
+
+- `google.golang.org/protobuf` 1.36.11 → 1.36.12
+  ([#78](https://github.com/trendvidia/protowire-go/pull/78)).
+- `github.com/stretchr/testify` 1.11.1 → 1.12.1, test-only
+  ([#79](https://github.com/trendvidia/protowire-go/pull/79)).
+
+The extension renumber to the registered `1314`–`1363` block shipped in
+[1.5.0](#150--2026-08-31) and is unchanged here.
+
 ## [1.5.0] — 2026-08-31
 
 The eight PXF and SBE extension numbers move out of the unregistered
@@ -1389,6 +1406,7 @@ Initial public release. Versioned to match sibling components in the
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
 [Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...HEAD
+[1.5.1]: https://github.com/trendvidia/protowire-go/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/trendvidia/protowire-go/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/trendvidia/protowire-go/compare/v1.3.2...v1.4.0
