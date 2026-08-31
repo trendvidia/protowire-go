@@ -159,6 +159,36 @@ format changes.
 
 ### Fixed
 
+- **A type error names the field the document wrote, not the synthetic
+  one that types it**
+  ([#85](https://github.com/trendvidia/protowire-go/issues/85)).
+  Two PXF surfaces are typed by a descriptor no document ever names: a
+  well-known wrapper's scalar shorthand, typed by the wrapper's inner
+  `value` field, and a map's values, typed by the synthetic map-entry
+  message's `value` field. Both reported that name:
+
+  ```
+  count = "x"                  1:9: expected integer for field "value"
+  labels = { "k": 5 }          1:14: expected string for field "value"
+  ```
+
+  A reader searching their document for `value` finds nothing — or, in a
+  message that has a field by that very common name, finds the wrong one.
+  Both now name what the document wrote (`"count"`, `"labels"`), in every
+  context the shorthands appear in: field value, list element and map
+  value, for wrappers, plain scalars, enums, `pxf.Secret` and the UTF-8
+  guard alike.
+
+  The block form is unchanged and deliberately so: `count { value = "x" }`
+  really does write `value`, so it keeps reporting it.
+
+  `consumeScalar` now takes the descriptor that types the value and the
+  one to name separately, which is the split
+  [`ApplyDefault`](https://pkg.go.dev/github.com/trendvidia/protowire-go/encoding/pxf#ApplyDefault)'s
+  path already made for the same wrapper shorthand. Allocations and bytes
+  per op are unchanged — the name is read only where an error is already
+  being built.
+
 - **A malformed literal now reports what is wrong with it, instead of the
   shape the decoder would rather have seen**
   ([#77](https://github.com/trendvidia/protowire-go/issues/77)).
