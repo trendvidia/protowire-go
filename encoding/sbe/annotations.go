@@ -11,11 +11,11 @@ import (
 
 // Extension field numbers from sbe/annotations.proto.
 const (
-	extSchemaID   protoreflect.FieldNumber = 50100
-	extVersion    protoreflect.FieldNumber = 50101
-	extTemplateID protoreflect.FieldNumber = 50200
-	extLength     protoreflect.FieldNumber = 50300
-	extEncoding   protoreflect.FieldNumber = 50301
+	extSchemaID   protoreflect.FieldNumber = 1319
+	extVersion    protoreflect.FieldNumber = 1320
+	extTemplateID protoreflect.FieldNumber = 1321
+	extLength     protoreflect.FieldNumber = 1322
+	extEncoding   protoreflect.FieldNumber = 1323
 )
 
 func getFileUint32Option(fd protoreflect.FileDescriptor, num protoreflect.FieldNumber) (uint32, bool) {

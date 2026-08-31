@@ -445,12 +445,12 @@ func TestDecode_DefaultOnSingularFieldUnaffected(t *testing.T) {
 func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	var raw []byte
 	// (pxf.required) = true — varint, read into pxfOptions.required.
-	raw = protowire.AppendVarint(protowire.AppendTag(raw, 50000, protowire.VarintType), 1)
+	raw = protowire.AppendVarint(protowire.AppendTag(raw, 1314, protowire.VarintType), 1)
 	// An unrelated fixed64 nobody reads — skipped.
 	raw = protowire.AppendFixed64(protowire.AppendTag(raw, 59999, protowire.Fixed64Type), 7)
 	// (pxf.key) = "id" and (pxf.default) = "ignored".
-	raw = protowire.AppendString(protowire.AppendTag(raw, 50002, protowire.BytesType), "id")
-	raw = protowire.AppendString(protowire.AppendTag(raw, 50001, protowire.BytesType), "ignored")
+	raw = protowire.AppendString(protowire.AppendTag(raw, 1316, protowire.BytesType), "id")
+	raw = protowire.AppendString(protowire.AppendTag(raw, 1315, protowire.BytesType), "ignored")
 
 	opts := &descriptorpb.FieldOptions{}
 	opts.ProtoReflect().SetUnknown(protoreflect.RawFields(raw))
