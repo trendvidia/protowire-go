@@ -65,6 +65,84 @@ format changes.
 
 ### Added
 
+- **The binder reads the `1327` schema-extension annotation carrier, so a
+  schema written `@required` / `@default(v)` is enforced**
+  ([#81](https://github.com/trendvidia/protowire-go/issues/81)).
+
+  PXF spells the two semantics two ways. The bracket options
+  `[(pxf.required) = true]` / `[(pxf.default) = "…"]` lower to extension
+  numbers `1314` / `1315`, which this binder has always read. The
+  RFC-001 annotation form — "the canonical annotation form going
+  forward" (§8.5) — lowers to something else entirely: an
+  `AnnotationList` on extension number `1327`, which this binder read
+  nothing of.
+
+  The two surfaces are disjoint by design; a compiler emits the one the
+  author wrote and MUST NOT synthesize the other. So a schema migrated
+  from brackets to annotations **bound without error and without
+  enforcement** — no violation for a missing required field, no default
+  substituted, no diagnostic anywhere. `STABILITY.md` in the spec repo
+  called such a consumer "not supported" against annotation-form
+  schemas, which made the silence contract-conformant but did not make
+  it safe.
+
+  Both spellings are now honoured, with identical semantics:
+
+  ```proto
+  string role = 2 [(pxf.default) = "viewer"];   // as before
+  string role = 2 @default("viewer");           // now equivalent
+  ```
+
+  Everything downstream is shared rather than reimplemented per
+  spelling: `@default`'s typed argument is reduced to the same PXF
+  literal the bracket form carries, so the placement rules of draft
+  `-01` §annotation-extensions, the one-default-per-oneof cap, the
+  `@required`-on-a-oneof-member prohibition and `ApplyDefault` all apply
+  to it unchanged. Diagnostics quote the spelling the author wrote:
+
+  ```
+  annot.proto: field "annot.v1.M.a": invalid @required: @required is not
+  valid on a member of oneof "choice": …
+  ```
+
+  **Coexistence, not reconciliation.** Neither surface is synthesized
+  from the other and no value is blended (RFC-001 §8.5). `required` is
+  one boolean with one answer, so either spelling asserting it makes the
+  field required. `default` carries a value, so two spellings can
+  disagree — and a field carrying both with different values is rejected
+  at bind time rather than resolved by precedence, which would attach
+  meaning to whichever spelling an author migrated first. Equal values
+  are not a disagreement.
+
+  **One known divergence, pinned rather than papered over.**
+  `trendvidia/protocompile` v0.25.0 lowers a float literal on an
+  `any`-typed annotation parameter through the integer path, so
+  `@default(1.5)` on a `double` field reaches the binder as
+  `int_value: 1` and substitutes `1.0`. The binder applies what the
+  carrier says — inventing a fractional part it does not carry would be
+  guessing — and
+  `TestCarrier_FloatDefaultIsTruncatedByTheCompiler` fails the day the
+  compiler is fixed
+  ([protocompile#149](https://github.com/trendvidia/protocompile/issues/149)).
+  Integer, boolean, string, bytes, enum and unsigned defaults are
+  unaffected, including `uint64` at its maximum.
+
+  **Decoding annotated schemas got faster.** `postDecode` used to call
+  `IsRequired` and then `Default` for every absent field — two full
+  passes over that field's options. Reading both annotations in both
+  spellings needed one pass anyway, so it now makes one. On a
+  ten-annotation message (`BenchmarkPXFUnmarshalFullAnnotated`, added
+  here because no benchmark covered the path this change is on):
+  **−25.6% wall, −29% allocations, +5% bytes**, the last because the
+  options accumulator grew three fields.
+
+  No API change: `IsRequired` and `Default` answer for either spelling,
+  so layered-config consumers running their own passes with
+  `SkipPostDecode` pick this up without a code change. No wire-format
+  change. No new dependency — the carrier is walked as wire bytes rather
+  than bound as a generated package, which is what keeps `internal/deps`
+  green.
+
 - `internal/deps`: a guard test asserting that no library package
   reaches a `.proto` compiler in its build closure. The binder reads
   PXF annotations off descriptors and parses no schema source, so

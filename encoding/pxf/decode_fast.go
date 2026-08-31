@@ -1717,11 +1717,16 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 		path := pathPrefix + string(fd.Name())
 		_, isPresent := result.presentFields[path]
 		if !isPresent {
-			if isRequired(fd) {
+			// One options pass for both annotations, in both their
+			// spellings — see [pxfFieldOptions]. This used to be an
+			// IsRequired call plus a Default call, i.e. two full passes
+			// over the field's options for every absent field.
+			opts := pxfFieldOptions(fd)
+			if opts.required {
 				return errorf(Position{Line: 1, Column: 1}, "required field %q is absent", path)
 			}
-			if def, ok := getDefault(fd); ok && !oneofAlreadyChosen(fd, result, pathPrefix) {
-				if err := applyDefault(msg, fd, def); err != nil {
+			if opts.defSet && !oneofAlreadyChosen(fd, result, pathPrefix) {
+				if err := applyDefault(msg, fd, opts.def); err != nil {
 					return err
 				}
 			}
