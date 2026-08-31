@@ -247,7 +247,7 @@ func TestViolationKind_RequiredOptionString(t *testing.T) {
 // FileDescriptorSet has, where nothing resolved the extension into a
 // known field.
 func requiredFromUnknownBytes() *descriptorpb.FieldOptions {
-	raw := protowire.AppendVarint(protowire.AppendTag(nil, 50000, protowire.VarintType), 1)
+	raw := protowire.AppendVarint(protowire.AppendTag(nil, 1314, protowire.VarintType), 1)
 	opts := &descriptorpb.FieldOptions{}
 	opts.ProtoReflect().SetUnknown(protoreflect.RawFields(raw))
 	return opts

@@ -20,15 +20,15 @@ syntax = "proto3";
 package sbe;
 import "google/protobuf/descriptor.proto";
 extend google.protobuf.FileOptions {
-  uint32 schema_id = 50100;
-  uint32 version = 50101;
+  uint32 schema_id = 1319;
+  uint32 version = 1320;
 }
 extend google.protobuf.MessageOptions {
-  uint32 template_id = 50200;
+  uint32 template_id = 1321;
 }
 extend google.protobuf.FieldOptions {
-  uint32 length = 50300;
-  string encoding = 50301;
+  uint32 length = 1322;
+  string encoding = 1323;
 }
 `
 
