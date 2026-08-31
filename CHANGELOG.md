@@ -11,6 +11,48 @@ format changes.
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-08-31
+
+The eight PXF and SBE extension numbers move out of the unregistered
+`50000`–`59999` range this project had been squatting and into
+`1314`–`1363`, the block the global extension registry granted protowire
+in [protocolbuffers/protobuf#28919][pb28919]:
+
+| | | | |
+|---|---|---|---|
+| `(pxf.required)` | `50000` → `1314` | `(sbe.schema_id)` | `50100` → `1319` |
+| `(pxf.default)` | `50001` → `1315` | `(sbe.version)` | `50101` → `1320` |
+| `(pxf.key)` | `50002` → `1316` | `(sbe.template_id)` | `50200` → `1321` |
+| | | `(sbe.length)` | `50300` → `1322` |
+| | | `(sbe.encoding)` | `50301` → `1323` |
+
+**This is a descriptor-contract break.** A `.proto` compiled against the
+old `pxf/annotations.proto` carries `50000`-series numbers, and this
+release does not read them: `(pxf.required)` stops being enforced,
+`(pxf.default)` stops substituting, and a keyed repeated field stops
+being keyed. There is no dual-read and no fallback — recompile schemas
+against the matching `annotations.proto` from
+[trendvidia/protowire][spec] at the same release.
+
+The Go API is unchanged: no exported function, type or signature moves.
+PXF text, `pb`, SBE and envelope wire formats are unchanged — the numbers
+live in descriptors, not in encoded payloads, which is why
+`cross_envelope_check.sh` still shows all four ports byte-identical.
+
+The renumber is deliberately *not* a `v2.0.0`: it was taken while the
+family has no deployed consumers, which is what made a same-line break
+acceptable (trendvidia/protowire#242, option A). From protowire's next
+tagged release the numbers are frozen under `STABILITY.md` promise 3,
+which re-arms against the registered block.
+
+Part of the family-wide migration tracked in
+[trendvidia/protowire#244][t244]; protowire-go and `trendvidia/protocompile`
+are the two leaves and move first.
+
+[pb28919]: https://github.com/protocolbuffers/protobuf/pull/28919
+[spec]: https://github.com/trendvidia/protowire
+[t244]: https://github.com/trendvidia/protowire/issues/244
+
 ## [1.4.1] — 2026-08-15
 
 One fix, and it is the reason to upgrade if you decode anything with a
@@ -1347,6 +1389,7 @@ Initial public release. Versioned to match sibling components in the
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
 [Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...HEAD
+[1.5.0]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/trendvidia/protowire-go/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/trendvidia/protowire-go/compare/v1.3.2...v1.4.0
 [1.3.2]: https://github.com/trendvidia/protowire-go/compare/v1.3.1...v1.3.2
