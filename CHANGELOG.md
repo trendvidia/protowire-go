@@ -11,6 +11,22 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- `internal/deps`: a guard test asserting that no library package
+  reaches a `.proto` compiler in its build closure. The binder reads
+  PXF annotations off descriptors and parses no schema source, so
+  `check`, `encoding/pb`, `encoding/pxf`, `encoding/sbe` and `envelope`
+  build without one — which is why carrying
+  `github.com/bufbuild/protocompile` as a direct require is tolerable:
+  it is reachable from the test suite and from the two `scripts/`
+  commands that compile fixture `.proto` files, and from nothing a
+  consumer builds. The property was previously true but unpinned, and
+  hand-measuring it is unreliable: grepping for `protocompile` matches
+  `encoding/pxf/annotations.go` and `encoding/sbe/annotations.go`,
+  where the word occurs only in comments. Test-only; no API, dependency
+  or wire-format change ([#80](https://github.com/trendvidia/protowire-go/issues/80)).
+
 ## [1.5.1] — 2026-08-31
 
 Dependency bumps only — no source change, no API change, and no change to
