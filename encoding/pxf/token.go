@@ -9,10 +9,17 @@ import "fmt"
 type TokenKind int
 
 const (
-	EOF     TokenKind = iota
-	ILLEGAL           // invalid token
-	NEWLINE           // \n
-	COMMENT           // # or // or /* */
+	EOF TokenKind = iota
+	// ILLEGAL is a token the lexer rejected. Its Value is the lexer's
+	// diagnostic — a human-readable sentence naming the defect
+	// ("invalid duration: 5seconds"), never the offending source text.
+	// The lexer is the only layer that knows why a token is bad; a
+	// consumer positioned on one knows only what it wanted instead, so
+	// every error path that meets an ILLEGAL token surfaces this Value
+	// rather than its own expectation.
+	ILLEGAL
+	NEWLINE // \n
+	COMMENT // # or // or /* */
 
 	IDENT     // field_name, EnumValue, package.Name
 	STRING    // "hello" or """multi-line"""

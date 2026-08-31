@@ -112,9 +112,9 @@ func TestLexDurationFractionalAndMicro(t *testing.T) {
 		// LETTER MU (CE BC) is not in the grammar even though Go's
 		// time.ParseDuration would accept it, and must not sneak in via
 		// the lexer.
-		// (ILLEGAL renders each stray byte via string(byte), hence the
-		// Latin-1 spelling of CE BC.)
-		{"2μs", []tok{{INT, "2"}, {ILLEGAL, string(rune(0xCE))}, {ILLEGAL, string(rune(0xBC))}, {IDENT, "s"}}},
+		// It falls to the ILLEGAL path, which names the whole rune (#77)
+		// rather than reporting each of its two bytes.
+		{"2μs", []tok{{INT, "2"}, {ILLEGAL, `unexpected character 'μ'`}, {IDENT, "s"}}},
 		// A bare micro sign with no "s" is not a unit either.
 		{"2µ", []tok{{ILLEGAL, "invalid duration: 2µ"}}},
 		{"2µm", []tok{{ILLEGAL, "invalid duration: 2µm"}}},

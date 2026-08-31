@@ -51,6 +51,18 @@ format changes.
   `trendvidia/protocheck`. Its `bufbuild/protocompile` requirement is in
   its own `go.mod` and does not reach consumers of `protowire-go`.
 
+- `Token.Value` for the `ILLEGAL` kind is now always the lexer's
+  diagnostic, never the offending source text
+  ([#77](https://github.com/trendvidia/protowire-go/issues/77)). Most
+  sites already did this and the parser already assumed it; the three
+  that did not (`$` → `unexpected character '$'`, `@` → `"@" must be
+  followed by a directive name`, `+` → `"+" is valid only in "+inf"`)
+  now conform. `Token` is exported but no exported function produces
+  one, so this reaches no caller. A stray multi-byte character is also
+  consumed as one rune rather than byte by byte, so `2μs` (U+03BC GREEK
+  SMALL LETTER MU, which the duration grammar excludes in favour of
+  U+00B5) names `'μ'` instead of reporting the Latin-1 pair `'Î'` `'¼'`.
+
 ### Added
 
 - `internal/deps`: a guard test asserting that no library package
@@ -66,6 +78,54 @@ format changes.
   so it does not need revisiting the next time the compiler choice does.
   Test-only; no API or wire-format change
   ([#80](https://github.com/trendvidia/protowire-go/issues/80)).
+
+### Fixed
+
+- **A malformed literal now reports what is wrong with it, instead of the
+  shape the decoder would rather have seen**
+  ([#77](https://github.com/trendvidia/protowire-go/issues/77)).
+  `dur_field = 5seconds` reported `expected '{' for message field
+  "dur_field"`. The lexer had already established the exact fault —
+  `invalid duration: 5seconds` — and every value position discarded it in
+  favour of its own expectation. Not a duration problem: a bad `\u`
+  escape, an unterminated string and invalid base64 all surfaced as
+  `expected string for field …`.
+
+  ```
+  dur_field = 5seconds     1:13: invalid duration: 5seconds
+  dur_field = +30s         1:13: "+" is valid only in "+inf"
+  string_field = "\z"      1:16: unknown escape sequence \z
+  ```
+
+  An `ILLEGAL` token is admitted nowhere in the grammar, so the check is
+  on the token kind, at the entry of each value context — one mechanism,
+  not a duration special case. Name positions (`expected map key`,
+  `expected type name after @type`) keep their own expectation and render
+  the token through the diagnostic. Schema errors still win where both
+  apply: `bogus = 5seconds` remains `unknown field "bogus"`.
+
+  This unblocks the message assertion in `TestDuration_Rejects`
+  (trendvidia/protowire `cmd/pxf/duration_test.go`), which until now could
+  assert only that the cross-port fixtures `err-digit-led-identifier.pxf`
+  and `err-unit-then-alpha.pxf` were rejected, not that the rejection
+  named the malformed duration
+  ([protowire#234](https://github.com/trendvidia/protowire/issues/234)).
+
+- **Errors on message-typed fields name the value forms the field
+  actually takes** ([#77](https://github.com/trendvidia/protowire-go/issues/77)).
+  `1.5x` and `2μs` lex as a number followed by letters, so a
+  `google.protobuf.Duration` field receives a valid FLOAT or INT and used
+  to answer `expected '{' for message field "dur_field"` — an instruction
+  to open a brace, given to someone who wrote a duration. The well-known
+  types that accept a literal now say so:
+
+  ```
+  dur_field = 1.5x    1:13: expected a duration literal or '{' for message
+                            field "dur_field", got float ("1.5")
+  ```
+
+  Plain message fields are unchanged apart from gaining the offending
+  token: `expected '{' for message field "nested_field", got integer ("5")`.
 
 ## [1.5.1] — 2026-08-31
 
