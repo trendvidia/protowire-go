@@ -11,21 +11,61 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **The test suite and the `scripts/` commands now compile fixtures with
+  `github.com/trendvidia/protocompile` v0.25.0 instead of upstream
+  `github.com/bufbuild/protocompile` v0.14.1.**
+  `github.com/bufbuild/protocompile` leaves `go.mod`
+  ([#80](https://github.com/trendvidia/protowire-go/issues/80)).
+
+  The reason is reach, not tidiness. RFC-001 §8.5 lowers `@required` and
+  `@default(value)` **exclusively** to the schema-extension carrier, which
+  the fork defines as `AnnotationList` at `1327` on every `*Options`
+  message. This binder reads `1314`/`1315`/`1316` — the legacy options —
+  so the two surfaces are disjoint by design. Upstream protocompile has no
+  carrier definition and no annotation lowering at all, which means it
+  cannot emit `1327` under any input: fixtures compiled with it are
+  structurally incapable of reaching the carrier side, and carrier-aware
+  binding ([#81](https://github.com/trendvidia/protowire-go/issues/81))
+  was therefore not merely untested here but untestable. Switching does
+  not fix #81 — the binder is still carrier-blind and reads the same three
+  numbers off the same descriptors — it makes #81 testable.
+
+  **This raises the minimum Go toolchain.** The fork's own `go.mod`
+  declares `go 1.25.6`, so protowire-go's `go` directive moves
+  `1.25.0` → `1.25.6`. Consumers on Go 1.25.0–1.25.5 must upgrade.
+
+  It also widens the dependency footprint consumers resolve: `go.sum` goes
+  from 14 modules to 24. One module leaves (`bufbuild/protocompile`) and
+  eleven arrive, the fork included. No library package reaches any of
+  them — see below.
+
+  `check/protovalidate` is a **separate, already-deprecated module** and
+  stays on upstream protocompile. The fork's `SearchResult.Desc` is inert
+  after its M1 Track C migration ("setting them is equivalent to returning
+  the file as not-found"), and that module's test resolves
+  `buf/validate/validate.proto` out of `protoregistry.GlobalFiles` by
+  exactly that field. Making it work needs the `.proto` source vendored,
+  which is not worth doing in a module already marked as moved to
+  `trendvidia/protocheck`. Its `bufbuild/protocompile` requirement is in
+  its own `go.mod` and does not reach consumers of `protowire-go`.
+
 ### Added
 
 - `internal/deps`: a guard test asserting that no library package
   reaches a `.proto` compiler in its build closure. The binder reads
   PXF annotations off descriptors and parses no schema source, so
   `check`, `encoding/pb`, `encoding/pxf`, `encoding/sbe` and `envelope`
-  build without one — which is why carrying
-  `github.com/bufbuild/protocompile` as a direct require is tolerable:
-  it is reachable from the test suite and from the two `scripts/`
-  commands that compile fixture `.proto` files, and from nothing a
-  consumer builds. The property was previously true but unpinned, and
-  hand-measuring it is unreliable: grepping for `protocompile` matches
-  `encoding/pxf/annotations.go` and `encoding/sbe/annotations.go`,
-  where the word occurs only in comments. Test-only; no API, dependency
-  or wire-format change ([#80](https://github.com/trendvidia/protowire-go/issues/80)).
+  build without one — which is what keeps a compiler dependency, of
+  either provenance, out of every consumer's binary. The property was
+  previously true but unpinned, and hand-measuring it is unreliable:
+  grepping for `protocompile` matches `encoding/pxf/annotations.go` and
+  `encoding/sbe/annotations.go`, where the word occurs only in comments.
+  The guard forbids the fork, upstream, and `jhump/protoreflect` alike,
+  so it does not need revisiting the next time the compiler choice does.
+  Test-only; no API or wire-format change
+  ([#80](https://github.com/trendvidia/protowire-go/issues/80)).
 
 ## [1.5.1] — 2026-08-31
 

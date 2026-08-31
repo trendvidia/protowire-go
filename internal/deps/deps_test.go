@@ -48,9 +48,9 @@ var publishedPackages = []string{
 }
 
 // TestLibraryPackagesHaveNoProtoCompiler pins the assumption behind
-// carrying github.com/bufbuild/protocompile as a direct require: it is
-// reachable from the tests and from scripts/, and from nothing a
-// consumer builds. See the package doc and issue #80.
+// carrying a .proto compiler as a direct require: it is reachable from
+// the tests and from scripts/, and from nothing a consumer builds. See
+// the package doc and issue #80.
 func TestLibraryPackagesHaveNoProtoCompiler(t *testing.T) {
 	var violations []string
 	covered := make(map[string]bool)

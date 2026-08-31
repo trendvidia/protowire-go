@@ -28,7 +28,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bufbuild/protocompile"
+	"github.com/trendvidia/protocompile"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	pwpb "github.com/trendvidia/protowire-go/encoding/pb"
