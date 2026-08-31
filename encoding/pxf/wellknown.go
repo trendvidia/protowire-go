@@ -105,6 +105,33 @@ func defaultableMessage(desc protoreflect.MessageDescriptor) bool {
 		isBigFloat(desc)
 }
 
+// msgValueForms names the value forms a message-typed field admits, for
+// the error raised when the token at the value position matched none of
+// them. Every message field takes the block form, so "'{'" is the floor;
+// the well-known types that also take a literal say so, because a reader
+// who wrote `dur_field = 1.5x` meant a duration and is not helped by
+// being told to open a brace. Mirrors the shorthand branches of
+// decodeMsgValue / consumeListMsg / decodeMapInline — a shorthand added
+// there needs a form named here.
+//
+// Wrapper types never reach this: they route any non-'{' token to their
+// inner scalar field, which reports the inner type itself.
+func msgValueForms(desc protoreflect.MessageDescriptor) string {
+	switch {
+	case isTimestamp(desc):
+		return "a timestamp literal or '{'"
+	case isDuration(desc):
+		return "a duration literal or '{'"
+	case isBigInt(desc):
+		return "an integer literal or '{'"
+	case isDecimal(desc), isBigFloat(desc):
+		return "a numeric literal or '{'"
+	case isSecret(desc):
+		return "a string literal or '{'"
+	}
+	return "'{'"
+}
+
 // pxf.Secret well-known type.
 //
 // Secret carries a sensitive scalar plus optional hint/fingerprint

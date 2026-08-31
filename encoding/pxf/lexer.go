@@ -4,6 +4,7 @@
 package pxf
 
 import (
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -149,9 +150,27 @@ func (l *lexer) Next() Token {
 		return l.lexIdent(pos)
 
 	default:
-		l.advance()
-		return Token{Kind: ILLEGAL, Value: string(ch), Pos: pos}
+		return l.lexIllegalRune(pos)
 	}
+}
+
+// lexIllegalRune consumes the character no token can start with and
+// reports it by name. It consumes a whole UTF-8 rune rather than a single
+// byte so a multi-byte character yields one diagnostic naming what the
+// author actually typed — "unexpected character 'μ'" for the U+03BC GREEK
+// SMALL LETTER MU that the micro-us grammar does not admit (§3.3, see
+// atMicroSign) — instead of one report per byte it decomposes into.
+// An invalid encoding names no character, so its lead byte is reported
+// as a hex value.
+func (l *lexer) lexIllegalRune(pos Position) Token {
+	r, size := utf8.DecodeRune(l.input[l.pos:])
+	if r == utf8.RuneError && size <= 1 {
+		return Token{Kind: ILLEGAL, Value: fmt.Sprintf("unexpected byte %#02x", l.advance()), Pos: pos}
+	}
+	for i := 0; i < size; i++ {
+		l.advance()
+	}
+	return Token{Kind: ILLEGAL, Value: fmt.Sprintf("unexpected character %q", r), Pos: pos}
 }
 
 func (l *lexer) lexLineComment(pos Position) Token {
@@ -395,7 +414,7 @@ func (l *lexer) lexDirective(pos Position) Token {
 	}
 	name := string(l.input[start:l.pos])
 	if name == "" {
-		return Token{Kind: ILLEGAL, Value: "@", Pos: pos}
+		return Token{Kind: ILLEGAL, Value: `"@" must be followed by a directive name`, Pos: pos}
 	}
 	if name == "type" {
 		return Token{Kind: AT_TYPE, Value: "@type", Pos: pos}
@@ -422,8 +441,11 @@ func (l *lexer) lexNumber(pos Position) Token {
 			l.advance()
 			return Token{Kind: FLOAT, Value: l.viewString(start, l.pos), Pos: pos}
 		}
-		if sign == '+' || l.pos >= len(l.input) || !isDigit(l.peek()) {
-			return Token{Kind: ILLEGAL, Value: string(sign), Pos: pos}
+		if sign == '+' {
+			return Token{Kind: ILLEGAL, Value: `"+" is valid only in "+inf"`, Pos: pos}
+		}
+		if l.pos >= len(l.input) || !isDigit(l.peek()) {
+			return Token{Kind: ILLEGAL, Value: `"-" must be followed by a digit or "inf"`, Pos: pos}
 		}
 		neg = true
 	}

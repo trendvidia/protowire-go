@@ -801,7 +801,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 	pos := p.current.Pos
 	if p.current.Kind != IDENT && p.current.Kind != STRING && p.current.Kind != INT {
 		if !p.tolerant {
-			return nil, errorf(pos, "expected identifier, string, or integer, got %s (%q)", p.current.Kind, p.current.Value)
+			return nil, errorf(pos, "expected identifier, string, or integer, got %s", p.tokenErrMsg())
 		}
 		// Skip the offending token and let the caller's loop retry at
 		// the next one. Hand the leading comments back so they attach
@@ -989,7 +989,7 @@ func (p *parser) parseValue(depth int) (Value, error) {
 
 	default:
 		if !p.tolerant {
-			return nil, errorf(pos, "expected value, got %s (%q)", p.current.Kind, p.current.Value)
+			return nil, errorf(pos, "expected value, got %s", p.tokenErrMsg())
 		}
 		p.record(errorf(pos, "expected value, got %s", p.tokenErrMsg()))
 		switch p.current.Kind {
