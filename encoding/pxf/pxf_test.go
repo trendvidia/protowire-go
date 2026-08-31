@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bufbuild/protocompile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trendvidia/protocompile"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"

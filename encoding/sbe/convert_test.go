@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bufbuild/protocompile"
 	"github.com/stretchr/testify/require"
+	"github.com/trendvidia/protocompile"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
