@@ -98,6 +98,41 @@ func (d *directDecoder) advance() {
 	}
 }
 
+// illegalErr reports the lexer's own diagnostic when the decoder sits on
+// an ILLEGAL token, and nil for every other kind. ILLEGAL is admitted at
+// no position in the grammar, so at a value position there is nothing the
+// decoder's own expectation can add: "5seconds" is not a badly-shaped
+// message, it is not a token at all. The lexer is the only layer that
+// knows why — call this before deciding what you wanted instead, and the
+// reader gets "invalid duration: 5seconds" rather than "expected '{' for
+// message field". Position is the token's, so it is preserved either way.
+//
+// Placement: once at the entry of each value context — a field value, a
+// list element, a map value, a @dataset cell — rather than in the leaves
+// those contexts share, which sit in the decode hot path and would each
+// re-test the same token. Never in front of a schema check: an unknown
+// field with a malformed value is still an unknown field, which is the
+// more useful of the two things wrong. A context that loses its guard
+// shows up in TestIllegalTokenDiagnosticAtEveryValuePosition.
+func (d *directDecoder) illegalErr() error {
+	if d.current.Kind != ILLEGAL {
+		return nil
+	}
+	return errorf(d.current.Pos, "%s", d.current.Value)
+}
+
+// tokenErrMsg renders the current token inside an error that keeps its own
+// expectation — a name position, where "expected identifier" carries
+// information a value position's "expected string" does not. Twin of
+// (*parser).tokenErrMsg: an ILLEGAL token shows the lexer's diagnostic
+// instead of the opaque kind name.
+func (d *directDecoder) tokenErrMsg() string {
+	if d.current.Kind == ILLEGAL {
+		return d.current.Value
+	}
+	return fmt.Sprintf("%s (%q)", d.current.Kind, d.current.Value)
+}
+
 // peekKind returns the next significant token kind without consuming it.
 // Used by consumeDirective to disambiguate prefix identifiers from body
 // field keys (an IDENT followed by `=` or `:` is the latter).
@@ -172,7 +207,7 @@ func (d *directDecoder) consumeDirectives(result *Result) error {
 			sawType = true
 			d.advance()
 			if d.current.Kind != IDENT {
-				return errorf(d.current.Pos, "expected type name after @type, got %s", d.current.Kind)
+				return errorf(d.current.Pos, "expected type name after @type, got %s", d.tokenErrMsg())
 			}
 			d.advance()
 		case AT_DIRECTIVE:
@@ -238,7 +273,7 @@ func (d *directDecoder) consumeProtoDirective() (ProtoDirective, error) {
 		pd.TypeName = d.current.Value
 		d.advance()
 		if d.current.Kind != LBRACE {
-			return pd, errorf(d.current.Pos, "expected '{' after @proto %s, got %s", pd.TypeName, d.current.Kind)
+			return pd, errorf(d.current.Pos, "expected '{' after @proto %s, got %s", pd.TypeName, d.tokenErrMsg())
 		}
 		body, err := d.captureBraceBody("@proto " + pd.TypeName)
 		if err != nil {
@@ -305,16 +340,16 @@ func (d *directDecoder) consumeDatasetDirective() (DatasetDirective, error) {
 	}
 
 	if d.current.Kind != LPAREN {
-		return ds, errorf(d.current.Pos, "expected '(' to start @dataset column list, got %s", d.current.Kind)
+		return ds, errorf(d.current.Pos, "expected '(' to start @dataset column list, got %s", d.tokenErrMsg())
 	}
 	d.advance()
 
 	if d.current.Kind != IDENT {
-		return ds, errorf(d.current.Pos, "@dataset column list must contain at least one field name, got %s", d.current.Kind)
+		return ds, errorf(d.current.Pos, "@dataset column list must contain at least one field name, got %s", d.tokenErrMsg())
 	}
 	for {
 		if d.current.Kind != IDENT {
-			return ds, errorf(d.current.Pos, "expected column field name, got %s", d.current.Kind)
+			return ds, errorf(d.current.Pos, "expected column field name, got %s", d.tokenErrMsg())
 		}
 		colName := d.current.Value
 		if containsDot(colName) {
@@ -329,7 +364,7 @@ func (d *directDecoder) consumeDatasetDirective() (DatasetDirective, error) {
 		if d.current.Kind == RPAREN {
 			break
 		}
-		return ds, errorf(d.current.Pos, "expected ',' or ')' in @dataset column list, got %s", d.current.Kind)
+		return ds, errorf(d.current.Pos, "expected ',' or ')' in @dataset column list, got %s", d.tokenErrMsg())
 	}
 	d.advance() // consume )
 
@@ -367,7 +402,7 @@ func (d *directDecoder) consumeDatasetRow(expected int) (DatasetRow, error) {
 		row.Cells = append(row.Cells, cell)
 	}
 	if d.current.Kind != RPAREN {
-		return row, errorf(d.current.Pos, "expected ',' or ')' in @dataset row, got %s", d.current.Kind)
+		return row, errorf(d.current.Pos, "expected ',' or ')' in @dataset row, got %s", d.tokenErrMsg())
 	}
 	d.advance()
 	if len(row.Cells) != expected {
@@ -398,6 +433,9 @@ func (d *directDecoder) consumeRowCell() (Value, error) {
 // covering the same shapes as parser.parseValue but using the
 // directDecoder's state. Used by @dataset row cells.
 func (d *directDecoder) consumeValue() (Value, error) {
+	if err := d.illegalErr(); err != nil {
+		return nil, err
+	}
 	pos := d.current.Pos
 	switch d.current.Kind {
 	case STRING:
@@ -558,7 +596,7 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 
 		pos := d.current.Pos
 		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
-			return errorf(pos, "expected identifier, string, or integer, got %s (%q)", d.current.Kind, d.current.Value)
+			return errorf(pos, "expected identifier, string, or integer, got %s", d.tokenErrMsg())
 		}
 		keyQuoted := d.current.Kind == STRING
 		key := d.current.Value
@@ -713,6 +751,9 @@ func checkOneofDirect(fd protoreflect.FieldDescriptor, setOneofs *map[string]str
 }
 
 func (d *directDecoder) decodeFieldValue(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {
+	if err := d.illegalErr(); err != nil {
+		return err
+	}
 	if fd.IsMap() {
 		return d.decodeMapInline(msg, fd)
 	}
@@ -871,7 +912,8 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 	}
 
 	if d.current.Kind != LBRACE {
-		return errorf(d.current.Pos, "expected '{' for message field %q", fd.Name())
+		return errorf(d.current.Pos, "expected %s for message field %q, got %s",
+			msgValueForms(mdesc), fd.Name(), d.tokenErrMsg())
 	}
 	d.advance()
 	sub := msg.Mutable(fd).Message()
@@ -939,6 +981,9 @@ func (d *directDecoder) decodeListInline(msg protoreflect.Message, fd protorefle
 	for d.current.Kind != RBRACKET && d.current.Kind != EOF {
 		if d.current.Kind == NULL {
 			return errorf(d.current.Pos, "null is not allowed in repeated field %q", fd.Name())
+		}
+		if err := d.illegalErr(); err != nil {
+			return err
 		}
 		if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
 			v, err := d.consumeListMsg(fd, list, keyFd)
@@ -1083,7 +1128,8 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	}
 
 	if d.current.Kind != LBRACE {
-		return protoreflect.Value{}, errorf(d.current.Pos, "expected '{' for repeated message element")
+		return protoreflect.Value{}, errorf(d.current.Pos, "expected %s for repeated message element, got %s",
+			msgValueForms(mdesc), d.tokenErrMsg())
 	}
 	d.advance()
 	sub := list.NewElement().Message()
@@ -1124,8 +1170,8 @@ func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd
 		case IDENT, STRING:
 			// entry name
 		default:
-			return errorf(d.current.Pos, "expected entry name (identifier or string) in keyed field %q, got %s (%q)",
-				fd.Name(), d.current.Kind, d.current.Value)
+			return errorf(d.current.Pos, "expected entry name (identifier or string) in keyed field %q, got %s",
+				fd.Name(), d.tokenErrMsg())
 		}
 		namePos := d.current.Pos
 		// IDENT token values are zero-copy views into the input; the name
@@ -1185,7 +1231,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 	for d.current.Kind != RBRACE && d.current.Kind != EOF {
 		pos := d.current.Pos
 		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
-			return errorf(pos, "expected map key, got %s", d.current.Kind)
+			return errorf(pos, "expected map key, got %s", d.tokenErrMsg())
 		}
 		keyStr := strings.Clone(d.current.Value)
 		d.advance()
@@ -1206,6 +1252,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 
 		if d.current.Kind == NULL {
 			return errorf(d.current.Pos, "null is not allowed as map value in field %q", fd.Name())
+		}
+		if err := d.illegalErr(); err != nil {
+			return err
 		}
 
 		if valFd.Kind() == protoreflect.MessageKind || valFd.Kind() == protoreflect.GroupKind {
@@ -1324,7 +1373,8 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			}
 
 			if d.current.Kind != LBRACE {
-				return errorf(d.current.Pos, "expected '{' for map message value")
+				return errorf(d.current.Pos, "expected %s for map message value, got %s",
+					msgValueForms(mdesc), d.tokenErrMsg())
 			}
 			d.advance()
 			sub := m.NewValue().Message()
@@ -1512,7 +1562,7 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 		case IDENT:
 			// fall through to handle named subfield
 		default:
-			return errorf(d.current.Pos, "expected pxf.Secret field name (value/hint/fingerprint), got %s", d.current.Kind)
+			return errorf(d.current.Pos, "expected pxf.Secret field name (value/hint/fingerprint), got %s", d.tokenErrMsg())
 		}
 		name := d.current.Value
 		namePos := d.current.Pos
@@ -1521,6 +1571,9 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 			return errorf(d.current.Pos, "expected '=' after pxf.Secret field %q, got %s", name, d.current.Kind)
 		}
 		d.advance()
+		if err := d.illegalErr(); err != nil {
+			return err
+		}
 		if d.current.Kind != STRING {
 			return errorf(d.current.Pos, "expected string value for pxf.Secret %s, got %s", name, d.current.Kind)
 		}
