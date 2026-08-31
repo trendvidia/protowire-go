@@ -11,9 +11,9 @@ import (
 
 // Extension field numbers from pxf/annotations.proto.
 const (
-	extRequired protoreflect.FieldNumber = 50000
-	extDefault  protoreflect.FieldNumber = 50001
-	extKey      protoreflect.FieldNumber = 50002
+	extRequired protoreflect.FieldNumber = 1314
+	extDefault  protoreflect.FieldNumber = 1315
+	extKey      protoreflect.FieldNumber = 1316
 )
 
 // KeyFieldName returns the raw (pxf.key) annotation value if set — the
