@@ -196,8 +196,12 @@ func TestValidateDescriptor_TwoDefaultsInOneOneof(t *testing.T) {
 
 	for _, v := range vs {
 		assert.Equal(t, pxf.ViolationDefaultOption, v.Kind)
-		assert.Contains(t, v.Detail, `at most one member of oneof "choice" may carry (pxf.default)`)
+		// Detail names no spelling: two members of one oneof can carry
+		// two different ones (#81), and String() prefixes each violation
+		// with the spelling its own member used.
+		assert.Contains(t, v.Detail, `at most one member of oneof "choice" may carry a default`)
 		assert.Contains(t, v.Detail, "2 do (a, b)")
+		assert.Contains(t, v.String(), `invalid (pxf.default) = `)
 	}
 	assert.Equal(t, "oneoftwodefaults_test.v1.TwoDefaults.a", vs[0].Element)
 	assert.Equal(t, "aaa", vs[0].Name)

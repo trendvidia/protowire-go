@@ -4,7 +4,10 @@
 package pxf
 
 import (
+	"fmt"
+
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
@@ -56,7 +59,11 @@ func IsKeyed(fd protoreflect.FieldDescriptor) bool {
 	return KeyField(fd) != nil
 }
 
-// IsRequired reports whether the field has (pxf.required) = true.
+// IsRequired reports whether the field is required, in either of the two
+// spellings: the bracket option `[(pxf.required) = true]`, or the
+// annotation `@required` carried in the 1327 AnnotationList
+// (see carrier.go). Both are honoured; neither is synthesized from the
+// other.
 // Exported for layered-config consumers (e.g. chameleon) that run
 // their own post-merge required-validation pass with SkipPostDecode.
 //
@@ -68,12 +75,15 @@ func IsKeyed(fd protoreflect.FieldDescriptor) bool {
 // ViolationRequiredOption at bind time; this accessor reports what the
 // schema author wrote, which is what tooling needs for diagnostics.
 func IsRequired(fd protoreflect.FieldDescriptor) bool {
-	return getBoolOption(fd, extRequired)
+	return pxfFieldOptions(fd).required
 }
 
-// Default returns the (pxf.default) value string if set. The string is
-// a PXF literal (e.g. `42`, `true`, `"hello"`); callers parse it with
-// [ApplyDefault] or their own logic. Exported for layered-config
+// Default returns the field's default value string if set, in either of
+// the two spellings: the bracket option `[(pxf.default) = "…"]`, or the
+// annotation `@default(v)` carried in the 1327 AnnotationList (see
+// carrier.go), whose typed argument is reduced to the same literal form.
+// The string is a PXF literal (e.g. `42`, `true`, `hello`); callers parse
+// it with [ApplyDefault] or their own logic. Exported for layered-config
 // consumers running post-merge defaults passes.
 //
 // The annotation value is returned even when its placement is
@@ -93,14 +103,8 @@ func IsRequired(fd protoreflect.FieldDescriptor) bool {
 // [Result.PresentFields] (a member bound to null counts as present) and
 // must apply the same test. See [ApplyDefault].
 func Default(fd protoreflect.FieldDescriptor) (string, bool) {
-	return getStringOption(fd, extDefault)
-}
-
-// isRequired and getDefault are kept as private aliases so the
-// existing in-package callsites (postDecode) don't churn.
-func isRequired(fd protoreflect.FieldDescriptor) bool { return IsRequired(fd) }
-func getDefault(fd protoreflect.FieldDescriptor) (string, bool) {
-	return Default(fd)
+	o := pxfFieldOptions(fd)
+	return o.def, o.defSet
 }
 
 // findNullMaskField returns the "_null" field if it exists and is a
@@ -117,91 +121,34 @@ func findNullMaskField(desc protoreflect.MessageDescriptor) protoreflect.FieldDe
 	return nil
 }
 
-// getBoolOption reads a bool extension from field options.
-// It checks known fields first (protocompile resolves extensions as known fields),
-// then falls back to parsing raw unknown bytes (for protoc-produced descriptors).
-func getBoolOption(fd protoreflect.FieldDescriptor, num protoreflect.FieldNumber) bool {
-	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
-	if !ok || opts == nil {
-		return false
-	}
-	rm := opts.ProtoReflect()
-
-	// Check known fields (protocompile stores resolved extensions here).
-	var found bool
-	rm.Range(func(ofd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
-		if ofd.Number() == num {
-			found = v.Bool()
-			return false
-		}
-		return true
-	})
-	if found {
-		return true
-	}
-
-	// Fallback: parse raw unknown bytes (protoc / descriptor-based).
-	b := rm.GetUnknown()
-	for len(b) > 0 {
-		fnum, wtype, n := protowire.ConsumeTag(b)
-		if n < 0 {
-			break
-		}
-		b = b[n:]
-		switch wtype {
-		case protowire.VarintType:
-			v, vn := protowire.ConsumeVarint(b)
-			if vn < 0 {
-				return false
-			}
-			if fnum == num {
-				return v != 0
-			}
-			b = b[vn:]
-		case protowire.Fixed32Type:
-			if len(b) < 4 {
-				return false
-			}
-			b = b[4:]
-		case protowire.Fixed64Type:
-			if len(b) < 8 {
-				return false
-			}
-			b = b[8:]
-		case protowire.BytesType:
-			_, vn := protowire.ConsumeBytes(b)
-			if vn < 0 {
-				return false
-			}
-			b = b[vn:]
-		default:
-			return false
-		}
-	}
-	return false
-}
-
-// pxfOptions is every PXF annotation [ValidateFile] needs from one
-// field. required has no "set" flag because only `= true` is actionable:
-// an absent (pxf.required) and an explicit `= false` are the same thing
-// to every caller, which is also what [IsRequired] reports.
+// pxfOptions is every PXF annotation [ValidateFile] and [postDecode]
+// need from one field, read from both spellings of the annotation
+// surface. required has no "set" flag because only `= true` is
+// actionable: an absent (pxf.required) and an explicit `= false` are the
+// same thing to every caller, which is also what [IsRequired] reports.
 type pxfOptions struct {
 	key      string
 	keySet   bool
 	def      string
 	defSet   bool
 	required bool
+
+	// Which spelling supplied def and required — see [annotSurface].
+	defSurface annotSurface
+	reqSurface annotSurface
+
+	// defProblem, when non-empty, is why the field's default cannot be
+	// applied: an @default the carrier holds that reduces to no single
+	// literal, or two spellings of it that disagree. [walkMessages]
+	// turns it into a ViolationDefaultOption. It is never silently
+	// dropped — silent non-enforcement is the defect #81 is about.
+	defProblem string
 }
 
-// settled reports whether nothing further in fd's options could change
-// the result, so a reader may stop where it stands. required needs no
-// "set" flag here for the same reason it has none on the struct: once it
-// is true, a later `= false` would not be actionable — while it is
-// false, the scan must go on, since an unread `= true` still would be.
-func (o pxfOptions) settled() bool { return o.keySet && o.defSet && o.required }
-
-// pxfFieldOptions reads the (pxf.key), (pxf.default) and (pxf.required)
-// extensions from fd's options in a single pass.
+// pxfFieldOptions reads every PXF annotation on fd — the bracket-form
+// extensions (pxf.key), (pxf.default) and (pxf.required), and the
+// annotation-form @required / @default carried in the 1327
+// AnnotationList (see carrier.go) — in a single pass over fd's options.
 //
 // [ValidateFile] runs per field on every decode that does not set
 // SkipValidate, so the number of passes over FieldOptions sits on the
@@ -213,21 +160,27 @@ func (o pxfOptions) settled() bool { return o.keySet && o.defSet && o.required }
 // at all. (pxf.required) joined the walker for #72 and rides along here
 // rather than adding a third pass.
 //
-// The public accessors ([KeyFieldName], [Default], [IsRequired]) keep
-// using getStringOption / getBoolOption — they are called one annotation
-// at a time by tooling and do not need the combined shape.
+// [Default] and [IsRequired] are thin wrappers over this rather than
+// readers of their own: with two spellings to consult, a per-annotation
+// reader would duplicate the carrier walk once per accessor and could
+// drift from it. [KeyFieldName] still uses [getStringOption]; (pxf.key)
+// has no annotation-form spelling to consult.
 //
-// The accumulator is a plain local declared after the early return, not
-// a named result. Range's closure captures it, so it is heap-bound
+// The accumulator is a plain local, not a named result. Range's closure captures it, so it is heap-bound
 // wherever it is declared — as a named result that is every call,
 // including the common one where the field carries no options at all,
 // which measured +71% allocs/op on BenchmarkPXFUnmarshal. Declared here
 // the cost lands only on fields that actually have options, which is
 // what getStringOption has always done.
 //
-// Both loops stop once [pxfOptions.settled] holds: there is nothing left
-// to learn, and neither loop is bounded by anything but the number of
-// options the author wrote.
+// Neither loop stops early any more. It used to break once key, default
+// and required were all set, on the ground that nothing further could
+// change the result — which the carrier makes false: a 1327 entry later
+// in the same options blob still carries an @default nobody has read.
+// The exit bounded a loop that is bounded anyway by the number of
+// options the author wrote, and reading the carrier in this pass rather
+// than a second one more than pays for it (see [postDecode], which used
+// to make two passes and now makes one).
 func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 	opts, ok := fd.Options().(*descriptorpb.FieldOptions)
 	if !ok || opts == nil {
@@ -236,6 +189,7 @@ func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 	rm := opts.ProtoReflect()
 
 	var got pxfOptions
+	var carrier []byte
 
 	// Known fields first (protocompile stores resolved extensions here).
 	rm.Range(func(ofd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
@@ -246,18 +200,30 @@ func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 			got.def, got.defSet = v.String(), true
 		case extRequired:
 			got.required = v.Bool()
+		case extAnnotations:
+			// The carrier is a message, so it is re-serialized for
+			// [parseAnnotationList] to walk. Measured against
+			// trendvidia/protocompile v0.25.0 this branch never fires —
+			// the carrier arrives as unknown bytes even when the schema
+			// imports descriptor.proto, because nothing registers the
+			// extension in the Go type registry descriptorpb resolves
+			// against. It fires in a process that has registered it, by
+			// linking a generated package for
+			// protowire/schema/v1/descriptor.proto.
+			if ofd.Kind() == protoreflect.MessageKind {
+				if b, err := proto.Marshal(v.Message().Interface()); err == nil {
+					carrier = append(carrier, b...)
+				}
+			}
 		}
-		return !got.settled()
+		return true
 	})
-	if got.settled() {
-		return got
-	}
 
 	// Fallback: parse raw unknown bytes (protoc / descriptor-based). Fills
 	// only what the known-field pass did not, and is skipped entirely when
-	// there are no unknown bytes — the protocompile case.
+	// there are no unknown bytes.
 	b := rm.GetUnknown()
-	for len(b) > 0 && !got.settled() {
+	for len(b) > 0 {
 		fnum, wtype, n := protowire.ConsumeTag(b)
 		if n < 0 {
 			break
@@ -286,7 +252,7 @@ func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 		case protowire.BytesType:
 			v, vn := protowire.ConsumeBytes(b)
 			if vn < 0 {
-				return got
+				return got.withCarrier(carrier, fd)
 			}
 			switch fnum {
 			case extKey:
@@ -297,13 +263,68 @@ func pxfFieldOptions(fd protoreflect.FieldDescriptor) pxfOptions {
 				if !got.defSet {
 					got.def, got.defSet = string(v), true
 				}
+			case extAnnotations:
+				// Occurrences accumulate rather than the first
+				// winning: a message-typed field split across several
+				// merges under protobuf's rules, and AnnotationList
+				// holds nothing but a repeated field, so concatenating
+				// the payloads is that merge.
+				carrier = append(carrier, v...)
 			}
 			b = b[vn:]
 		default:
-			return got
+			return got.withCarrier(carrier, fd)
 		}
 	}
-	return got
+	return got.withCarrier(carrier, fd)
+}
+
+// withCarrier folds the annotation surface into the bracket surface o
+// already holds.
+//
+// The two are not reconciled (RFC-001 §8.5): neither is synthesized from
+// the other, and a value from one is never blended with a value from the
+// other. What this binder does is honour both, which is exactly what
+// "runtimes upgrade before schemas migrate" asks of it — the annotation
+// form has no other enforcer, and routing it elsewhere would leave one
+// semantic with two enforcers chosen by how the schema was spelled.
+//
+// required is one boolean with one answer, so either spelling asserting
+// it makes the field required; there is no value to combine.
+//
+// default carries a value, so the two spellings can disagree. Applying
+// either silently would be the reconciliation the draft forbids, and
+// picking by precedence would attach meaning to which spelling an author
+// migrated first — a detail they are free to change. The schema is
+// rejected instead, which is the answer draft -01 already gives for two
+// @defaults on one oneof, for the same reason. Equal values are not a
+// disagreement and are not reported.
+func (o pxfOptions) withCarrier(carrier []byte, fd protoreflect.FieldDescriptor) pxfOptions {
+	if len(carrier) == 0 {
+		return o
+	}
+	c := parseAnnotationList(carrier, fd)
+	if c.required {
+		if !o.required {
+			o.reqSurface = surfaceCarrier
+		}
+		o.required = true
+	}
+	switch {
+	case c.defProblem != "":
+		// The unusable annotation is the carrier's, so the diagnostic
+		// blames @default even when a bracket default sits beside it.
+		o.defProblem, o.defSurface = c.defProblem, surfaceCarrier
+	case !c.defSet:
+		// no @default here
+	case !o.defSet:
+		o.def, o.defSet, o.defSurface = c.def, true, surfaceCarrier
+	case o.def != c.def:
+		o.defProblem = fmt.Sprintf(
+			"(pxf.default) = %q and @default = %q carry different values, and the two surfaces must not be reconciled (RFC-001 §8.5)",
+			o.def, c.def)
+	}
+	return o
 }
 
 // getStringOption reads a string extension from field options.

@@ -1,0 +1,331 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 TrendVidia, LLC.
+//
+// Protowire Schema Extensions — descriptor-level lowering targets.
+//
+// This file is the lowering surface for the v1.2 schema-extension grammar
+// described in RFC-001 (`docs/RFC-001-schema-extensions.md`) and IETF draft
+// `-01` (in preparation). It is intentionally written in stock proto3 so it
+// can be parsed by any v1.x port — including pre-v1.2 ones — for backward
+// inspection of descriptors produced by v1.2+ tooling.
+//
+// User-facing surface (the `type`, `function`, `annotation`, `@annot(...)`
+// constructs themselves) is defined by RFC-001 §5 and lives in
+// `protowire/proto/schema/v1/annotations.proto`, which uses v1.2 grammar
+// and therefore requires a v1.2+ parser.
+
+syntax = "proto3";
+
+package protowire.schema.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/descriptor.proto";
+
+// ── Annotation carrier ────────────────────────────────────────────────────
+
+// AnnotationList carries the schema-extension annotations attached to a
+// single declaration. It is wired in as an extension on every Options
+// message at field number 1327 (see `extend` blocks below). Each extend
+// block gives the field a per-kind name (`file_annotations`,
+// `message_annotations`, …) so that every extension has a unique
+// fully-qualified name within this package while sharing the single wire
+// number 1327.
+message AnnotationList {
+  repeated Annotation entries = 1;
+}
+
+// Annotation is one `@name(args)` use site, lowered into descriptor form.
+message Annotation {
+  // Fully-qualified annotation name, e.g. "protowire.schema.v1.validate".
+  string name = 1;
+
+  // Arguments, in source order. Named args may appear after positional ones.
+  repeated AnnotationArg args = 2;
+
+  // Source position of the `@` token. Always populated by the lowering pass.
+  SourceLocation location = 3;
+}
+
+// AnnotationArg is a single argument. `name` is empty for positional args.
+message AnnotationArg {
+  string name = 1;
+
+  oneof value {
+    string string_value  = 10;
+    int64  int_value     = 11;
+    double double_value  = 12;
+    bool   bool_value    = 13;
+    bytes  bytes_value   = 14;
+    Literal literal      = 15; // enum name, message literal, list literal
+    Expression expression = 20; // for annotation params typed `expression`
+  }
+}
+
+// Literal carries non-scalar annotation-argument values: resolved enum
+// value references, typed message literals, and list literals. Scalar
+// argument values live directly in AnnotationArg's oneof (fields 10–14).
+//
+// A message literal's type comes from the annotation param's declared
+// type, or from an explicit type name at the use site when the param is
+// `any` — never inferred from the value's shape. The lowering pass
+// serializes the literal into the Any; consumers unpack it against the
+// FileDescriptorSet they already hold.
+message Literal {
+  oneof kind {
+    EnumLiteral enum_value       = 1; // linker-resolved enum value reference
+    google.protobuf.Any message  = 2; // typed message literal, serialized at lowering
+    ListLiteral list             = 3; // [elem, elem, ...]
+  }
+}
+
+// EnumLiteral is a linker-RESOLVED enum value reference. The lowering
+// pass records the resolution; consumers never re-resolve a bare name
+// against a descriptor pool.
+message EnumLiteral {
+  // FQN of the enum type, e.g. "myco.orders.OrderStatus".
+  string enum_type = 1;
+  // Value name as resolved, e.g. "CANCELLED".
+  string value_name = 2;
+  // Resolved numeric value.
+  int32 number = 3;
+}
+
+// ListLiteral elements are values, not arguments: they carry no name and
+// can never be expressions. All elements of one list MUST be the same
+// kind (and for enum_value elements, the same enum_type); the compiler
+// rejects heterogeneous lists. Nesting (lists of lists) is legal.
+message ListLiteral {
+  repeated LiteralValue elements = 1;
+}
+
+// LiteralValue is one list element: a scalar or a nested Literal kind.
+// Field numbers mirror AnnotationArg's value oneof for parity.
+message LiteralValue {
+  oneof kind {
+    string string_value  = 10;
+    int64  int_value     = 11;
+    double double_value  = 12;
+    bool   bool_value    = 13;
+    bytes  bytes_value   = 14;
+    Literal literal      = 15; // enum value, message, or nested list
+  }
+}
+
+// Expression carries a verbatim engine-language fragment together with
+// the function-call references extracted by the protocompile lowering
+// pass for signature verification and source-mapping.
+message Expression {
+  // Raw engine source, byte-for-byte as the user wrote it (modulo whitespace
+  // normalization). The target engine parses this at descriptor-load time.
+  string source = 1;
+
+  // Function-call references found within this expression. Each entry
+  // identifies an `external function` call site by fully-qualified name and
+  // arity. Used by the engine's init-time verification and by source-map
+  // construction for error attribution.
+  repeated FunctionRef calls = 2;
+
+  // Position of the expression's opening delimiter in the source file.
+  SourceLocation location = 3;
+}
+
+message FunctionRef {
+  string fqn = 1;
+  int32  arity = 2;
+}
+
+// ── File-scope declaration carriers ───────────────────────────────────────
+
+// FileFunctions enumerates the `function` declarations originating in this
+// file. Imported function declarations are NOT replicated here — they live
+// in the FileFunctions of their declaring file and are resolved across
+// imports the same way as messages and enums.
+message FileFunctions {
+  repeated FunctionDecl declarations = 1;
+}
+
+message FunctionDecl {
+  // Package-qualified FQN, e.g. "myco.commons.is_e164".
+  string name = 1;
+
+  repeated FunctionParam params = 2;
+
+  // Bracket-form options from the declaration site (e.g. `[error_code = ...,
+  // openapi_map = ...]`). Keys are unqualified option names; values are
+  // AnnotationArg-shaped for uniform typing.
+  map<string, AnnotationArg> options = 3;
+
+  SourceLocation location = 4;
+}
+
+message FunctionParam {
+  string name = 1;
+  // FQN of the parameter type (primitive, enum, message, or type alias).
+  string type = 2;
+}
+
+// FileAnnotationDecls enumerates the `annotation` declarations originating
+// in this file.
+message FileAnnotationDecls {
+  repeated AnnotationDecl declarations = 1;
+}
+
+message AnnotationDecl {
+  string name = 1;
+  repeated AnnotationParam params = 2;
+  SourceLocation location = 3;
+}
+
+message AnnotationParam {
+  string name = 1;
+  ParamType type = 2;
+  // Populated only when `type == ENUM_OR_MESSAGE`.
+  string type_fqn = 3;
+  // Optional default value for the parameter.
+  AnnotationArg default_value = 4;
+}
+
+enum ParamType {
+  PARAM_TYPE_UNSPECIFIED = 0;
+  EXPRESSION = 1;
+  STRING = 2;
+  INT32 = 3;
+  INT64 = 4;
+  FLOAT = 5;
+  DOUBLE = 6;
+  BOOL = 7;
+  BYTES = 8;
+  ANY = 9;
+  ENUM_OR_MESSAGE = 10;
+}
+
+// FileTypeDecls enumerates the `type` declarations originating in this
+// file. Types are macros at the use site (their refinement rules expand
+// into each consuming field's annotation list), but they are also
+// preserved here as named entities so tooling — IDE go-to-definition,
+// OpenAPI generators producing `components/schemas/<Name>` — can resolve
+// them by name.
+message FileTypeDecls {
+  repeated TypeDecl declarations = 1;
+}
+
+message TypeDecl {
+  // Package-qualified FQN, e.g. "myco.commons.Email".
+  string name = 1;
+
+  // FQN of the base type — a primitive, enum, wrapper, message, or another
+  // type alias. (Container-shaped bases are deferred per RFC-001 §13 #1.)
+  string base_type_fqn = 2;
+
+  // Annotations attached at the declaration site — typically the `@validate`
+  // refinement rule(s) plus any `@description`, `@example`, etc.
+  AnnotationList annotations = 3;
+
+  SourceLocation location = 4;
+}
+
+// ── Source map ────────────────────────────────────────────────────────────
+
+// SourceMap is embedded in FileOptions so that runtime-emitted diagnostics,
+// LSP-driven go-to-definition, and OpenAPI generators can map descriptor
+// positions back to the original source coordinates that produced them.
+message SourceMap {
+  // The originating .proto file, relative to the project root.
+  string file = 1;
+
+  // One entry per source-mappable element produced by the lowering pass.
+  repeated SourceEntry entries = 2;
+}
+
+message SourceEntry {
+  EntryKind kind = 1;
+
+  // Descriptor location in the canonical descriptor-path grammar
+  // (RFC-001 §8.3.1):
+  //   "myco.User.email[protowire.schema.v1.validate#1]"
+  //       — second @validate on the email field
+  //   "myco.User.email"
+  //       — the field's TYPE_REFINEMENT entry (bare element path)
+  //   "myco.User[myco.check#0]/arg#0/call#1"
+  //       — second function-call site in the first argument's expression
+  // Unique within this SourceMap; cross-file indexes key by
+  // (SourceMap.file, descriptor_path). Produced and parsed only via the
+  // exported helper in protocompile fdp/descriptor_path.go.
+  string descriptor_path = 2;
+
+  SourceLocation source_location = 3;
+
+  // Type-refinement provenance: the type-alias links the field's declared
+  // type resolved through, ordered base to derived — the alias the field
+  // was declared with comes last. Only populated for entries with
+  // kind == TYPE_REFINEMENT.
+  //
+  // Links are aliases only; the underlying concrete type (primitive,
+  // enum, or message) is never a link. Recover it from the first link's
+  // TypeDecl.base_type_fqn in FileTypeDecls (1330).
+  //
+  // Example for a field declared `CompanyEmail email = 1;`, given
+  // `type Email = string` and `type CompanyEmail = Email`:
+  //   [{type_fqn: "myco.commons.Email"},
+  //    {type_fqn: "myco.commons.CompanyEmail"}]
+  repeated TypeChainLink type_chain = 4;
+}
+
+enum EntryKind {
+  ENTRY_KIND_UNSPECIFIED = 0;
+  TYPE_REFINEMENT   = 1; // an annotation lowered from a type alias
+  FIELD_VALIDATE    = 2; // an annotation written directly on a field
+  MESSAGE_VALIDATE  = 3; // an annotation written on a message
+  FUNCTION_CALL     = 4; // an `external function` call site
+  ANNOTATION_USE    = 5; // any other @annotation use
+}
+
+message TypeChainLink {
+  string type_fqn = 1;
+  // Where the type alias was declared (so go-to-definition works).
+  SourceLocation declaration_location = 2;
+}
+
+message SourceLocation {
+  // File path relative to project root.
+  string file = 1;
+  // 1-indexed line number.
+  int32 line = 2;
+  // 1-indexed column (Unicode code points, not bytes).
+  int32 column = 3;
+}
+
+// ── Options-message extensions ────────────────────────────────────────────
+//
+// Extension numbers live in protowire's block in the global extension
+// registry, 1314–1363, granted by protocolbuffers/protobuf#28919 (see
+// STABILITY.md). The schema-extensions sub-range is 1327–1346;
+// 1327–1331 are allocated by this revision.
+//
+// Before the registered block existed these carriers sat at 50400–50404,
+// inside an unregistered 50000–59999 squat; that range and the earlier
+// 50100–50104 draft (retired because 50100/50101 are SBE's `schema_id` /
+// `version` on FileOptions, see proto/sbe/annotations.proto) are both
+// dead and must never be reused. Sharing wire-format number 1327
+// across every Options message kind is legal (extension numbers are
+// per-extended-message in protobuf), but each extension field needs a
+// distinct fully-qualified name in this file's package scope, hence
+// the kind-specific naming (`file_annotations`, `message_annotations`,
+// `field_annotations`, …) instead of a single `annotations` token.
+
+extend google.protobuf.FileOptions {
+  AnnotationList file_annotations = 1327;
+
+  FileFunctions       functions        = 1328;
+  FileAnnotationDecls annotation_decls = 1329;
+  FileTypeDecls       type_decls       = 1330;
+  SourceMap           source_map       = 1331;
+}
+
+extend google.protobuf.MessageOptions   { AnnotationList message_annotations    = 1327; }
+extend google.protobuf.FieldOptions     { AnnotationList field_annotations      = 1327; }
+extend google.protobuf.EnumOptions      { AnnotationList enum_annotations       = 1327; }
+extend google.protobuf.EnumValueOptions { AnnotationList enum_value_annotations = 1327; }
+extend google.protobuf.ServiceOptions   { AnnotationList service_annotations    = 1327; }
+extend google.protobuf.MethodOptions    { AnnotationList method_annotations     = 1327; }
+extend google.protobuf.OneofOptions     { AnnotationList oneof_annotations      = 1327; }

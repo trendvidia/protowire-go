@@ -151,6 +151,14 @@ type Violation struct {
 	// ViolationDefaultOption and ViolationRequiredOption, empty for the
 	// reserved-name kinds.
 	Detail string
+
+	// surface is which of the two spellings the offending annotation was
+	// written in, so [Violation.String] quotes @required / @default for a
+	// schema in the annotation form rather than telling its author to
+	// remove a bracket option the file does not contain. Unexported: the
+	// spelling is already in the rendered text, and its zero value is the
+	// bracket form, so a Violation a caller builds itself is unchanged.
+	surface annotSurface
 }
 
 // String renders a one-line human-readable description of v.
@@ -160,11 +168,18 @@ func (v Violation) String() string {
 		return fmt.Sprintf("%s: field %q: invalid (pxf.key) = %q: %s (draft -01 §3.13)",
 			v.File, v.Element, v.Name, v.Detail)
 	case ViolationDefaultOption:
-		return fmt.Sprintf("%s: field %q: invalid (pxf.default) = %q: %s (draft -01 §annotation-extensions)",
-			v.File, v.Element, v.Name, v.Detail)
+		if v.Name == "" {
+			// The default reduced to no literal to quote — a carrier
+			// argument that denotes no single value, or two spellings
+			// that disagree, in which case Detail names both.
+			return fmt.Sprintf("%s: field %q: invalid %s: %s (draft -01 §annotation-extensions)",
+				v.File, v.Element, v.surface.defaultName(), v.Detail)
+		}
+		return fmt.Sprintf("%s: field %q: invalid %s = %q: %s (draft -01 §annotation-extensions)",
+			v.File, v.Element, v.surface.defaultName(), v.Name, v.Detail)
 	case ViolationRequiredOption:
-		return fmt.Sprintf("%s: field %q: invalid (pxf.required): %s (draft -01 §annotation-extensions)",
-			v.File, v.Element, v.Detail)
+		return fmt.Sprintf("%s: field %q: invalid %s: %s (draft -01 §annotation-extensions)",
+			v.File, v.Element, v.surface.requiredName(), v.Detail)
 	}
 	return fmt.Sprintf("%s: %s %q uses PXF-reserved name %q (draft §3.13)",
 		v.File, v.Kind, v.Element, v.Name)
@@ -385,8 +400,17 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 			if opts.keySet {
 				checkKeyOption(path, f, opts.key, out)
 			}
+			if opts.defProblem != "" {
+				*out = append(*out, Violation{
+					File:    path,
+					Element: string(f.FullName()),
+					Kind:    ViolationDefaultOption,
+					Detail:  opts.defProblem,
+					surface: opts.defSurface,
+				})
+			}
 			if opts.defSet {
-				checkDefaultOption(path, f, opts.def, out)
+				checkDefaultOption(path, f, opts.def, opts.defSurface, out)
 			}
 			if oo := realOneof(f); oo != nil {
 				if opts.required {
@@ -396,12 +420,15 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 						Name:    string(oo.Name()),
 						Kind:    ViolationRequiredOption,
 						Detail: fmt.Sprintf(
-							"(pxf.required) is not valid on a member of oneof %q: read per field it demands that one arm always be chosen, which makes every other arm undecodable",
-							oo.Name()),
+							"%s is not valid on a member of oneof %q: read per field it demands that one arm always be chosen, which makes every other arm undecodable",
+							opts.reqSurface.requiredName(), oo.Name()),
+						surface: opts.reqSurface,
 					})
 				}
 				if opts.defSet {
-					oneofDefaults = append(oneofDefaults, oneofDefault{oneof: oo, field: f, def: opts.def})
+					oneofDefaults = append(oneofDefaults, oneofDefault{
+						oneof: oo, field: f, def: opts.def, surface: opts.defSurface,
+					})
 				}
 			}
 		}
@@ -433,9 +460,10 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 // would spend a second full pass over the field's options, which is the
 // cost pxfFieldOptions exists to avoid.
 type oneofDefault struct {
-	oneof protoreflect.OneofDescriptor
-	field protoreflect.FieldDescriptor
-	def   string
+	oneof   protoreflect.OneofDescriptor
+	field   protoreflect.FieldDescriptor
+	def     string
+	surface annotSurface
 }
 
 // checkOneofDefaultCap reports every member of a oneof that carries
@@ -472,7 +500,7 @@ func checkOneofDefaultCap(path string, annotated []oneofDefault, out *[]Violatio
 			names[k] = string(m.field.Name())
 		}
 		detail := fmt.Sprintf(
-			"at most one member of oneof %q may carry (pxf.default); %d do (%s)",
+			"at most one member of oneof %q may carry a default; %d do (%s)",
 			a.oneof.Name(), len(members), strings.Join(names, ", "))
 		for _, m := range members {
 			*out = append(*out, Violation{
@@ -481,6 +509,7 @@ func checkOneofDefaultCap(path string, annotated []oneofDefault, out *[]Violatio
 				Name:    m.def,
 				Kind:    ViolationDefaultOption,
 				Detail:  detail,
+				surface: m.surface,
 			})
 		}
 	}
@@ -554,33 +583,35 @@ func checkKeyOption(path string, f protoreflect.FieldDescriptor, keyName string,
 //
 // def is the authored annotation value, already read by the caller;
 // callers must only invoke this when the annotation is actually set.
-func checkDefaultOption(path string, f protoreflect.FieldDescriptor, def string, out *[]Violation) {
-	violation := func(detail string) {
+func checkDefaultOption(path string, f protoreflect.FieldDescriptor, def string, surface annotSurface, out *[]Violation) {
+	violation := func(format string, args ...any) {
 		*out = append(*out, Violation{
 			File:    path,
 			Element: string(f.FullName()),
 			Name:    def,
 			Kind:    ViolationDefaultOption,
-			Detail:  detail,
+			Detail:  fmt.Sprintf(format, args...),
+			surface: surface,
 		})
 	}
+	name := surface.defaultName()
 	// Map before list: a map field reports IsMap, not IsList, but the
 	// ordering matches applyDefaultImpl's guard and reads the same way.
 	switch {
 	case f.IsMap():
-		violation("(pxf.default) is not valid on map fields: one literal cannot denote a map")
+		violation("%s is not valid on map fields: one literal cannot denote a map", name)
 		return
 	case f.IsList():
-		violation("(pxf.default) is not valid on repeated fields: one literal cannot denote a list")
+		violation("%s is not valid on repeated fields: one literal cannot denote a list", name)
 		return
 	}
 	switch f.Kind() {
 	case protoreflect.GroupKind:
-		violation("(pxf.default) is not valid on group fields")
+		violation("%s is not valid on group fields", name)
 	case protoreflect.MessageKind:
 		if !defaultableMessage(f.Message()) {
-			violation(fmt.Sprintf("(pxf.default) is not valid on message type %s: no PXF literal denotes it",
-				f.Message().FullName()))
+			violation("%s is not valid on message type %s: no PXF literal denotes it",
+				name, f.Message().FullName())
 		}
 	}
 }

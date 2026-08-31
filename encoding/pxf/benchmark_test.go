@@ -122,6 +122,35 @@ func init() {
 	panic("bench.proto not found")
 }
 
+// benchAnnotatedDesc is annotated.v1.Config from null_test.go: eleven
+// fields, ten of them carrying (pxf.required) or (pxf.default), which is
+// what makes it the right shape for measuring postDecode.
+var benchAnnotatedDesc protoreflect.MessageDescriptor
+
+func init() {
+	comp := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(
+			&protocompile.SourceResolver{
+				Accessor: protocompile.SourceAccessorFromMap(map[string]string{
+					"annotated.proto":       annotatedTestProtoSrc,
+					"pxf/annotations.proto": annotationsProtoSrc,
+				}),
+			},
+		),
+	}
+	result, err := comp.Compile(context.Background(), "annotated.proto")
+	if err != nil {
+		panic(err)
+	}
+	for _, f := range result {
+		if f.Path() == "annotated.proto" {
+			benchAnnotatedDesc = f.Messages().ByName("Config")
+			return
+		}
+	}
+	panic("annotated.proto not found")
+}
+
 func benchMessage(b *testing.B) *dynamicpb.Message {
 	b.Helper()
 	msg, err := pxf.UnmarshalDescriptor([]byte(benchPXF), benchDesc)
@@ -135,6 +164,24 @@ func BenchmarkPXFUnmarshal(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		_, err := pxf.UnmarshalDescriptor(data, benchDesc)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.SetBytes(int64(len(data)))
+}
+
+// BenchmarkPXFUnmarshalFullAnnotated covers the path the annotations
+// actually cost on: UnmarshalFull runs postDecode, which reads every
+// absent field's options to decide required-ness and defaults. The plain
+// Unmarshal benchmarks above never reach it, so the annotation surface's
+// price was unmeasured before #81 made postDecode read two spellings.
+func BenchmarkPXFUnmarshalFullAnnotated(b *testing.B) {
+	data := []byte("name = \"n\"\n")
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		_, _, err := pxf.UnmarshalFullDescriptor(data, benchAnnotatedDesc)
 		if err != nil {
 			b.Fatal(err)
 		}
