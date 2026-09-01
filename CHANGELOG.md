@@ -13,6 +13,52 @@ format changes.
 
 ### Changed
 
+- **`github.com/trendvidia/protocompile` v0.25.0 → v0.26.0**, which makes
+  `@default(1.5)` mean 1.5. Test-only: no library package reaches a
+  compiler (`internal/deps` pins that), so this does not reach consumers
+  of `protowire-go` beyond the fixtures it compiles.
+
+  The bump carries
+  [protocompile#149](https://github.com/trendvidia/protocompile/issues/149),
+  the float-truncation defect this repo pinned when the carrier binder
+  landed. A float literal on an `any`-typed annotation parameter — and
+  `annotation default(value: any)` is one — lowered through the integer
+  path, so `@default(1.5)` reached the binder as `int_value: 1` and
+  substituted `1.0` with no diagnostic. It now lowers to
+  `double_value: 1.5`, and `TestCarrier_FloatDefaultKeepsItsFraction`
+  asserts the applied value end to end rather than the reduced literal,
+  because the float path crosses three pieces of code that have to agree.
+
+  The pin did its job: it was written inverted, asserting the truncation,
+  and failed on the bump with its own instructions. It is now a positive
+  assertion, extended to the spellings the fix covers — `1.5`, `2.0`,
+  `-0.125`, `0.1`, `1.5e3`, `1e-3`, `.5`.
+
+  **One narrower divergence remains, newly pinned.** `buildLiteralArg`
+  discards the exactness flag `NumberToken.Int` returns, so a numeric
+  literal that does not convert to a `uint64` is written as the saturated
+  value: `@default(1e100)` arrives as `int_value: -1`, and an integer
+  literal above `uint64` clamps to `18446744073709551615`. `1e100` and
+  `1e10` take the same route and differ only in whether the value
+  survives it, which is why the `#149` fix — routing by the literal's
+  spelling — does not reach this one. A consumer cannot recover from it:
+  `int_value: -1` is indistinguishable from `@default(-1)` by the time the
+  carrier is read. Filed as
+  [protocompile#165](https://github.com/trendvidia/protocompile/issues/165)
+  and pinned in `TestCarrier_ExponentDefaultOutOfInt64RangeWraps`, which
+  also asserts the exact conversions either side of the boundary
+  (`1e10`, `uint64` max) so a fix cannot regress them.
+
+  Two other consumer-visible changes in the release do not reach this
+  repo. `WithStandardImports` now answers with source rather than
+  descriptors — the set of paths it serves is unchanged, and the suite is
+  green on it. `SearchResult.Desc` and `.Proto` are honoured again rather
+  than silently treated as not-found; the only user of that field here is
+  `check/protovalidate`, a separate and already-deprecated module that
+  stays on upstream `bufbuild/protocompile` and is untouched by this bump.
+  Its `go.sum` is unaffected; this repo's goes from 24 modules to 24, with
+  two `buf.build/gen` indirects moving 1.36.11 → 1.36.12.
+
 - **The test suite and the `scripts/` commands now compile fixtures with
   `github.com/trendvidia/protocompile` v0.25.0 instead of upstream
   `github.com/bufbuild/protocompile` v0.14.1.**

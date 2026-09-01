@@ -445,28 +445,102 @@ message Leaf { repeated string tags = 1 @default("x"); }
 	assert.Contains(t, vs[0].String(), "@default is not valid on repeated fields")
 }
 
-// TestCarrier_FloatDefaultIsTruncatedByTheCompiler is a PIN, not an
-// assertion of intent. `annotation default(value: any)` declares a
-// non-scalar parameter, and trendvidia/protocompile v0.25.0's
-// buildLiteralArg routes a number to AnnotationArg.double_value only for
-// a declared float parameter or for no parameter at all — so a float
-// literal under `any` falls through to the integer lowering and
-// `@default(1.5)` reaches this binder as int_value 1.
+// TestCarrier_FloatDefaultKeepsItsFraction covers the one AnnotationArg
+// variant the carrier could not previously reach.
 //
-// The binder applies what the carrier says; inventing a fractional part
-// the carrier does not carry would be guessing. The defect is filed as
-// trendvidia/protocompile#149, and this test is here to fail the day it is
-// fixed, so the divergence cannot outlive it silently.
-func TestCarrier_FloatDefaultIsTruncatedByTheCompiler(t *testing.T) {
-	md := v12Msg(t, annotFile(`message M { double d = 1 @default(1.5); float f = 2 @default(2.25); }`), "M")
+// `annotation default(value: any)` declares a non-scalar parameter, and
+// protocompile up to v0.25.0 routed a number to
+// AnnotationArg.double_value only for a declared float parameter or for
+// no parameter at all — so a float literal under `any` fell through to
+// the integer lowering and `@default(1.5)` arrived as int_value 1. This
+// test was written inverted, asserting the truncation and naming the
+// issue, so that the upgrade could not land quietly; v0.26.0 fixed it
+// (trendvidia/protocompile#149) and the assertion turned over.
+//
+// It asserts the applied value, not just the reduced literal: the float
+// path runs through argLiteral's Fixed64 branch, FormatFloat, and
+// ApplyDefault's ParseFloat, and only the decoded field proves all three
+// agree.
+func TestCarrier_FloatDefaultKeepsItsFraction(t *testing.T) {
+	md := v12Msg(t, annotFile(`
+message M {
+  double d = 1 @default(1.5);
+  float  f = 2 @default(2.25);
+  double neg = 3 @default(-0.125);
+  double small = 4 @default(0.1);
+  double whole = 5 @default(2.0);
+  double sci = 6 @default(1.5e3);
+  double tiny = 7 @default(1e-3);
+  double bare = 8 @default(.5);
+}`), "M")
 
-	def, ok := pxf.Default(md.Fields().ByName("d"))
-	require.True(t, ok)
-	assert.Equal(t, "1", def, "protocompile#149: fix landed — expect \"1.5\" and update this pin")
+	for _, tc := range []struct {
+		field, lit string
+		want       any
+	}{
+		{"d", "1.5", 1.5},
+		{"f", "2.25", float32(2.25)},
+		{"neg", "-0.125", -0.125},
+		{"small", "0.1", 0.1},
+		// A float literal spelled with a zero fraction stays a float:
+		// the lowering follows the literal's spelling, not its value.
+		{"whole", "2", 2.0},
+		{"sci", "1500", 1500.0},
+		{"tiny", "0.001", 0.001},
+		{"bare", "0.5", 0.5},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(tc.field)))
+			require.True(t, ok)
+			assert.Equal(t, tc.lit, def)
 
-	def, ok = pxf.Default(md.Fields().ByName("f"))
-	require.True(t, ok)
-	assert.Equal(t, "2", def, "protocompile#149: fix landed — expect \"2.25\" and update this pin")
+			msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+			require.NoError(t, err)
+			got := msg.ProtoReflect().Get(md.Fields().ByName(protoreflect.Name(tc.field)))
+			assert.Equal(t, tc.want, got.Interface())
+		})
+	}
+}
+
+// TestCarrier_ExponentDefaultOutOfInt64RangeWraps is a PIN, in the same
+// arrangement that #149 was and for the residue that fix does not reach.
+//
+// buildLiteralArg discards the exactness flag NumberToken.Int returns, so
+// a numeric literal that does not convert to a uint64 is written as the
+// saturated value — `@default(1e100)` as int_value -1, an integer literal
+// above uint64 as MaxUint64. `1e100` and `1e10` take the same route and
+// differ only in whether the value survives it, which is why the #149 fix
+// (routing by spelling) does not catch this one.
+//
+// A consumer cannot recover from it: by the time the carrier is read,
+// int_value -1 is indistinguishable from `@default(-1)`. So the binder
+// applies what it is given, exactly as it did before v0.26.0, and this
+// asserts the wrong answer on purpose so the upgrade that fixes
+// trendvidia/protocompile#165 cannot land quietly.
+func TestCarrier_ExponentDefaultOutOfInt64RangeWraps(t *testing.T) {
+	md := v12Msg(t, annotFile(`
+message M {
+  double huge = 1 @default(1e100);
+  uint64 over = 2 @default(99999999999999999999999);
+  double fits = 3 @default(1e10);
+  uint64 max  = 4 @default(18446744073709551615);
+}`), "M")
+
+	for _, tc := range []struct{ field, want, note string }{
+		{"huge", "-1", `protocompile#165: fix landed — expect "1e+100" and update this pin`},
+		{"over", "18446744073709551615", "protocompile#165: fix landed — the literal is above uint64 and must not clamp"},
+
+		// The exact conversions either side of the boundary are correct
+		// today and must stay correct when #165 is fixed.
+		{"fits", "10000000000", ""},
+		{"max", "18446744073709551615", ""},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(tc.field)))
+			require.True(t, ok)
+			assert.Equal(t, tc.want, def, tc.note)
+		})
+	}
 }
 
 // TestCarrier_MalformedBytesAreSurvivable: the carrier is walked as raw
