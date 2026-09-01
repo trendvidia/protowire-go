@@ -830,7 +830,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 	}
 	if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
 		innerFd := mdesc.Fields().ByName("value")
-		v, err := d.consumeScalar(innerFd)
+		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
 			return err
 		}
@@ -897,7 +897,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 			d.markInnerPresent(fd, "value")
 			return nil
 		}
-		v, err := d.consumeScalar(innerFd)
+		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
 			return err
 		}
@@ -1048,7 +1048,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	}
 	if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
 		innerFd := mdesc.Fields().ByName("value")
-		v, err := d.consumeScalar(innerFd)
+		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
 			return protoreflect.Value{}, err
 		}
@@ -1107,7 +1107,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 			sub := list.NewElement().Message()
 			return protoreflect.ValueOfMessage(sub), nil
 		}
-		v, err := d.consumeScalar(innerFd)
+		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
 			return protoreflect.Value{}, err
 		}
@@ -1291,7 +1291,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			}
 			if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
 				innerFd := mdesc.Fields().ByName("value")
-				v, err := d.consumeScalar(innerFd)
+				v, err := d.consumeScalarAs(innerFd, fd)
 				if err != nil {
 					return err
 				}
@@ -1350,7 +1350,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 					fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
 					continue
 				}
-				v, err := d.consumeScalar(innerFd)
+				v, err := d.consumeScalarAs(innerFd, fd)
 				if err != nil {
 					return err
 				}
@@ -1383,13 +1383,13 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			}
 			fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
 		} else if valFd.Kind() == protoreflect.EnumKind {
-			v, err := d.consumeEnum(valFd)
+			v, err := d.consumeEnumAs(valFd, fd)
 			if err != nil {
 				return err
 			}
 			fastMapSet(m, k, v)
 		} else {
-			v, err := d.consumeScalar(valFd)
+			v, err := d.consumeScalarAs(valFd, fd)
 			if err != nil {
 				return err
 			}
@@ -1413,18 +1413,46 @@ func isNonFiniteIdent(tok Token) bool {
 }
 
 func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoreflect.Value, error) {
+	return d.consumeScalarAs(fd, fd)
+}
+
+// consumeScalarAs reads one scalar value typed by fd, but reports it
+// under named's name in any error it raises. The two part company wherever the descriptor that
+// types a value is not the one the document named:
+//
+//   - a well-known wrapper's scalar shorthand. `n = "x"` on a
+//     google.protobuf.Int32Value field is typed by that message's inner
+//     `value` field, so reporting `field "value"` sends the reader
+//     looking for a name their document does not contain — or worse, to
+//     an unrelated field of their own that happens to carry that very
+//     common name;
+//   - a map's values, typed by the synthetic map-entry message's `value`
+//     field, which no document writes either.
+//
+// The block form is not one of these. `n { value = "x" }` really does
+// name `value`, and keeps reporting it: it reaches here through
+// decodeFields on the wrapper's own message, where fd is the field the
+// document wrote.
+//
+// [parseScalarDefault] already separates the two for the defaults path,
+// which meets the same wrapper shorthand; this brings decode into line
+// with it (#85).
+// named is a descriptor rather than a name so that nothing is spent on
+// the success path: consumeScalar passes fd twice, and Name() is reached
+// only where an error is already being built.
+func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
 
 	switch fd.Kind() {
 	case protoreflect.StringKind:
 		if d.current.Kind != STRING {
-			return protoreflect.Value{}, errorf(pos, "expected string for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected string for field %q", named.Name())
 		}
 		// HARDENING.md § UTF-8: proto3 string fields are valid UTF-8.
 		// PXF \xHH and \NNN byte escapes can produce invalid sequences;
 		// reject at the assignment site so b"…" / bytes fields stay raw.
 		if !utf8.ValidString(d.current.Value) {
-			return protoreflect.Value{}, errorf(pos, "invalid UTF-8 in string field %q (use b\"…\" for raw bytes)", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "invalid UTF-8 in string field %q (use b\"…\" for raw bytes)", named.Name())
 		}
 		v := protoreflect.ValueOfString(d.current.Value)
 		d.advance()
@@ -1432,7 +1460,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.BoolKind:
 		if d.current.Kind != BOOL {
-			return protoreflect.Value{}, errorf(pos, "expected bool for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected bool for field %q", named.Name())
 		}
 		v := protoreflect.ValueOfBool(d.current.Value == "true")
 		d.advance()
@@ -1440,7 +1468,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
 		if d.current.Kind != INT {
-			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", named.Name())
 		}
 		n, err := strconv.ParseInt(d.current.Value, 10, 32)
 		if err != nil {
@@ -1451,7 +1479,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
 		if d.current.Kind != INT {
-			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", named.Name())
 		}
 		n, err := strconv.ParseInt(d.current.Value, 10, 64)
 		if err != nil {
@@ -1462,7 +1490,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
 		if d.current.Kind != INT {
-			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", named.Name())
 		}
 		n, err := strconv.ParseUint(d.current.Value, 10, 32)
 		if err != nil {
@@ -1473,7 +1501,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
 		if d.current.Kind != INT {
-			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected integer for field %q", named.Name())
 		}
 		n, err := strconv.ParseUint(d.current.Value, 10, 64)
 		if err != nil {
@@ -1484,7 +1512,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.FloatKind:
 		if d.current.Kind != FLOAT && d.current.Kind != INT && !isNonFiniteIdent(d.current) {
-			return protoreflect.Value{}, errorf(pos, "expected number for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected number for field %q", named.Name())
 		}
 		f, err := strconv.ParseFloat(d.current.Value, 32)
 		if err != nil {
@@ -1495,7 +1523,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.DoubleKind:
 		if d.current.Kind != FLOAT && d.current.Kind != INT && !isNonFiniteIdent(d.current) {
-			return protoreflect.Value{}, errorf(pos, "expected number for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected number for field %q", named.Name())
 		}
 		f, err := strconv.ParseFloat(d.current.Value, 64)
 		if err != nil {
@@ -1506,20 +1534,20 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 
 	case protoreflect.BytesKind:
 		if d.current.Kind != BYTES {
-			return protoreflect.Value{}, errorf(pos, "expected bytes for field %q", fd.Name())
+			return protoreflect.Value{}, errorf(pos, "expected bytes for field %q", named.Name())
 		}
 		decoded, err := decodeBase64Lenient(d.current.Value)
 		if err != nil {
-			return protoreflect.Value{}, errorf(pos, "invalid base64 for field %q: %v", fd.Name(), err)
+			return protoreflect.Value{}, errorf(pos, "invalid base64 for field %q: %v", named.Name(), err)
 		}
 		d.advance()
 		return protoreflect.ValueOfBytes(decoded), nil
 
 	case protoreflect.EnumKind:
-		return d.consumeEnum(fd)
+		return d.consumeEnumAs(fd, named)
 
 	default:
-		return protoreflect.Value{}, errorf(pos, "unsupported kind %s for field %q", fd.Kind(), fd.Name())
+		return protoreflect.Value{}, errorf(pos, "unsupported kind %s for field %q", fd.Kind(), named.Name())
 	}
 }
 
@@ -1633,6 +1661,12 @@ func formatMapKeyForPath(k protoreflect.MapKey) string {
 }
 
 func (d *directDecoder) consumeEnum(fd protoreflect.FieldDescriptor) (protoreflect.Value, error) {
+	return d.consumeEnumAs(fd, fd)
+}
+
+// consumeEnumAs is [consumeScalarAs] for enum-typed values: a map's enum
+// values are typed by the map-entry message's `value` field too.
+func (d *directDecoder) consumeEnumAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
 	switch d.current.Kind {
 	case IDENT:
@@ -1650,7 +1684,7 @@ func (d *directDecoder) consumeEnum(fd protoreflect.FieldDescriptor) (protorefle
 		d.advance()
 		return protoreflect.ValueOfEnum(protoreflect.EnumNumber(n)), nil
 	default:
-		return protoreflect.Value{}, errorf(pos, "expected enum name or number for field %q", fd.Name())
+		return protoreflect.Value{}, errorf(pos, "expected enum name or number for field %q", named.Name())
 	}
 }
 
