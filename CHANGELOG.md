@@ -13,52 +13,70 @@ format changes.
 
 ### Changed
 
-- **`github.com/trendvidia/protocompile` v0.25.0 → v0.28.0**, which makes
-  `@default(1.5)` mean 1.5 and `@default(1e100)` mean 1e100. Test-only:
-  no library package reaches a compiler (`internal/deps` pins that), so
-  this does not reach consumers of `protowire-go` beyond the fixtures it
-  compiles.
+- **`github.com/trendvidia/protocompile` v0.25.0 → v0.29.0**, which makes
+  `@default(1.5)` mean 1.5, `@default(1e100)` mean 1e100, and
+  `@default(1e19)` mean 1e19. Test-only: no library package reaches a
+  compiler (`internal/deps` pins that), so this does not reach consumers
+  of `protowire-go` beyond the fixtures it compiles.
 
-  Three releases, all of them the same subject — a numeric literal on an
+  Four releases, all of them the same subject — a numeric literal on an
   `any`-typed annotation parameter, which `annotation default(value: any)`
   is. Each landed against a pin this repo had already written, so each
   bump failed loudly with its own instructions rather than quietly
   changing what a schema means:
 
-  | | defect | pinned as | fixed in |
-  |---|---|---|---|
-  | [#149](https://github.com/trendvidia/protocompile/issues/149) | `@default(1.5)` → `int_value: 1` | `…FloatDefaultIsTruncatedByTheCompiler` | v0.26.0 |
-  | [#165](https://github.com/trendvidia/protocompile/issues/165) | `@default(1e100)` → `int_value: -1`; a literal above `uint64` clamped | `…ExponentDefaultOutOfInt64RangeWraps` | v0.27.0 |
-  | [#172](https://github.com/trendvidia/protocompile/issues/172) | a literal in `(MaxInt64, MaxUint64]` is decodable only against an unsigned target | `…Int64BandIsAmbiguousAboveMaxInt64` | **open** |
+  | | defect | fixed in |
+  |---|---|---|
+  | [#149](https://github.com/trendvidia/protocompile/issues/149) | `@default(1.5)` → `int_value: 1` | v0.26.0 |
+  | [#165](https://github.com/trendvidia/protocompile/issues/165) | `@default(1e100)` → `int_value: -1`; a literal above `uint64` clamped | v0.27.0 |
+  | [#172](https://github.com/trendvidia/protocompile/issues/172) | a literal in `(MaxInt64, MaxUint64]` decodable only against an unsigned target | v0.29.0 |
+  | [#174](https://github.com/trendvidia/protocompile/issues/174) | …and it survives on the wrapper and arbitrary-precision carriers | **open** |
 
-  The first two pins have turned over into positive assertions.
-  `TestCarrier_FloatDefaultKeepsItsFraction` and
-  `TestCarrier_OutOfRangeDefaultKeepsItsValue` assert the **applied**
-  value end to end, not the reduced literal, because the float path
-  crosses `argLiteral`, `FormatFloat` and `ApplyDefault`'s `ParseFloat`
-  and only the decoded field proves all three agree. Between them they
-  cover `1.5`, `2.0`, `-0.125`, `0.1`, `1.5e3`, `1e-3`, `.5`, `1e100`,
-  `-1e100`, `1.1`, a literal above `uint64` — and the exact conversions
-  either side of the boundary (`1e10`, `uint64` max), so a later fix
-  cannot regress them on its way past.
+  All three fixed pins have turned over into positive assertions —
+  `TestCarrier_FloatDefaultKeepsItsFraction`,
+  `TestCarrier_OutOfRangeDefaultKeepsItsValue` and
+  `TestCarrier_NumericDefaultFollowsTheCarrierType`. Each asserts the
+  **applied** value end to end, not the reduced literal, because the float
+  path crosses `argLiteral`, `FormatFloat` and `ApplyDefault`'s
+  `ParseFloat` and only the decoded field proves all three agree.
 
-  **One ambiguity remains, newly pinned and needing a decision.** An exact
-  `uint64` conversion is reinterpreted through `int64` to preserve its
-  bits, which is deliberate. So every literal in `(MaxInt64, MaxUint64]`
-  lowers to a negative `int_value` whatever its spelling, and the binder
-  recovers the author's value only where the annotated field is unsigned —
-  the one case it can detect. `@default(1e19)` applies `1e19` on a
-  `uint64` field and `-8.446744073709552e+18` on a `double` one. Nothing
-  to fix here: `int_value: -8446744073709551616` is also exactly what
-  `@default(-8446744073709551616)` produces, so the distinction is not in
-  the carrier. Filed as
-  [protocompile#172](https://github.com/trendvidia/protocompile/issues/172)
-  — where one of the two ways out adds a field to the `1327` carrier and
-  is therefore a contract decision for whoever owns `STABILITY.md`, not a
-  patch.
+  **`Default()` returns a different string for some unchanged values.**
+  v0.29.0 routes a numeric argument by the type of the field it is
+  attached to rather than by the literal's spelling, so *every* numeric
+  default on a `float` or `double` field now records `double_value`. The
+  value is unchanged; its spelling is not:
 
-  **v0.27.0 and v0.28.0 reject schema shapes that used to compile**, and
-  none of them can occur against the canonical annotation library: an
+  | schema | before | after |
+  |---|---|---|
+  | `double x = 1 @default(1e10)` | `"10000000000"` | `"1e+10"` |
+  | `double x = 1 @default(9223372036854775807)` | `"9223372036854775807"` | `"9.223372036854776e+18"` |
+  | `double x = 1 @default(1e19)` | `"-8446744073709551616"` ❌ | `"1e+19"` ✅ |
+
+  [`Default`](https://pkg.go.dev/github.com/trendvidia/protowire-go/encoding/pxf#Default)
+  returns that string, so a layered-config consumer that parses it sees
+  exponent notation where it saw a plain integer. `strconv.ParseFloat`
+  and `ApplyDefault` both take it; a consumer doing its own integer
+  parsing on a floating field's default would not. Integer, string, bool
+  and bytes carriers are untouched, `uint64` max still round-trips
+  exactly, and the third row is the bug this fixes.
+
+  **One residue remains, newly pinned.** The routing reads the annotated
+  field's predeclared scalar type, which a message-typed field does not
+  have — so the nine `google.protobuf` wrappers, `pxf.BigInt`,
+  `pxf.Decimal` and `pxf.BigFloat` keep the spelling-based route and with
+  it the ambiguity. Those are exactly the message types a PXF literal may
+  denote (draft `-01`, "Default Placement"), so
+  `google.protobuf.DoubleValue rate = 1 @default(1e19)` — the canonical
+  nullable double — still applies `-8.4e18`. Nothing to fix here:
+  `int_value: -8446744073709551616` is also what
+  `@default(-8446744073709551616)` produces, and that is legal on a
+  double. Filed as
+  [protocompile#174](https://github.com/trendvidia/protocompile/issues/174)
+  and pinned in `TestCarrier_Int64BandSurvivesOnWrapperCarriers`, which
+  also asserts that `UInt64Value` keeps recovering its own value.
+
+  **v0.27.0–v0.28.0 reject schema shapes that used to compile**, and none
+  of them can occur against the canonical annotation library: an
   out-of-range or negative literal on a *declared integer* parameter, a
   list literal on a scalar parameter, and `-0` on an unsigned parameter.
   `protowire/schema/v1/annotations.proto` declares only `string`,

@@ -49,6 +49,7 @@ func compileV12(t *testing.T, src string) protoreflect.FileDescriptor {
 		sources[name] = string(b)
 	}
 	sources["pxf/annotations.proto"] = annotationsProtoSrc
+	sources["pxf/bignum.proto"] = bignumProtoSrc
 
 	comp := protocompile.Compiler{
 		Resolver: protocompile.WithStandardImports(
@@ -312,6 +313,8 @@ package annot.v1;
 import "protowire/schema/v1/annotations.proto";
 import "pxf/annotations.proto";
 import "google/protobuf/struct.proto";
+import "google/protobuf/wrappers.proto";
+import "pxf/bignum.proto";
 ` + body
 }
 
@@ -541,9 +544,16 @@ message M {
 		// not returned zero (protocompile#167).
 		{"fract", "1.1", 1.1},
 
-		// The exact conversions either side of the boundary, unchanged
-		// through all three fixes and asserted so they stay that way.
-		{"fits", "10000000000", 1e10},
+		// v0.29.0 routes a numeric literal by the type of the field it
+		// is attached to, so every numeric default on a floating
+		// carrier now records double_value — including this one, which
+		// converted exactly and used to record int_value. The literal
+		// changes spelling; the applied value does not.
+		{"fits", "1e+10", 1e10},
+
+		// An integer carrier is untouched by that routing, and uint64
+		// max still round-trips exactly through the two's-complement
+		// int_value the carrier has always used for it.
 		{"max", "18446744073709551615", uint64(18446744073709551615)},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
@@ -559,52 +569,102 @@ message M {
 	}
 }
 
-// TestCarrier_Int64BandIsAmbiguousAboveMaxInt64 is a PIN, and the last of
-// the #149 / #165 family. It asserts a wrong answer on purpose.
+// TestCarrier_NumericDefaultFollowsTheCarrierType covers what
+// trendvidia/protocompile#172 fixed in v0.29.0, and it is a broader rule
+// than the issue asked for.
 //
-// An exact uint64 conversion is reinterpreted through int64 to preserve
-// its bits, which is deliberate and documented. So every literal in
-// (MaxInt64, MaxUint64] lowers to a NEGATIVE int_value, whatever its
-// spelling, and a consumer recovers the author's value only where the
-// annotated field is unsigned — which is the one case
-// [unsignedTarget] can detect. On any other target the same bytes read
-// as the negative number they spell, and `int_value: -8446744073709551616`
-// is also exactly what `@default(-8446744073709551616)` produces, so no
-// consumer-side rule can separate them.
+// Every literal in (MaxInt64, MaxUint64] used to lower to a negative
+// int_value, whatever its spelling, because an exact uint64 conversion is
+// reinterpreted through int64 to preserve its bits. The binder recovered
+// the author's value only where the annotated field was unsigned. The fix
+// routes a numeric argument by the type of the field it is attached to
+// rather than by the literal's spelling, so a floating carrier always
+// records double_value — which settles the band and, incidentally, moves
+// every other numeric default on a float or double field too.
 //
-// Nothing to fix here; the carrier does not carry the distinction. Filed
-// as trendvidia/protocompile#172, where the two ways out are a one-line
-// lowering change that costs exactness on unsigned targets, and adding a
-// uint_value variant — a carrier-contract change that is the spec
-// owner's call. This fails when either lands.
-func TestCarrier_Int64BandIsAmbiguousAboveMaxInt64(t *testing.T) {
+// Neither of the two routes #172 proposed was taken; in particular the
+// carrier contract did not change, so nothing here reads a new field.
+func TestCarrier_NumericDefaultFollowsTheCarrierType(t *testing.T) {
 	md := v12Msg(t, annotFile(`
 message M {
-  uint64 recovered = 1 @default(1e19);
-  double lost      = 2 @default(1e19);
-  double lost_dec  = 3 @default(10000000000000000000);
-  double edge      = 4 @default(9223372036854775807);
+  double band     = 1 @default(1e19);
+  double band_dec = 2 @default(10000000000000000000);
+  double edge     = 3 @default(9223372036854775807);
+  double whole    = 4 @default(42);
+  float  narrow   = 5 @default(1e19);
+  uint64 unsigned = 6 @default(1e19);
+  int64  signed   = 7 @default(9223372036854775807);
 }`), "M")
 
-	// An unsigned target reinterprets the two's complement and is right.
-	def, ok := pxf.Default(md.Fields().ByName("recovered"))
-	require.True(t, ok)
-	assert.Equal(t, "10000000000000000000", def)
+	for _, tc := range []struct {
+		field, lit string
+		want       any
+	}{
+		// The band itself: spelling no longer matters, and both forms
+		// now reach the value the author wrote.
+		{"band", "1e+19", 1e19},
+		{"band_dec", "1e+19", 1e19},
+		{"narrow", "1e+19", float32(1e19)},
 
-	// Every other target reads the sign the bytes actually spell.
-	// Spelling does not matter — 1e19 and its decimal expansion agree.
-	for _, field := range []string{"lost", "lost_dec"} {
+		// Broader than the band. MaxInt64 converts exactly and used to
+		// arrive as that exact integer; on a double carrier it now
+		// arrives as the value a double can actually hold, which is
+		// what the field will store either way.
+		{"edge", "9.223372036854776e+18", 9.223372036854776e+18},
+		{"whole", "42", 42.0},
+
+		// Integer carriers keep the routing they had.
+		{"unsigned", "10000000000000000000", uint64(10000000000000000000)},
+		{"signed", "9223372036854775807", int64(9223372036854775807)},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			fd := md.Fields().ByName(protoreflect.Name(tc.field))
+			def, ok := pxf.Default(fd)
+			require.True(t, ok)
+			assert.Equal(t, tc.lit, def)
+
+			msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, msg.ProtoReflect().Get(fd).Interface())
+		})
+	}
+}
+
+// TestCarrier_Int64BandSurvivesOnWrapperCarriers is a PIN. It asserts a
+// wrong answer on purpose.
+//
+// The routing above reads the annotated field's predeclared scalar type,
+// which a message-typed field does not have — so the wrappers and the
+// arbitrary-precision types keep the old spelling-based route, and with
+// it the (MaxInt64, MaxUint64] ambiguity. Those are exactly the message
+// types a PXF literal is allowed to denote (draft -01, "Default
+// Placement"), so this is an ordinary schema rather than an edge:
+// google.protobuf.DoubleValue is the canonical nullable double.
+//
+// Nothing to fix here — int_value -8446744073709551616 is also what
+// `@default(-8446744073709551616)` produces, and that is legal on a
+// double. Filed as trendvidia/protocompile#174. This fails when it lands.
+func TestCarrier_Int64BandSurvivesOnWrapperCarriers(t *testing.T) {
+	md := v12Msg(t, annotFile(`
+message M {
+  google.protobuf.DoubleValue d = 1 @default(1e19);
+  google.protobuf.FloatValue  f = 2 @default(1e19);
+  google.protobuf.UInt64Value u = 3 @default(1e19);
+}`), "M")
+
+	for _, field := range []string{"d", "f"} {
 		def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(field)))
 		require.True(t, ok)
 		assert.Equal(t, "-8446744073709551616", def,
-			`protocompile#172: fix landed — expect "1e+19" and update this pin`)
+			`protocompile#174: fix landed — expect "1e+19" and update this pin`)
 	}
 
-	// MaxInt64 itself is one below the band and is correct, which is
-	// where the whole issue lives: one bit of range.
-	def, ok = pxf.Default(md.Fields().ByName("edge"))
+	// An unsigned wrapper recovers its own value, because unsignedTarget
+	// reaches through to the wrapper's inner type. It must keep doing so
+	// when #174 lands.
+	def, ok := pxf.Default(md.Fields().ByName("u"))
 	require.True(t, ok)
-	assert.Equal(t, "9223372036854775807", def)
+	assert.Equal(t, "10000000000000000000", def)
 }
 
 // TestCarrier_MalformedBytesAreSurvivable: the carrier is walked as raw
