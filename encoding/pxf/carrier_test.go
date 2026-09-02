@@ -687,6 +687,55 @@ message M {
 	assert.Equal(t, uint64(10000000000000000000), inner("wrap_u"))
 }
 
+// TestCarrier_SignedSixtyFourBandWrapsSilently is a PIN, found by
+// sweeping every scalar carrier rather than one type at a time.
+//
+// A literal in (MaxInt64, MaxUint64] is diagnosed on the 32-bit carriers,
+// because the wrapped value still does not fit 32 bits. On int64 / sint64
+// / sfixed64 the wrap lands inside the type's range, so nothing catches
+// it and `@default(1e19)` applies -8446744073709551616 — exactly the
+// carriers where the mistake is invisible are the ones that go
+// unreported.
+//
+// Not resolvable here: int_value -8446744073709551616 on an int64 carrier
+// is also what `@default(-8446744073709551616)` produces, which is a legal
+// int64 default. Filed as trendvidia/protocompile#177, which asks for the
+// compile-time bound v0.27.0 already applies to declared integer
+// parameters. This fails when it lands.
+func TestCarrier_SignedSixtyFourBandWrapsSilently(t *testing.T) {
+	for _, ty := range []string{"int64", "sint64", "sfixed64"} {
+		t.Run(ty, func(t *testing.T) {
+			md := v12Msg(t, annotFile("message M { "+ty+" x = 1 @default(1e19); }"), "M")
+			fd := md.Fields().ByName("x")
+
+			def, ok := pxf.Default(fd)
+			require.True(t, ok)
+			assert.Equal(t, "-8446744073709551616", def,
+				"protocompile#177: fix landed — expect a compile error and retire this pin")
+
+			msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+			require.NoError(t, err, "the silence is the defect: nothing rejects it")
+			assert.Equal(t, int64(-8446744073709551616), msg.ProtoReflect().Get(fd).Interface())
+		})
+	}
+
+	// The 32-bit carriers are loud, and the unsigned 64-bit ones are
+	// right. Both must stay that way when #177 lands.
+	t.Run("32-bit is diagnosed", func(t *testing.T) {
+		md := v12Msg(t, annotFile(`message M { int32 x = 1 @default(1e19); }`), "M")
+		_, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "out of range")
+	})
+	t.Run("unsigned 64-bit is exact", func(t *testing.T) {
+		md := v12Msg(t, annotFile(`message M { uint64 x = 1 @default(1e19); }`), "M")
+		msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+		require.NoError(t, err)
+		assert.Equal(t, uint64(10000000000000000000),
+			msg.ProtoReflect().Get(md.Fields().ByName("x")).Interface())
+	})
+}
+
 // TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers is a PIN. It
 // asserts a wrong answer on purpose, and unlike the four before it this
 // one pins a gap upstream has already decided to leave open.

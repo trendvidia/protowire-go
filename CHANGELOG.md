@@ -33,6 +33,7 @@ format changes.
   | [#172](https://github.com/trendvidia/protocompile/issues/172) | a literal in `(MaxInt64, MaxUint64]` decodable only against an unsigned target | v0.29.0 |
   | [#174](https://github.com/trendvidia/protocompile/issues/174) | …and it survives on the wrapper carriers | v0.30.0 |
   | [#176](https://github.com/trendvidia/protocompile/issues/176) | …and on `pxf.BigInt` / `Decimal` / `BigFloat`, where it flips the sign | **open, deliberately** |
+  | [#177](https://github.com/trendvidia/protocompile/issues/177) | …and on `int64` / `sint64` / `sfixed64`, where it wraps silently | **open** |
 
   All four fixed pins have turned over into positive assertions —
   `TestCarrier_FloatDefaultKeepsItsFraction`,
@@ -90,6 +91,43 @@ format changes.
   — not to reopen the decision, but because the rationale recorded with it
   weighs precision against precision, and the real trade is
   approximately-right against wrong-sign.
+
+  **And one more, found by sweeping every scalar carrier rather than one
+  type at a time** — all fifteen plus enum, which is what the earlier
+  per-type probing had missed. A band literal is diagnosed on the 32-bit
+  carriers, because the wrapped value still does not fit 32 bits. On
+  `int64`, `sint64` and `sfixed64` the wrap lands inside the type's
+  range, so nothing catches it:
+
+  ```proto
+  int64 timeout_ns = 1 @default(1e19);   // applies -8446744073709551616
+  ```
+
+  Exactly the carriers where the mistake is invisible are the ones that
+  go unreported, and `int64` is the common case for nanosecond timestamps
+  and byte counts. Filed as
+  [protocompile#177](https://github.com/trendvidia/protocompile/issues/177),
+  which asks for the compile-time bound v0.27.0 already applies to
+  declared integer parameters, and pinned in
+  `TestCarrier_SignedSixtyFourBandWrapsSilently` — which also pins that
+  the 32-bit carriers stay loud and the unsigned 64-bit ones stay exact,
+  so a fix cannot trade one for the other.
+
+  Confirmed unaffected by the same sweep: `double` and `float` (fixed in
+  v0.29.0), `uint64` and `fixed64` (recovered through the binder's
+  unsigned-target reinterpretation), the 32-bit signed and unsigned
+  carriers and enum (all diagnosed), `string` (applied verbatim), and
+  `bytes` (`decodeBase64Lenient` rejects what is not base64, and accepts
+  `-` because it takes the URL-safe alphabet, which is deliberate).
+
+  The sweep also turned up something that is **not** the compiler's and
+  not new: `ApplyDefault` handles `BoolKind` with `def == "true"` and no
+  validation, so `[(pxf.default) = "True"]` silently yields `false` — the
+  opposite of what was asked — through either annotation surface, while
+  every other kind validates its literal. Filed as
+  [#90](https://github.com/trendvidia/protowire-go/issues/90) rather than
+  fixed here: it predates this bump, and changing what `ApplyDefault`
+  accepts does not belong in a dependency upgrade.
 
   **v0.27.0–v0.28.0 reject schema shapes that used to compile**, and none
   of them can occur against the canonical annotation library: an
