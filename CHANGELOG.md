@@ -13,13 +13,14 @@ format changes.
 
 ### Changed
 
-- **`github.com/trendvidia/protocompile` v0.25.0 → v0.29.0**, which makes
+- **`github.com/trendvidia/protocompile` v0.25.0 → v0.30.0**, which makes
   `@default(1.5)` mean 1.5, `@default(1e100)` mean 1e100, and
-  `@default(1e19)` mean 1e19. Test-only: no library package reaches a
+  `@default(1e19)` mean 1e19 — on a bare `double` and on a
+  `google.protobuf.DoubleValue` alike. Test-only: no library package reaches a
   compiler (`internal/deps` pins that), so this does not reach consumers
   of `protowire-go` beyond the fixtures it compiles.
 
-  Four releases, all of them the same subject — a numeric literal on an
+  Five releases, all of them the same subject — a numeric literal on an
   `any`-typed annotation parameter, which `annotation default(value: any)`
   is. Each landed against a pin this repo had already written, so each
   bump failed loudly with its own instructions rather than quietly
@@ -30,12 +31,14 @@ format changes.
   | [#149](https://github.com/trendvidia/protocompile/issues/149) | `@default(1.5)` → `int_value: 1` | v0.26.0 |
   | [#165](https://github.com/trendvidia/protocompile/issues/165) | `@default(1e100)` → `int_value: -1`; a literal above `uint64` clamped | v0.27.0 |
   | [#172](https://github.com/trendvidia/protocompile/issues/172) | a literal in `(MaxInt64, MaxUint64]` decodable only against an unsigned target | v0.29.0 |
-  | [#174](https://github.com/trendvidia/protocompile/issues/174) | …and it survives on the wrapper and arbitrary-precision carriers | **open** |
+  | [#174](https://github.com/trendvidia/protocompile/issues/174) | …and it survives on the wrapper carriers | v0.30.0 |
+  | [#176](https://github.com/trendvidia/protocompile/issues/176) | …and on `pxf.BigInt` / `Decimal` / `BigFloat`, where it flips the sign | **open, deliberately** |
 
-  All three fixed pins have turned over into positive assertions —
+  All four fixed pins have turned over into positive assertions —
   `TestCarrier_FloatDefaultKeepsItsFraction`,
-  `TestCarrier_OutOfRangeDefaultKeepsItsValue` and
-  `TestCarrier_NumericDefaultFollowsTheCarrierType`. Each asserts the
+  `TestCarrier_OutOfRangeDefaultKeepsItsValue`,
+  `TestCarrier_NumericDefaultFollowsTheCarrierType` and
+  `TestCarrier_WrapperCarrierFollowsItsScalar`. Each asserts the
   **applied** value end to end, not the reduced literal, because the float
   path crosses `argLiteral`, `FormatFloat` and `ApplyDefault`'s
   `ParseFloat` and only the decoded field proves all three agree.
@@ -60,20 +63,33 @@ format changes.
   and bytes carriers are untouched, `uint64` max still round-trips
   exactly, and the third row is the bug this fixes.
 
-  **One residue remains, newly pinned.** The routing reads the annotated
-  field's predeclared scalar type, which a message-typed field does not
-  have — so the nine `google.protobuf` wrappers, `pxf.BigInt`,
-  `pxf.Decimal` and `pxf.BigFloat` keep the spelling-based route and with
-  it the ambiguity. Those are exactly the message types a PXF literal may
-  denote (draft `-01`, "Default Placement"), so
+  v0.30.0 extends that routing to the nine `google.protobuf` wrappers,
+  which v0.29.0 had skipped because it read the field's *predeclared
+  scalar* type and a message-typed field has none. Each wrapper now
+  resolves to the scalar it wraps, so
   `google.protobuf.DoubleValue rate = 1 @default(1e19)` — the canonical
-  nullable double — still applies `-8.4e18`. Nothing to fix here:
-  `int_value: -8446744073709551616` is also what
-  `@default(-8446744073709551616)` produces, and that is legal on a
-  double. Filed as
-  [protocompile#174](https://github.com/trendvidia/protocompile/issues/174)
-  and pinned in `TestCarrier_Int64BandSurvivesOnWrapperCarriers`, which
-  also asserts that `UInt64Value` keeps recovering its own value.
+  nullable double, and a placement the draft blesses — applies `1e19`
+  where it applied `-8.4e18`.
+  `TestCarrier_WrapperCarrierFollowsItsScalar` asserts each wrapper
+  against its bare scalar rather than against a literal string, so the
+  two cannot drift whatever the scalar rule becomes.
+
+  **One gap remains, pinned and left open on purpose.** `pxf.BigInt`,
+  `pxf.Decimal` and `pxf.BigFloat` are deliberately not mapped upstream:
+  they exist to hold what a `double` cannot, so routing them through
+  `double_value` would lose the precision that is their point, and
+  resolving it properly needs a carrier member that can hold them — a
+  contract change. So a literal in `(MaxInt64, MaxUint64]` still lowers
+  ambiguously there, and `pxf.BigInt x = 1 @default(1e19)` applies a
+  **negative** BigInt: not merely imprecise, the wrong sign, from the one
+  type whose stated purpose is holding values above `int64`. Below the
+  band these carriers are exact and stay so. Pinned in
+  `TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers`, which
+  asserts the `negative` flag specifically, and reported as
+  [protocompile#176](https://github.com/trendvidia/protocompile/issues/176)
+  — not to reopen the decision, but because the rationale recorded with it
+  weighs precision against precision, and the real trade is
+  approximately-right against wrong-sign.
 
   **v0.27.0–v0.28.0 reject schema shapes that used to compile**, and none
   of them can occur against the canonical annotation library: an

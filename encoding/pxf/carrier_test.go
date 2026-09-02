@@ -630,41 +630,108 @@ message M {
 	}
 }
 
-// TestCarrier_Int64BandSurvivesOnWrapperCarriers is a PIN. It asserts a
-// wrong answer on purpose.
+// TestCarrier_WrapperCarrierFollowsItsScalar covers what
+// trendvidia/protocompile#174 fixed in v0.30.0.
 //
-// The routing above reads the annotated field's predeclared scalar type,
-// which a message-typed field does not have — so the wrappers and the
-// arbitrary-precision types keep the old spelling-based route, and with
-// it the (MaxInt64, MaxUint64] ambiguity. Those are exactly the message
-// types a PXF literal is allowed to denote (draft -01, "Default
-// Placement"), so this is an ordinary schema rather than an edge:
-// google.protobuf.DoubleValue is the canonical nullable double.
+// v0.29.0 routed a numeric argument by the annotated field's predeclared
+// scalar type, which a message-typed field does not have — so the
+// wrappers kept the spelling-based route and with it the
+// (MaxInt64, MaxUint64] ambiguity that release had just removed from bare
+// scalars. Each wrapper now resolves to the scalar it wraps, so
+// google.protobuf.DoubleValue lowers exactly as double does.
 //
-// Nothing to fix here — int_value -8446744073709551616 is also what
-// `@default(-8446744073709551616)` produces, and that is legal on a
-// double. Filed as trendvidia/protocompile#174. This fails when it lands.
-func TestCarrier_Int64BandSurvivesOnWrapperCarriers(t *testing.T) {
+// Asserted against the bare scalar rather than against a literal string:
+// what matters is that the two agree, whatever the scalar rule becomes.
+func TestCarrier_WrapperCarrierFollowsItsScalar(t *testing.T) {
 	md := v12Msg(t, annotFile(`
 message M {
-  google.protobuf.DoubleValue d = 1 @default(1e19);
-  google.protobuf.FloatValue  f = 2 @default(1e19);
-  google.protobuf.UInt64Value u = 3 @default(1e19);
+  double                      bare_d = 1 @default(1e19);
+  google.protobuf.DoubleValue wrap_d = 2 @default(1e19);
+  float                       bare_f = 3 @default(1e19);
+  google.protobuf.FloatValue  wrap_f = 4 @default(1e19);
+  uint64                      bare_u = 5 @default(1e19);
+  google.protobuf.UInt64Value wrap_u = 6 @default(1e19);
+  int32                       bare_i = 7 @default(42);
+  google.protobuf.Int32Value  wrap_i = 8 @default(42);
 }`), "M")
 
-	for _, field := range []string{"d", "f"} {
+	for _, pair := range []struct{ bare, wrapped string }{
+		{"bare_d", "wrap_d"},
+		{"bare_f", "wrap_f"},
+		// The unsigned wrapper recovered its own value before the fix,
+		// through unsignedTarget reaching the inner type, and must keep
+		// doing so — the fix maps it to predeclared.UInt64, which the
+		// scalar rule leaves alone.
+		{"bare_u", "wrap_u"},
+		{"bare_i", "wrap_i"},
+	} {
+		t.Run(pair.wrapped, func(t *testing.T) {
+			bare, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(pair.bare)))
+			require.True(t, ok)
+			wrapped, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(pair.wrapped)))
+			require.True(t, ok)
+			assert.Equal(t, bare, wrapped, "a wrapper must lower as the scalar it wraps")
+		})
+	}
+
+	// And the value the band produces is now the one the author wrote.
+	msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+	require.NoError(t, err)
+	inner := func(field string) any {
+		fd := md.Fields().ByName(protoreflect.Name(field))
+		sub := msg.ProtoReflect().Get(fd).Message()
+		return sub.Get(fd.Message().Fields().ByName("value")).Interface()
+	}
+	assert.Equal(t, 1e19, inner("wrap_d"))
+	assert.Equal(t, float32(1e19), inner("wrap_f"))
+	assert.Equal(t, uint64(10000000000000000000), inner("wrap_u"))
+}
+
+// TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers is a PIN. It
+// asserts a wrong answer on purpose, and unlike the four before it this
+// one pins a gap upstream has already decided to leave open.
+//
+// pxf.BigInt, pxf.Decimal and pxf.BigFloat are deliberately not mapped to
+// a scalar (protocompile v0.30.0, fdp/annotations.go): they exist to hold
+// values a double cannot represent, so routing them through double_value
+// would lose the precision that is their whole purpose, and resolving it
+// "needs a carrier field that can hold them, not a different scalar
+// route" — a carrier-contract change.
+//
+// So they keep the spelling route, and a literal in
+// (MaxInt64, MaxUint64] still lowers to a negative int_value there. Note
+// what that costs: the result is not merely imprecise, it is the wrong
+// SIGN. `pxf.BigInt x = 1 @default(1e19)` applies a negative BigInt —
+// from the one type in the schema whose purpose is holding values above
+// int64. Filed as trendvidia/protocompile#176.
+func TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers(t *testing.T) {
+	md := v12Msg(t, annotFile(`
+message M {
+  pxf.BigInt   i = 1 @default(1e19);
+  pxf.Decimal  d = 2 @default(1e19);
+  pxf.BigFloat f = 3 @default(1e19);
+  pxf.BigInt   ok_small = 4 @default(42);
+}`), "M")
+
+	for _, field := range []string{"i", "d", "f"} {
 		def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(field)))
 		require.True(t, ok)
 		assert.Equal(t, "-8446744073709551616", def,
-			`protocompile#174: fix landed — expect "1e+19" and update this pin`)
+			`protocompile#176: fix landed — expect "1e+19" or an exact form, and update this pin`)
 	}
 
-	// An unsigned wrapper recovers its own value, because unsignedTarget
-	// reaches through to the wrapper's inner type. It must keep doing so
-	// when #174 lands.
-	def, ok := pxf.Default(md.Fields().ByName("u"))
+	// Below the band these carriers are exact and must stay so: whatever
+	// fixes the band must not route every literal through a double.
+	def, ok := pxf.Default(md.Fields().ByName("ok_small"))
 	require.True(t, ok)
-	assert.Equal(t, "10000000000000000000", def)
+	assert.Equal(t, "42", def)
+
+	msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+	require.NoError(t, err)
+	bi := md.Fields().ByName("i")
+	sub := msg.ProtoReflect().Get(bi).Message()
+	assert.True(t, sub.Get(bi.Message().Fields().ByName("negative")).Bool(),
+		"the sign flip is what makes this worth pinning rather than tolerating")
 }
 
 // TestCarrier_MalformedBytesAreSurvivable: the carrier is walked as raw
