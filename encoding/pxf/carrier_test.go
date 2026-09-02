@@ -502,45 +502,109 @@ message M {
 	}
 }
 
-// TestCarrier_ExponentDefaultOutOfInt64RangeWraps is a PIN, in the same
-// arrangement that #149 was and for the residue that fix does not reach.
+// TestCarrier_OutOfRangeDefaultKeepsItsValue covers what
+// trendvidia/protocompile#165 fixed in v0.27.0: a numeric literal that
+// does not convert exactly to a uint64 used to be written as the
+// saturated value — `@default(1e100)` as int_value -1, a literal above
+// uint64 clamped to MaxUint64 — because buildLiteralArg discarded the
+// exactness flag NumberToken.Int returns. It now takes the double route.
 //
-// buildLiteralArg discards the exactness flag NumberToken.Int returns, so
-// a numeric literal that does not convert to a uint64 is written as the
-// saturated value — `@default(1e100)` as int_value -1, an integer literal
-// above uint64 as MaxUint64. `1e100` and `1e10` take the same route and
-// differ only in whether the value survives it, which is why the #149 fix
-// (routing by spelling) does not catch this one.
-//
-// A consumer cannot recover from it: by the time the carrier is read,
-// int_value -1 is indistinguishable from `@default(-1)`. So the binder
-// applies what it is given, exactly as it did before v0.26.0, and this
-// asserts the wrong answer on purpose so the upgrade that fixes
-// trendvidia/protocompile#165 cannot land quietly.
-func TestCarrier_ExponentDefaultOutOfInt64RangeWraps(t *testing.T) {
+// This test was the inverted pin that asserted the old wrong answers; it
+// fired on the v0.28.0 bump and turned over. Read with
+// [TestCarrier_Int64BandIsAmbiguousAboveMaxInt64], which carries what is
+// still outstanding.
+func TestCarrier_OutOfRangeDefaultKeepsItsValue(t *testing.T) {
 	md := v12Msg(t, annotFile(`
 message M {
-  double huge = 1 @default(1e100);
-  uint64 over = 2 @default(99999999999999999999999);
-  double fits = 3 @default(1e10);
-  uint64 max  = 4 @default(18446744073709551615);
+  double huge  = 1 @default(1e100);
+  double big   = 2 @default(99999999999999999999999);
+  double neg   = 3 @default(-1e100);
+  double fits  = 4 @default(1e10);
+  uint64 max   = 5 @default(18446744073709551615);
+  double fract = 6 @default(1.1);
 }`), "M")
 
-	for _, tc := range []struct{ field, want, note string }{
-		{"huge", "-1", `protocompile#165: fix landed — expect "1e+100" and update this pin`},
-		{"over", "18446744073709551615", "protocompile#165: fix landed — the literal is above uint64 and must not clamp"},
+	for _, tc := range []struct {
+		field, lit string
+		want       any
+	}{
+		{"huge", "1e+100", 1e100},
+		{"big", "1e+23", 1e23},
 
-		// The exact conversions either side of the boundary are correct
-		// today and must stay correct when #165 is fixed.
-		{"fits", "10000000000", ""},
-		{"max", "18446744073709551615", ""},
+		// Negating a magnitude past MaxInt64 used to flip the sign back:
+		// `@default(-18446744073709551615)` arrived as int_value 1.
+		{"neg", "-1e+100", -1e100},
+
+		// 1.1 is not exactly representable, and NumberToken.Int's two
+		// storage paths used to disagree about it — a literal whose
+		// fraction was a negative power of two truncated, one that was
+		// not returned zero (protocompile#167).
+		{"fract", "1.1", 1.1},
+
+		// The exact conversions either side of the boundary, unchanged
+		// through all three fixes and asserted so they stay that way.
+		{"fits", "10000000000", 1e10},
+		{"max", "18446744073709551615", uint64(18446744073709551615)},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
-			def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(tc.field)))
+			fd := md.Fields().ByName(protoreflect.Name(tc.field))
+			def, ok := pxf.Default(fd)
 			require.True(t, ok)
-			assert.Equal(t, tc.want, def, tc.note)
+			assert.Equal(t, tc.lit, def)
+
+			msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, msg.ProtoReflect().Get(fd).Interface())
 		})
 	}
+}
+
+// TestCarrier_Int64BandIsAmbiguousAboveMaxInt64 is a PIN, and the last of
+// the #149 / #165 family. It asserts a wrong answer on purpose.
+//
+// An exact uint64 conversion is reinterpreted through int64 to preserve
+// its bits, which is deliberate and documented. So every literal in
+// (MaxInt64, MaxUint64] lowers to a NEGATIVE int_value, whatever its
+// spelling, and a consumer recovers the author's value only where the
+// annotated field is unsigned — which is the one case
+// [unsignedTarget] can detect. On any other target the same bytes read
+// as the negative number they spell, and `int_value: -8446744073709551616`
+// is also exactly what `@default(-8446744073709551616)` produces, so no
+// consumer-side rule can separate them.
+//
+// Nothing to fix here; the carrier does not carry the distinction. Filed
+// as trendvidia/protocompile#172, where the two ways out are a one-line
+// lowering change that costs exactness on unsigned targets, and adding a
+// uint_value variant — a carrier-contract change that is the spec
+// owner's call. This fails when either lands.
+func TestCarrier_Int64BandIsAmbiguousAboveMaxInt64(t *testing.T) {
+	md := v12Msg(t, annotFile(`
+message M {
+  uint64 recovered = 1 @default(1e19);
+  double lost      = 2 @default(1e19);
+  double lost_dec  = 3 @default(10000000000000000000);
+  double edge      = 4 @default(9223372036854775807);
+}`), "M")
+
+	// An unsigned target reinterprets the two's complement and is right.
+	def, ok := pxf.Default(md.Fields().ByName("recovered"))
+	require.True(t, ok)
+	assert.Equal(t, "10000000000000000000", def)
+
+	// Every other target reads the sign the bytes actually spell.
+	// Spelling does not matter — 1e19 and its decimal expansion agree.
+	for _, field := range []string{"lost", "lost_dec"} {
+		def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(field)))
+		require.True(t, ok)
+		assert.Equal(t, "-8446744073709551616", def,
+			`protocompile#172: fix landed — expect "1e+19" and update this pin`)
+	}
+
+	// MaxInt64 itself is one below the band and is correct, which is
+	// where the whole issue lives: one bit of range.
+	def, ok = pxf.Default(md.Fields().ByName("edge"))
+	require.True(t, ok)
+	assert.Equal(t, "9223372036854775807", def)
 }
 
 // TestCarrier_MalformedBytesAreSurvivable: the carrier is walked as raw
