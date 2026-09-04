@@ -367,6 +367,52 @@ format changes.
 
 ### Fixed
 
+- **`encoding/pb` writes `Decimal.scale` and `BigFloat.exponent` as plain
+  varints, matching `pxf/bignum.proto`**
+  ([#92](https://github.com/trendvidia/protowire-go/issues/92)).
+  The schema declares both as plain `int32`, which is a plain varint;
+  zigzag is `sint32`, which neither field is. This package used zigzag in
+  all four places — two writers and two readers — so it round-tripped its
+  own bytes perfectly and disagreed with every schema-conformant reader.
+
+  **The divergence is not confined to negative values.** Over the full
+  `int32` range, zigzag and plain varint agree on exactly one of
+  4,294,967,296 values — zero. So every non-zero scale and every non-zero
+  exponent was wrong on the wire:
+
+  | value | `scale` meant | a conformant reader saw |
+  |---|---|---|
+  | `3.1415` | 4 | 8 → `31415e-8` |
+  | `1.5` | 1 | 2 → `15e-2` |
+  | `1.0` (`BigFloat`, prec 53) | exponent −52 | 103 → off by 2^155 |
+
+  `BigFloat.exponent` is `exp - prec`, negative for essentially every
+  value, so **every** non-zero `*big.Float` this package wrote was
+  affected.
+
+  Also fixed on the way: a **negative** `Decimal.scale` from a conformant
+  producer was silently read as zero. `big.Int.Exp` returns 1 for a
+  negative exponent, so the single-branch reconstruction dropped the
+  trailing zeros the scale asks for — `25 × 10^2` decoded as `25`.
+  `encoding/pxf`'s carrier reader has always treated a negative scale as
+  trailing zeros; the two agree now. `encoding/pb` never writes one
+  itself, so that arm exists for bytes from another producer.
+
+  **Self-consistency is what hid this**, for the life of the package: the
+  zigzag has been there since the initial public release (`d137dd0`,
+  v0.70.0, 2026-05-06). Every pre-existing test in `encoding/pb` marshals
+  with `Marshal` and unmarshals with `Unmarshal`, so none could have
+  caught it — and none of them changed when it was fixed. The new
+  conformance test uses protobuf-go over a descriptor compiled from
+  `bignum.proto` as an independent oracle, in both directions and byte for
+  byte. Restoring the zigzag fails 12 of its assertions and leaves every
+  older test green, which is the point.
+
+  **This changes `pb` bytes, which STABILITY.md promise 2 freezes**, and
+  it is a family-wide question rather than this repo's alone — see the PR
+  for the cross-port measurement and what it implies for the other three
+  hand-rolled implementations.
+
 - **A type error names the field the document wrote, not the synthetic
   one that types it**
   ([#85](https://github.com/trendvidia/protowire-go/issues/85)).
