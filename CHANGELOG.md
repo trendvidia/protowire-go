@@ -13,51 +13,213 @@ format changes.
 
 ### Changed
 
-- **`github.com/trendvidia/protocompile` v0.25.0 → v0.26.0**, which makes
-  `@default(1.5)` mean 1.5. Test-only: no library package reaches a
+- **`github.com/trendvidia/protocompile` v0.25.0 → v0.31.0**, which makes
+  `@default(1.5)` mean 1.5, `@default(1e100)` mean 1e100, and
+  `@default(1e19)` mean 1e19 — on a bare `double`, on a
+  `google.protobuf.DoubleValue` and on a `pxf.BigInt` alike — and which
+  turns a literal the annotated type cannot hold into a compile error
+  instead of a wrong value. Test-only: no library package reaches a
   compiler (`internal/deps` pins that), so this does not reach consumers
   of `protowire-go` beyond the fixtures it compiles.
 
-  The bump carries
-  [protocompile#149](https://github.com/trendvidia/protocompile/issues/149),
-  the float-truncation defect this repo pinned when the carrier binder
-  landed. A float literal on an `any`-typed annotation parameter — and
-  `annotation default(value: any)` is one — lowered through the integer
-  path, so `@default(1.5)` reached the binder as `int_value: 1` and
-  substituted `1.0` with no diagnostic. It now lowers to
-  `double_value: 1.5`, and `TestCarrier_FloatDefaultKeepsItsFraction`
-  asserts the applied value end to end rather than the reduced literal,
-  because the float path crosses three pieces of code that have to agree.
+  Six releases, all of them the same subject — a numeric literal on an
+  `any`-typed annotation parameter, which `annotation default(value: any)`
+  is. Each landed against a pin this repo had already written, so each
+  bump failed loudly with its own instructions rather than quietly
+  changing what a schema means:
 
-  The pin did its job: it was written inverted, asserting the truncation,
-  and failed on the bump with its own instructions. It is now a positive
-  assertion, extended to the spellings the fix covers — `1.5`, `2.0`,
-  `-0.125`, `0.1`, `1.5e3`, `1e-3`, `.5`.
+  | | defect | fixed in |
+  |---|---|---|
+  | [#149](https://github.com/trendvidia/protocompile/issues/149) | `@default(1.5)` → `int_value: 1` | v0.26.0 |
+  | [#165](https://github.com/trendvidia/protocompile/issues/165) | `@default(1e100)` → `int_value: -1`; a literal above `uint64` clamped | v0.27.0 |
+  | [#172](https://github.com/trendvidia/protocompile/issues/172) | a literal in `(MaxInt64, MaxUint64]` decodable only against an unsigned target | v0.29.0 |
+  | [#174](https://github.com/trendvidia/protocompile/issues/174) | …and it survives on the wrapper carriers | v0.30.0 |
+  | [#176](https://github.com/trendvidia/protocompile/issues/176) | …and on `pxf.BigInt` / `Decimal` / `BigFloat`, where it flips the sign | v0.31.0 |
+  | [#177](https://github.com/trendvidia/protocompile/issues/177) | …and on `int64` / `sint64` / `sfixed64`, where it wraps silently | v0.31.0 |
 
-  **One narrower divergence remains, newly pinned.** `buildLiteralArg`
-  discards the exactness flag `NumberToken.Int` returns, so a numeric
-  literal that does not convert to a `uint64` is written as the saturated
-  value: `@default(1e100)` arrives as `int_value: -1`, and an integer
-  literal above `uint64` clamps to `18446744073709551615`. `1e100` and
-  `1e10` take the same route and differ only in whether the value
-  survives it, which is why the `#149` fix — routing by the literal's
-  spelling — does not reach this one. A consumer cannot recover from it:
-  `int_value: -1` is indistinguishable from `@default(-1)` by the time the
-  carrier is read. Filed as
-  [protocompile#165](https://github.com/trendvidia/protocompile/issues/165)
-  and pinned in `TestCarrier_ExponentDefaultOutOfInt64RangeWraps`, which
-  also asserts the exact conversions either side of the boundary
-  (`1e10`, `uint64` max) so a fix cannot regress them.
+  All six pins have turned over into positive assertions —
+  `TestCarrier_FloatDefaultKeepsItsFraction`,
+  `TestCarrier_OutOfRangeDefaultKeepsItsValue`,
+  `TestCarrier_NumericDefaultFollowsTheCarrierType`,
+  `TestCarrier_WrapperCarrierFollowsItsScalar`,
+  `TestCarrier_OutOfBandDefaultIsDiagnosed` and
+  `TestCarrier_ArbitraryPrecisionCarriersKeepTheirValue`. Each asserts the
+  **applied** value end to end, not the reduced literal, because the float
+  path crosses `argLiteral`, `FormatFloat` and `ApplyDefault`'s
+  `ParseFloat` and only the decoded field proves all three agree.
 
-  Two other consumer-visible changes in the release do not reach this
-  repo. `WithStandardImports` now answers with source rather than
-  descriptors — the set of paths it serves is unchanged, and the suite is
-  green on it. `SearchResult.Desc` and `.Proto` are honoured again rather
-  than silently treated as not-found; the only user of that field here is
+  **v0.31.0 states the rule the previous five were groping toward.** An
+  `any` argument is typed by its own literal, then *converted* to the type
+  of the element it annotates; a literal that cannot be converted, in kind
+  or in range, is a compile error. Where there is no element type — a
+  message-, service-, enum- or file-level annotation — the literal's own
+  type stands. It is written down in
+  `protowire/schema/v1/descriptor.proto` rather than only in code
+  ([protowire#264](https://github.com/trendvidia/protowire/pull/264)), and
+  the vendored copy under `encoding/pxf/testdata/schema/` is re-synced to
+  match it byte for byte.
+
+  What that changes here is mostly that garbage stops compiling. A sweep
+  of 22 carrier types × 10 literals — 220 cells, measured end to end
+  against v0.30.0 and again against v0.31.0 — moves 138 of them:
+
+  | | cells |
+  |---|---|
+  | applied a **wrong value**, now a compile error | 59 |
+  | failed at bind time, now a compile error | 69 |
+  | still applies, value or spelling changed | 8 |
+  | failed at bind time, now applies correctly | 2 |
+  | **applied correctly before and does not now** | **0** |
+
+  The first row is the one that matters:
+
+  | schema | v0.30.0 | v0.31.0 |
+  |---|---|---|
+  | `int64 x = 1 @default(1e19)` | applies `-8446744073709551616` | rejected: out of range for `int64` |
+  | `int32 x = 1 @default(18446744073709551615)` | applies `-1` | rejected: out of range for `int32` |
+  | `bytes x = 1 @default(42)` | applies `[]byte{0xe3}` | rejected: integer literal on `bytes` |
+  | `string x = 1 @default(1e19)` | applies `"-8446744073709551616"` | rejected: float literal on `string` |
+  | `uint64 x = 1 @default(-1)` | applies `18446744073709551615` | rejected: negative on an unsigned type |
+
+  Nothing in this repo's fixtures relied on any of them. The two cells in
+  the fourth row are `@default("\001\002\003")` on `bytes` and on
+  `google.protobuf.BytesValue`: the escaped spelling of a byte string is
+  not valid base64, so it used to fail `decodeBase64Lenient` and now
+  arrives as the three octets it names. The eight in the third row are the
+  bytes and arbitrary-precision changes described below.
+
+  **One fixture line changes meaning, and it is the interesting one.**
+  v0.31.0 routes a string literal on a `bytes` carrier to `bytes_value`
+  rather than `string_value` — a fix for a non-UTF-8 default producing a
+  descriptor `proto.Marshal` refused outright. `bytes_value` carries the
+  literal's own octets, so `@default("AQID")` is now the four characters
+  written, where this package had been base64-decoding it into the three
+  bytes they encode.
+
+  That is correct, and it retires half of an invariant. `(pxf.default)` is
+  declared `string default = 1315`, and a `string` option cannot carry
+  arbitrary bytes — so the bracket form needs a text encoding and the
+  annotation form does not. The two spellings therefore write the same
+  three bytes differently, and both are right:
+
+  ```proto
+  bytes token = 5 [(pxf.default) = "AQID"];      // base64, decoded on the way in
+  bytes token = 5 @default("\001\002\003");      // octets, verbatim
+  ```
+
+  This package already behaved correctly — it re-encodes `bytes_value` to
+  base64 so both surfaces hand `ApplyDefault` the same literal, which is a
+  no-op round trip — so only the fixture and the pin move. The rule is
+  stated in `descriptor.proto` beside the member
+  ([protowire#266](https://github.com/trendvidia/protowire/pull/266)) and
+  pinned here as a deliberate divergence by
+  `TestCarrier_BytesSpellingDiffersByForm`, which fails if either form
+  drifts onto the other's encoding. Found by
+  [protocompile#195](https://github.com/trendvidia/protocompile/issues/195)
+  measuring this repo's suite, which is the only reason it was caught
+  before release: nothing upstream knows the bracket form exists. The
+  carrier surface is unreleased, so no published schema changes meaning.
+
+  **`Default()` returns a different string for some unchanged values.**
+  v0.29.0 routes a numeric argument by the type of the field it is
+  attached to rather than by the literal's spelling, so *every* numeric
+  default on a `float` or `double` field now records `double_value`. The
+  value is unchanged; its spelling is not:
+
+  | schema | before | after |
+  |---|---|---|
+  | `double x = 1 @default(1e10)` | `"10000000000"` | `"1e+10"` |
+  | `double x = 1 @default(9223372036854775807)` | `"9223372036854775807"` | `"9.223372036854776e+18"` |
+  | `double x = 1 @default(1e19)` | `"-8446744073709551616"` ❌ | `"1e+19"` ✅ |
+
+  [`Default`](https://pkg.go.dev/github.com/trendvidia/protowire-go/encoding/pxf#Default)
+  returns that string, so a layered-config consumer that parses it sees
+  exponent notation where it saw a plain integer. `strconv.ParseFloat`
+  and `ApplyDefault` both take it; a consumer doing its own integer
+  parsing on a floating field's default would not. Integer, string, bool
+  and bytes carriers are untouched, `uint64` max still round-trips
+  exactly, and the third row is the bug this fixes. The
+  arbitrary-precision carriers are the exception — see below.
+
+  v0.30.0 extends that routing to the nine `google.protobuf` wrappers,
+  which v0.29.0 had skipped because it read the field's *predeclared
+  scalar* type and a message-typed field has none. Each wrapper now
+  resolves to the scalar it wraps, so
+  `google.protobuf.DoubleValue rate = 1 @default(1e19)` — the canonical
+  nullable double, and a placement the draft blesses — applies `1e19`
+  where it applied `-8.4e18`.
+  `TestCarrier_WrapperCarrierFollowsItsScalar` asserts each wrapper
+  against its bare scalar rather than against a literal string, so the
+  two cannot drift whatever the scalar rule becomes.
+
+  **The gap that was pinned open is closed, and closing it needed a fix
+  on this side too.** `pxf.BigInt`, `pxf.Decimal` and `pxf.BigFloat` are
+  message types with no predeclared scalar, so an untyped argument has
+  nothing to convert to and the literal's own type stands: `1e19` is
+  spelled as a float, so it lowers to `double_value` instead of wrapping
+  into a negative `int_value`. `pxf.BigInt x = 1 @default(1e19)` applied a
+  **negative** BigInt before, from the one type whose stated purpose is
+  holding values above `int64`.
+
+  The compiler half alone would have traded a wrong sign for a bind-time
+  error, because `argLiteral` rendered a `double_value` with `'g'` and PXF
+  spells a `pxf.BigInt` or `pxf.Decimal` literal positionally —
+  `parseBigInt` rejects `1e+10`, so the package would have been emitting a
+  default `ApplyDefault` then refused. `formatCarrierDouble` renders
+  positionally for those two carriers, using shortest-round-trip digits,
+  so `@default(1e100)` reduces to 10^100 — what the author wrote — and not
+  to the 101-digit integer the nearest float64 happens to equal.
+  `pxf.BigFloat` keeps exponent notation, which `big.Float.Parse` takes.
+
+  ```proto
+  pxf.BigInt  i = 1 @default(1e19);   // was -1e19, now 10000000000000000000
+  pxf.BigInt  t = 2 @default(1e10);   // was 10000000000, and still is
+  pxf.Decimal d = 3 @default(1.5);    // unscaled 15, scale 1 — unchanged
+  ```
+
+  **The edge that remains is a wire-contract question, and is recorded
+  rather than worked around.** A literal spelled as an integer has no
+  float type to fall back on, and `AnnotationArg`'s only integer member is
+  a 64-bit signed `int_value` — so `@default(18446744073709551615)` on a
+  `pxf.BigInt` is a compile error, on a type that exists to hold exactly
+  that. Deliberate upstream: carrying it wrapped would hand a consumer a
+  value the author did not write, and carrying it as `double_value` would
+  make the member depend on the magnitude. Resolving it needs a carrier
+  member that can hold an arbitrary-precision literal, which is open as
+  [protowire#263](https://github.com/trendvidia/protowire/issues/263),
+  with [protowire#262](https://github.com/trendvidia/protowire/issues/262)
+  for the member-choice rule that governs it. Pinned by
+  `TestCarrier_ArbitraryPrecisionBeyondInt64IsDiagnosed`; the float
+  spelling is the workaround until one of those is decided.
+
+  The sweep also turned up something that is **not** the compiler's and
+  not new: `ApplyDefault` handles `BoolKind` with `def == "true"` and no
+  validation, so `[(pxf.default) = "True"]` silently yields `false` — the
+  opposite of what was asked — through either annotation surface, while
+  every other kind validates its literal. Filed as
+  [#90](https://github.com/trendvidia/protowire-go/issues/90) rather than
+  fixed here: it predates this bump, and changing what `ApplyDefault`
+  accepts does not belong in a dependency upgrade.
+
+  **v0.27.0–v0.28.0 reject schema shapes that used to compile**, and none
+  of them can occur against the canonical annotation library: an
+  out-of-range or negative literal on a *declared integer* parameter, a
+  list literal on a scalar parameter, and `-0` on an unsigned parameter.
+  `protowire/schema/v1/annotations.proto` declares only `string`,
+  `expression` and `any` parameters — no integer, unsigned or float ones —
+  so there is nothing in this repo, or in a schema written against that
+  library, for the new bounds to bite. v0.31.0's conversion rule bites the
+  `any` ones, which is the table above.
+
+  Two consumer-visible changes in v0.26.0 do not reach this repo either.
+  `WithStandardImports` now answers with source rather than descriptors —
+  the set of paths it serves is unchanged, and the suite is green on it.
+  `SearchResult.Desc` and `.Proto` are honoured again rather than silently
+  treated as not-found; the only user of that field here is
   `check/protovalidate`, a separate and already-deprecated module that
   stays on upstream `bufbuild/protocompile` and is untouched by this bump.
-  Its `go.sum` is unaffected; this repo's goes from 24 modules to 24, with
-  two `buf.build/gen` indirects moving 1.36.11 → 1.36.12.
+  This repo's `go.sum` stays at 24 modules; two `buf.build/gen` indirects
+  moved 1.36.11 → 1.36.12 in the v0.26.0 step.
 
 - **The test suite and the `scripts/` commands now compile fixtures with
   `github.com/trendvidia/protocompile` v0.25.0 instead of upstream
