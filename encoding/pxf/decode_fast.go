@@ -1872,7 +1872,11 @@ func applyDefaultImpl(msg protoreflect.Message, fd protoreflect.FieldDescriptor,
 	case protoreflect.StringKind:
 		msg.Set(fd, protoreflect.ValueOfString(def))
 	case protoreflect.BoolKind:
-		msg.Set(fd, protoreflect.ValueOfBool(def == "true"))
+		b, err := parseBoolDefault(def, fd)
+		if err != nil {
+			return err
+		}
+		msg.Set(fd, protoreflect.ValueOfBool(b))
 	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
 		n, err := strconv.ParseInt(def, 10, 32)
 		if err != nil {
@@ -2008,13 +2012,44 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 	return fmt.Errorf("default values not supported for message type %s (field %q)", mdesc.FullName(), fd.Name())
 }
 
+// parseBoolDefault parses a default literal for a bool field.
+//
+// Exactly "true" and "false", case-sensitive: draft -01 §abnf-grammar
+// gives `bool = %s"true" / %s"false"` and
+// §booleans-null-and-identifier-values says all three value keywords are
+// case-sensitive. The document path gets this for free — [lexer.lexIdent]
+// emits BOOL for those two words and IDENT for everything else — but a
+// default literal arrives as a string from an option or the annotation
+// carrier, with no lexer between it and here.
+//
+// NOT strconv.ParseBool, which is the obvious fix and the wrong one: it
+// accepts "1", "t", "T", "TRUE", "True" and their false counterparts,
+// which is most of the set that has to be rejected. Widening what a bool
+// default accepts beyond the grammar would let a schema mean one thing
+// here and another in a port that reads the same literal by the spec.
+func parseBoolDefault(def string, fd protoreflect.FieldDescriptor) (bool, error) {
+	switch def {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return false, fmt.Errorf(
+		"invalid default bool %q for field %q: a PXF bool literal is exactly \"true\" or \"false\", case-sensitive",
+		def, fd.Name())
+}
+
 // parseScalarDefault parses a default string for a scalar kind.
 func parseScalarDefault(kind protoreflect.Kind, def string, fd protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	switch kind {
 	case protoreflect.StringKind:
 		return protoreflect.ValueOfString(def), nil
 	case protoreflect.BoolKind:
-		return protoreflect.ValueOfBool(def == "true"), nil
+		b, err := parseBoolDefault(def, fd)
+		if err != nil {
+			return protoreflect.Value{}, err
+		}
+		return protoreflect.ValueOfBool(b), nil
 	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
 		n, err := strconv.ParseInt(def, 10, 32)
 		if err != nil {
