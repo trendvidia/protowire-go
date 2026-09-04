@@ -16,6 +16,9 @@ package pxf_test
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +70,44 @@ func compileV12(t *testing.T, src string) protoreflect.FileDescriptor {
 	return nil
 }
 
+// tryCompileV12 is compileV12 for the cases that must NOT compile: it
+// hands back the diagnostic instead of failing the test with it. The
+// compiler rejecting an annotation argument is now part of what this
+// package relies on, so the message is asserted rather than just the
+// absence of a descriptor.
+func tryCompileV12(src string) (protoreflect.FileDescriptor, error) {
+	sources := map[string]string{
+		"annot.proto":           src,
+		"pxf/annotations.proto": annotationsProtoSrc,
+		"pxf/bignum.proto":      bignumProtoSrc,
+	}
+	for _, name := range []string{
+		"protowire/schema/v1/annotations.proto",
+		"protowire/schema/v1/descriptor.proto",
+	} {
+		b, err := os.ReadFile(filepath.Join("testdata", "schema", filepath.FromSlash(name)))
+		if err != nil {
+			return nil, err
+		}
+		sources[name] = string(b)
+	}
+	comp := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(
+			&protocompile.SourceResolver{Accessor: protocompile.SourceAccessorFromMap(sources)},
+		),
+	}
+	files, err := comp.Compile(context.Background(), "annot.proto")
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range files {
+		if f.Path() == "annot.proto" {
+			return f, nil
+		}
+	}
+	return nil, fmt.Errorf("annot.proto not found")
+}
+
 func v12Msg(t *testing.T, src, name string) protoreflect.MessageDescriptor {
 	t.Helper()
 	md := compileV12(t, src).Messages().ByName(protoreflect.Name(name))
@@ -111,6 +152,16 @@ func v12MsgMulti(t *testing.T, extra map[string]string, entry, msg string) proto
 // form the binder has always read, once in the annotation form it could
 // not see. Every assertion below runs against both messages and expects
 // the same answer.
+//
+// The two `token` defaults are spelled differently ON PURPOSE, and are
+// the one place in this file where that is true. They denote the same
+// three bytes. `AnnotationArg.bytes_value` carries a bytes literal's own
+// octets, so the annotation form writes them as an escaped byte string;
+// `(pxf.default)` is declared `string default = 1315` and a string
+// option cannot carry arbitrary bytes, so the bracket form spells them
+// in base64 and this package decodes on the way in. Stated in
+// protowire/schema/v1/descriptor.proto beside `bytes_value`, and pinned
+// as a divergence by TestCarrier_BytesSpellingDiffersByForm below.
 const bothSurfacesSrc = `
 syntax = "proto3";
 package annot.v1;
@@ -144,7 +195,7 @@ message Annotations {
   string role = 2 @default("viewer");
   int32 retries = 3 @default(3);
   bool enabled = 4 @default(true);
-  bytes token = 5 @default("AQID");
+  bytes token = 5 @default("\001\002\003");
   Status status = 6 @default(STATUS_ACTIVE);
   uint64 quota = 7 @default(18446744073709551615);
   google.protobuf.Timestamp created_at = 8 @default("2024-01-15T10:30:00Z");
@@ -212,6 +263,71 @@ func TestCarrier_EnforcementMatchesBracketForm(t *testing.T) {
 		}
 		assert.Equal(t, want.Interface(), got.Interface(), "field %q", name)
 	}
+}
+
+// TestCarrier_BytesSpellingDiffersByForm pins the one exception to #81's
+// "same constraint, same meaning, either spelling", and pins it as a
+// DIVERGENCE rather than letting it be discovered again downstream.
+//
+// #81 makes the two spellings agree on the VALUE a constraint denotes.
+// It never promised they spell that value with the same characters, and
+// for bytes they cannot:
+//
+//   - `bytes_value` carries the literal's own octets. Decoding them again
+//     produces something the author did not write, so this package must
+//     not — protowire/schema/v1/descriptor.proto says so beside the
+//     member, and trendvidia/protowire#266 is where it was written down.
+//   - `(pxf.default)` is `string default = 1315`. A string option has no
+//     way to carry arbitrary bytes, so the bracket form needs a text
+//     encoding, and base64 is the one this package has always used.
+//
+// So `@default("AQID")` is four characters and `[(pxf.default) = "AQID"]`
+// is the three bytes they encode. Both are correct. Found by
+// trendvidia/protocompile#195 measuring this repo's suite against its own
+// HEAD, which is the only reason it was caught before release: nothing
+// upstream knows the bracket form exists.
+//
+// This is not the wrapped-value kind of pin that fails when a fix lands.
+// It asserts the settled rule, and fails if either half drifts back onto
+// the other's encoding.
+func TestCarrier_BytesSpellingDiffersByForm(t *testing.T) {
+	md := v12Msg(t, annotFile(`
+message M {
+  bytes escaped = 1 @default("\001\002\003");
+  bytes hex     = 2 @default("\x01\x02\x03");
+  bytes text    = 3 @default("AQID");
+  bytes empty   = 4 @default("");
+}`), "M")
+
+	msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+	require.NoError(t, err)
+	got := func(name string) []byte {
+		return msg.ProtoReflect().Get(md.Fields().ByName(protoreflect.Name(name))).Bytes()
+	}
+
+	// The two escaped spellings of the same three octets agree, and
+	// agree with what the bracket form spells "AQID".
+	assert.Equal(t, []byte{1, 2, 3}, got("escaped"))
+	assert.Equal(t, []byte{1, 2, 3}, got("hex"))
+	assert.Equal(t, []byte{}, got("empty"))
+
+	// And base64 text is text. This is the assertion that fails if a
+	// decode layer is ever added back to the carrier path — which is
+	// exactly what protocompile#195 caught.
+	assert.Equal(t, []byte("AQID"), got("text"),
+		"bytes_value is verbatim: a consumer that decodes it reads four characters as three bytes")
+
+	// The bracket form keeps its encoding, so the same three bytes are
+	// still written "AQID" there. Both rows below are correct; that they
+	// differ is the point.
+	bracket := v12Msg(t, annotFile(`
+message B {
+  bytes token = 1 [(pxf.default) = "AQID"];
+}`), "B")
+	bmsg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), bracket)
+	require.NoError(t, err)
+	assert.Equal(t, []byte{1, 2, 3},
+		bmsg.ProtoReflect().Get(bracket.Fields().ByName("token")).Bytes())
 }
 
 // TestCarrier_RequiredIsEnforced is the failure #81 names first: an
@@ -687,100 +803,169 @@ message M {
 	assert.Equal(t, uint64(10000000000000000000), inner("wrap_u"))
 }
 
-// TestCarrier_SignedSixtyFourBandWrapsSilently is a PIN, found by
-// sweeping every scalar carrier rather than one type at a time.
+// TestCarrier_OutOfBandDefaultIsDiagnosed covers what
+// trendvidia/protocompile#177 fixed in v0.31.0, and is the pin
+// TestCarrier_SignedSixtyFourBandWrapsSilently turned into.
 //
-// A literal in (MaxInt64, MaxUint64] is diagnosed on the 32-bit carriers,
-// because the wrapped value still does not fit 32 bits. On int64 / sint64
-// / sfixed64 the wrap lands inside the type's range, so nothing catches
-// it and `@default(1e19)` applies -8446744073709551616 — exactly the
-// carriers where the mistake is invisible are the ones that go
-// unreported.
+// A literal in (MaxInt64, MaxUint64] was diagnosed on the 32-bit
+// carriers, because the wrapped value still did not fit 32 bits — but on
+// int64 / sint64 / sfixed64 the wrap landed inside the type's range, so
+// nothing caught it and `@default(1e19)` applied -8446744073709551616.
+// Exactly the carriers where the mistake was invisible were the ones that
+// went unreported, and int64 is the common case for nanosecond timestamps
+// and byte counts.
 //
-// Not resolvable here: int_value -8446744073709551616 on an int64 carrier
-// is also what `@default(-8446744073709551616)` produces, which is a legal
-// int64 default. Filed as trendvidia/protocompile#177, which asks for the
-// compile-time bound v0.27.0 already applies to declared integer
-// parameters. This fails when it lands.
-func TestCarrier_SignedSixtyFourBandWrapsSilently(t *testing.T) {
-	for _, ty := range []string{"int64", "sint64", "sfixed64"} {
+// It could not be caught here: int_value -8446744073709551616 on an int64
+// carrier is also what `@default(-8446744073709551616)` produces, which
+// is a legal int64 default. The fix is the compile-time bound v0.27.0
+// already applied to declared integer parameters, now applied to an
+// untyped argument against the type it annotates.
+//
+// The whole band is asserted, not one literal: below it every carrier
+// still takes the value, so a bound that is merely too tight fails here.
+func TestCarrier_OutOfBandDefaultIsDiagnosed(t *testing.T) {
+	for _, ty := range []string{"int64", "sint64", "sfixed64", "int32"} {
 		t.Run(ty, func(t *testing.T) {
-			md := v12Msg(t, annotFile("message M { "+ty+" x = 1 @default(1e19); }"), "M")
-			fd := md.Fields().ByName("x")
-
-			def, ok := pxf.Default(fd)
-			require.True(t, ok)
-			assert.Equal(t, "-8446744073709551616", def,
-				"protocompile#177: fix landed — expect a compile error and retire this pin")
-
-			msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
-			require.NoError(t, err, "the silence is the defect: nothing rejects it")
-			assert.Equal(t, int64(-8446744073709551616), msg.ProtoReflect().Get(fd).Interface())
+			_, err := tryCompileV12(annotFile("message M { " + ty + " x = 1 @default(1e19); }"))
+			require.Error(t, err, "a literal past the carrier's range must not compile")
+			assert.Contains(t, err.Error(), "is out of range for the annotated type `"+ty+"`")
 		})
 	}
 
-	// The 32-bit carriers are loud, and the unsigned 64-bit ones are
-	// right. Both must stay that way when #177 lands.
-	t.Run("32-bit is diagnosed", func(t *testing.T) {
-		md := v12Msg(t, annotFile(`message M { int32 x = 1 @default(1e19); }`), "M")
-		_, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "out of range")
+	// A signed 64-bit carrier still takes everything that does fit,
+	// including its own extremes — the bound must reject the band, not
+	// the type's range.
+	t.Run("in range still compiles", func(t *testing.T) {
+		md := v12Msg(t, annotFile(`
+message M {
+  int64 max = 1 @default(9223372036854775807);
+  int64 min = 2 @default(-9223372036854775808);
+}`), "M")
+		msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
+		require.NoError(t, err)
+		assert.Equal(t, int64(math.MaxInt64),
+			msg.ProtoReflect().Get(md.Fields().ByName("max")).Interface())
+		assert.Equal(t, int64(math.MinInt64),
+			msg.ProtoReflect().Get(md.Fields().ByName("min")).Interface())
 	})
+
+	// And the unsigned 64-bit carriers, for which the band is in range,
+	// stay exact: the fix must not trade one carrier's silence for
+	// another's false alarm.
 	t.Run("unsigned 64-bit is exact", func(t *testing.T) {
-		md := v12Msg(t, annotFile(`message M { uint64 x = 1 @default(1e19); }`), "M")
+		md := v12Msg(t, annotFile(`
+message M {
+  uint64  a = 1 @default(1e19);
+  fixed64 b = 2 @default(18446744073709551615);
+}`), "M")
 		msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(10000000000000000000),
-			msg.ProtoReflect().Get(md.Fields().ByName("x")).Interface())
+			msg.ProtoReflect().Get(md.Fields().ByName("a")).Interface())
+		assert.Equal(t, uint64(18446744073709551615),
+			msg.ProtoReflect().Get(md.Fields().ByName("b")).Interface())
 	})
 }
 
-// TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers is a PIN. It
-// asserts a wrong answer on purpose, and unlike the four before it this
-// one pins a gap upstream has already decided to leave open.
+// TestCarrier_ArbitraryPrecisionCarriersKeepTheirValue covers what
+// trendvidia/protocompile#176 fixed in v0.31.0, and is the pin
+// TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers turned into.
 //
-// pxf.BigInt, pxf.Decimal and pxf.BigFloat are deliberately not mapped to
-// a scalar (protocompile v0.30.0, fdp/annotations.go): they exist to hold
-// values a double cannot represent, so routing them through double_value
-// would lose the precision that is their whole purpose, and resolving it
-// "needs a carrier field that can hold them, not a different scalar
-// route" — a carrier-contract change.
+// pxf.BigInt, pxf.Decimal and pxf.BigFloat are message types with no
+// predeclared scalar, so an untyped argument has nothing to convert to
+// and draft -01 leaves the literal's own type standing: `1e19` is spelled
+// as a float, so it lowers to double_value. Before v0.31.0 it took the
+// spelling route into int_value and wrapped, and the result was not
+// merely imprecise but the wrong SIGN — a negative BigInt, from the one
+// type in the schema whose purpose is holding values above int64.
 //
-// So they keep the spelling route, and a literal in
-// (MaxInt64, MaxUint64] still lowers to a negative int_value there. Note
-// what that costs: the result is not merely imprecise, it is the wrong
-// SIGN. `pxf.BigInt x = 1 @default(1e19)` applies a negative BigInt —
-// from the one type in the schema whose purpose is holding values above
-// int64. Filed as trendvidia/protocompile#176.
-func TestCarrier_Int64BandSurvivesOnArbitraryPrecisionCarriers(t *testing.T) {
+// The second half of the fix is this package's. A double_value reduces to
+// a PXF literal, and 'g' formatting writes `1e+19`, which parseBigInt and
+// parseDecimal reject — so the sign flip would have become a bind-time
+// error rather than the value the author wrote. formatCarrierDouble
+// renders positionally for those two carriers. Both halves are asserted
+// below, because either alone leaves the field wrong.
+func TestCarrier_ArbitraryPrecisionCarriersKeepTheirValue(t *testing.T) {
 	md := v12Msg(t, annotFile(`
 message M {
-  pxf.BigInt   i = 1 @default(1e19);
-  pxf.Decimal  d = 2 @default(1e19);
-  pxf.BigFloat f = 3 @default(1e19);
-  pxf.BigInt   ok_small = 4 @default(42);
+  pxf.BigInt   i   = 1 @default(1e19);
+  pxf.Decimal  d   = 2 @default(1e19);
+  pxf.BigFloat f   = 3 @default(1e19);
+  pxf.BigInt   ten = 4 @default(1e10);
+  pxf.BigInt   sml = 5 @default(42);
+  pxf.Decimal  fr  = 6 @default(1.5);
+  pxf.BigInt   neg = 7 @default(-1e19);
 }`), "M")
 
-	for _, field := range []string{"i", "d", "f"} {
-		def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(field)))
-		require.True(t, ok)
-		assert.Equal(t, "-8446744073709551616", def,
-			`protocompile#176: fix landed — expect "1e+19" or an exact form, and update this pin`)
+	// The literal each carrier reduces to. The exact-decimal carriers get
+	// positional notation; BigFloat keeps the exponent, which
+	// big.Float.Parse takes.
+	for _, tc := range []struct{ field, lit string }{
+		{"i", "10000000000000000000"},
+		{"d", "10000000000000000000"},
+		{"f", "1e+19"},
+		{"ten", "10000000000"},
+		{"sml", "42"},
+		{"fr", "1.5"},
+		{"neg", "-10000000000000000000"},
+	} {
+		def, ok := pxf.Default(md.Fields().ByName(protoreflect.Name(tc.field)))
+		require.True(t, ok, "field %q", tc.field)
+		assert.Equal(t, tc.lit, def, "field %q", tc.field)
 	}
 
-	// Below the band these carriers are exact and must stay so: whatever
-	// fixes the band must not route every literal through a double.
-	def, ok := pxf.Default(md.Fields().ByName("ok_small"))
-	require.True(t, ok)
-	assert.Equal(t, "42", def)
-
+	// And the value that reaches the field, which is what the literal
+	// exists to produce. 1e19 is exactly 10^19 in a float64 — 5^19 fits
+	// in 53 bits — so "exact" here is a real claim, not a rounding.
 	msg, _, err := pxf.UnmarshalFullDescriptor([]byte(``), md)
 	require.NoError(t, err)
+	want, _ := new(big.Int).SetString("10000000000000000000", 10)
+
 	bi := md.Fields().ByName("i")
 	sub := msg.ProtoReflect().Get(bi).Message()
-	assert.True(t, sub.Get(bi.Message().Fields().ByName("negative")).Bool(),
-		"the sign flip is what makes this worth pinning rather than tolerating")
+	assert.False(t, sub.Get(bi.Message().Fields().ByName("negative")).Bool(),
+		"the sign flip protocompile#176 recorded must be gone")
+	assert.Equal(t, want.Bytes(), sub.Get(bi.Message().Fields().ByName("abs")).Bytes())
+
+	nf := md.Fields().ByName("neg")
+	nsub := msg.ProtoReflect().Get(nf).Message()
+	assert.True(t, nsub.Get(nf.Message().Fields().ByName("negative")).Bool(),
+		"a negative literal is still negative")
+	assert.Equal(t, want.Bytes(), nsub.Get(nf.Message().Fields().ByName("abs")).Bytes())
+
+	// Decimal keeps its scale rather than being routed through an
+	// integer, so a fractional default is still exact.
+	df := md.Fields().ByName("fr")
+	dsub := msg.ProtoReflect().Get(df).Message()
+	assert.Equal(t, []byte{15}, dsub.Get(df.Message().Fields().ByName("unscaled")).Bytes())
+	assert.Equal(t, int32(1), int32(dsub.Get(df.Message().Fields().ByName("scale")).Int()))
+}
+
+// TestCarrier_ArbitraryPrecisionBeyondInt64IsDiagnosed pins the edge the
+// fix above does NOT reach, so it is recorded rather than discovered.
+//
+// A literal spelled as an integer has no float type to fall back on, and
+// AnnotationArg's only integer member is a 64-bit signed int_value. So
+// `@default(18446744073709551615)` on a pxf.BigInt — a value that type
+// exists precisely to hold — is a compile error, not a member that can
+// carry it. That is deliberate upstream: carrying it wrapped would hand a
+// consumer a value the author did not write, and carrying it as
+// double_value would make the member depend on the magnitude.
+//
+// Resolving it needs a carrier member that can hold an arbitrary-precision
+// literal, which is a wire-contract change and is open as
+// trendvidia/protowire#263 (with trendvidia/protowire#262 for the rule
+// that governs the member choice at all). Until one of those is decided,
+// the workaround is the float spelling, which the test above covers.
+func TestCarrier_ArbitraryPrecisionBeyondInt64IsDiagnosed(t *testing.T) {
+	for _, ty := range []string{"pxf.BigInt", "pxf.Decimal", "pxf.BigFloat"} {
+		t.Run(ty, func(t *testing.T) {
+			_, err := tryCompileV12(annotFile(
+				"message M { " + ty + " x = 1 @default(18446744073709551615); }"))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "int_value")
+		})
+	}
 }
 
 // TestCarrier_MalformedBytesAreSurvivable: the carrier is walked as raw

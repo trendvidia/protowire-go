@@ -254,7 +254,7 @@ func argLiteral(b []byte, fd protoreflect.FieldDescriptor) (lit string, problem 
 			}
 		case fnArgDoubleValue:
 			if typ == protowire.Fixed64Type {
-				return strconv.FormatFloat(math.Float64frombits(u), 'g', -1, 64), ""
+				return formatCarrierDouble(math.Float64frombits(u), fd), ""
 			}
 		case fnArgBoolValue:
 			if typ == protowire.VarintType {
@@ -312,6 +312,44 @@ func enumValueName(b []byte) string {
 		b = b[n:]
 	}
 	return ""
+}
+
+// formatCarrierDouble reduces a double_value to the PXF literal the
+// bracket form would have carried for fd.
+//
+// Shortest-round-trip digits either way; the choice is only whether an
+// exponent is allowed to appear in them. It cannot on the
+// arbitrary-precision carriers: PXF spells a pxf.BigInt or pxf.Decimal
+// literal in positional notation, so `1e+10` is a literal this package's
+// own parseBigInt and parseDecimal reject — argLiteral would be emitting
+// a default that ApplyDefault then refuses.
+//
+// The carriers reach double_value at all because they are message types
+// with no predeclared scalar to convert an untyped argument to, so
+// draft -01 leaves the literal's own type standing (protowire#262).
+// Which member the compiler picks is not settled here; whichever it
+// picks, an argument that reduces to a literal this package cannot parse
+// is this package's own inconsistency.
+//
+// 'f' expands the shortest digits, not the double's exact binary value,
+// so `@default(1e100)` reduces to 10^100 — what the author wrote — and
+// not to the 101-digit integer the float64 nearest it happens to equal.
+func formatCarrierDouble(v float64, fd protoreflect.FieldDescriptor) string {
+	if exactDecimalTarget(fd) {
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	}
+	return strconv.FormatFloat(v, 'g', -1, 64)
+}
+
+// exactDecimalTarget reports whether fd's default literal is parsed as a
+// positional decimal with no exponent. pxf.BigFloat is deliberately not
+// here: parseBigFloat goes through big.Float.Parse, which takes an
+// exponent, and expanding 1e308 to 309 digits for it would gain nothing.
+func exactDecimalTarget(fd protoreflect.FieldDescriptor) bool {
+	if fd.Kind() != protoreflect.MessageKind {
+		return false
+	}
+	return isBigInt(fd.Message()) || isDecimal(fd.Message())
 }
 
 // unsignedTarget reports whether fd's default literal is read as an
