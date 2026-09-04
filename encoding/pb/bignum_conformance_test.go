@@ -277,6 +277,30 @@ func TestBignumConformance_SchemaBytesAreReadableHere(t *testing.T) {
 	})
 }
 
+// fieldRecords splits a message into one entry per field, keyed by field
+// number and holding that field's encoded bytes, tag included.
+//
+// Comparing these instead of the whole buffer keeps the assertion
+// byte-exact per field while not asserting an order the wire format does
+// not fix. protobuf-go's output order is deliberately unstable -- measured
+// over 200 marshals of one dynamicpb message, two orderings appeared, 174
+// and 26 -- so a whole-buffer comparison against it is a ~13% flake, which
+// is how this test failed on one CI leg of nine and passed on the rest.
+func fieldRecords(t *testing.T, b []byte) map[protowire.Number][]byte {
+	t.Helper()
+	out := map[protowire.Number][]byte{}
+	for len(b) > 0 {
+		num, typ, tn := protowire.ConsumeTag(b)
+		require.GreaterOrEqual(t, tn, 0, "corrupt tag")
+		vn := protowire.ConsumeFieldValue(num, typ, b[tn:])
+		require.GreaterOrEqual(t, vn, 0, "corrupt field")
+		require.NotContains(t, out, num, "field %d repeated", num)
+		out[num] = b[:tn+vn]
+		b = b[tn+vn:]
+	}
+	return out
+}
+
 // TestBignumConformance_ByteForByte pins the encoding itself, so a
 // future change to either side has to look at the bytes rather than at
 // a round trip that agrees with itself.
@@ -294,8 +318,10 @@ func TestBignumConformance_ByteForByte(t *testing.T) {
 	theirs, err := proto.Marshal(oracle)
 	require.NoError(t, err)
 
-	assert.Equal(t, theirs, ours,
-		"this package's bytes must be byte-identical to a conformant encoder's")
+	// Field by field, not buffer by buffer: every field must encode to the
+	// same bytes, and the order they appear in is not part of the contract.
+	assert.Equal(t, fieldRecords(t, theirs), fieldRecords(t, ours),
+		"every field must encode byte-identically to a conformant encoder's")
 
 	// The specific byte the bug lived in: scale 4 is varint 0x04, not
 	// zigzag's 0x08.
