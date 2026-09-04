@@ -4,7 +4,7 @@ go 1.25.6
 
 require (
 	github.com/stretchr/testify v1.12.1
-	github.com/trendvidia/protocompile v0.31.0
+	github.com/trendvidia/protocompile v0.32.0
 	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 )
