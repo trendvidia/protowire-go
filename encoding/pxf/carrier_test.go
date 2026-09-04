@@ -941,29 +941,39 @@ message M {
 	assert.Equal(t, int32(1), int32(dsub.Get(df.Message().Fields().ByName("scale")).Int()))
 }
 
-// TestCarrier_ArbitraryPrecisionBeyondInt64IsDiagnosed pins the edge the
-// fix above does NOT reach, so it is recorded rather than discovered.
+// TestCarrier_ArbitraryPrecisionBeyondInt64 replaces
+// TestCarrier_ArbitraryPrecisionBeyondInt64IsDiagnosed, which pinned the
+// edge that could not be reached from this side and said what would fix it:
 //
-// A literal spelled as an integer has no float type to fall back on, and
-// AnnotationArg's only integer member is a 64-bit signed int_value. So
-// `@default(18446744073709551615)` on a pxf.BigInt — a value that type
-// exists precisely to hold — is a compile error, not a member that can
-// carry it. That is deliberate upstream: carrying it wrapped would hand a
-// consumer a value the author did not write, and carrying it as
-// double_value would make the member depend on the magnitude.
+//	Resolving it needs a carrier member that can hold an
+//	arbitrary-precision literal, which is a wire-contract change and is
+//	open as trendvidia/protowire#263.
 //
-// Resolving it needs a carrier member that can hold an arbitrary-precision
-// literal, which is a wire-contract change and is open as
-// trendvidia/protowire#263 (with trendvidia/protowire#262 for the rule
-// that governs the member choice at all). Until one of those is decided,
-// the workaround is the float spelling, which the test above covers.
-func TestCarrier_ArbitraryPrecisionBeyondInt64IsDiagnosed(t *testing.T) {
-	for _, ty := range []string{"pxf.BigInt", "pxf.Decimal", "pxf.BigFloat"} {
-		t.Run(ty, func(t *testing.T) {
-			_, err := tryCompileV12(annotFile(
-				"message M { " + ty + " x = 1 @default(18446744073709551615); }"))
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "int_value")
+// protowire#263 landed in schema v1.13: AnnotationArg gained
+// big_int_value, decimal_value and big_float_value, and protocompile
+// v0.32.0 emits them. A value these types exist to hold now arrives in a
+// member that can hold it, rather than as a compile error -- and before
+// protocompile v0.31.0, as a NEGATIVE int_value.
+func TestCarrier_ArbitraryPrecisionBeyondInt64(t *testing.T) {
+	for _, tc := range []struct{ ty, lit, want string }{
+		// MaxUint64: one past int_value's range, exact here.
+		{"pxf.BigInt", "18446744073709551615", "18446744073709551615"},
+		{"pxf.Decimal", "18446744073709551615", "18446744073709551615"},
+		// Far beyond any fixed width.
+		{"pxf.BigInt", "123456789012345678901234567890",
+			"123456789012345678901234567890"},
+		{"pxf.BigInt", "-123456789012345678901234567890",
+			"-123456789012345678901234567890"},
+		// The exact decimal a float64 cannot hold: through double_value
+		// this came back as 12345678901234567168.
+		{"pxf.Decimal", "12345678901234567890", "12345678901234567890"},
+	} {
+		t.Run(tc.ty+"/"+tc.lit, func(t *testing.T) {
+			md := v12Msg(t, annotFile(
+				"message M { "+tc.ty+" x = 1 @default("+tc.lit+"); }"), "M")
+			def, ok := pxf.Default(md.Fields().ByName("x"))
+			require.True(t, ok, "%s must carry %s", tc.ty, tc.lit)
+			assert.Equal(t, tc.want, def)
 		})
 	}
 }

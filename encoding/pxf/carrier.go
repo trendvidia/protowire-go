@@ -29,6 +29,7 @@ package pxf
 import (
 	"encoding/base64"
 	"math"
+	"math/big"
 	"strconv"
 
 	"google.golang.org/protobuf/encoding/protowire"
@@ -67,6 +68,14 @@ const (
 	fnArgBoolValue   = 13 // AnnotationArg.bool_value
 	fnArgBytesValue  = 14 // AnnotationArg.bytes_value
 	fnArgLiteral     = 15 // AnnotationArg.literal
+
+	// The arbitrary-precision members (protowire#263, schema v1.13). An
+	// argument on a pxf.BigInt / Decimal / BigFloat element arrives in
+	// one of these whatever its magnitude, so a small value on one of
+	// those types is here rather than in int_value.
+	fnArgBigIntValue   = 16 // AnnotationArg.big_int_value
+	fnArgDecimalValue  = 17 // AnnotationArg.decimal_value
+	fnArgBigFloatValue = 18 // AnnotationArg.big_float_value
 
 	fnLiteralEnumValue = 1 // Literal.enum_value
 	fnEnumValueName    = 2 // EnumLiteral.value_name
@@ -225,6 +234,132 @@ func argName(b []byte) string {
 
 // argLiteral reduces one AnnotationArg to the PXF literal string the
 // bracket form would have carried, so that both surfaces hand
+// Readers for the arbitrary-precision members. Each reduces the nested
+// message to the same PXF literal string the bracket form carries, so
+// everything downstream -- placement checks, the oneof cap, ApplyDefault --
+// stays shared between the two surfaces.
+//
+// The shapes are pxf.BigInt{abs=1, negative=2},
+// pxf.Decimal{unscaled=1, scale=2, negative=3} and
+// pxf.BigFloat{mantissa=1, exponent=2, prec=3, negative=4}, matching
+// encoding/pb's marshal helpers.
+
+func bigIntLiteral(b []byte) (string, string) {
+	abs, negative, ok := absAndSign(b, 1, 2)
+	if !ok {
+		return "", "@default's big_int_value is not well-formed"
+	}
+	if negative {
+		abs.Neg(abs)
+	}
+	return abs.String(), ""
+}
+
+func decimalLiteral(b []byte) (string, string) {
+	var unscaled []byte
+	var scale int32
+	var negative bool
+	for len(b) > 0 {
+		num, typ, u, v, n := nextField(b)
+		if n < 0 {
+			return "", "@default's decimal_value is not well-formed"
+		}
+		switch num {
+		case 1:
+			unscaled = v
+		case 2:
+			if typ == protowire.VarintType {
+				// `int32 scale = 2` in bignum.proto: a PLAIN varint, not
+				// zigzag. protocompile writes these through protobuf-go, so
+				// the schema's encoding is what arrives. (encoding/pb
+				// hand-rolls zigzag here, which disagrees with the schema
+				// for negative scales -- filed separately.)
+				scale = int32(u)
+			}
+		case 3:
+			negative = u != 0
+		}
+		b = b[n:]
+	}
+
+	// value = unscaled x 10^(-scale), rendered positionally so that
+	// parseDecimal takes it. A negative scale means trailing zeros.
+	d := new(big.Int).SetBytes(unscaled)
+	if negative {
+		d.Neg(d)
+	}
+	if scale <= 0 {
+		if scale < 0 {
+			d.Mul(d, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-scale)), nil))
+		}
+		return d.String(), ""
+	}
+	return new(big.Rat).SetFrac(d,
+		new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)).
+		FloatString(int(scale)), ""
+}
+
+func bigFloatLiteral(b []byte) (string, string) {
+	var mantissa []byte
+	var exponent int32
+	var prec uint32
+	var negative bool
+	for len(b) > 0 {
+		num, typ, u, v, n := nextField(b)
+		if n < 0 {
+			return "", "@default's big_float_value is not well-formed"
+		}
+		switch num {
+		case 1:
+			mantissa = v
+		case 2:
+			if typ == protowire.VarintType {
+				// `int32 exponent = 2`: a plain varint, as for Decimal.scale.
+				exponent = int32(u)
+			}
+		case 3:
+			prec = uint32(u)
+		case 4:
+			negative = u != 0
+		}
+		b = b[n:]
+	}
+	if prec == 0 {
+		return "", "@default's big_float_value declares no precision"
+	}
+
+	// value = mantissa x 2^exponent.
+	m := new(big.Float).SetPrec(uint(prec)).SetInt(new(big.Int).SetBytes(mantissa))
+	f := new(big.Float).SetPrec(uint(prec)).SetMantExp(m, int(exponent))
+	if negative {
+		f.Neg(f)
+	}
+	// 'g' keeps the exponent, which big.Float.Parse takes -- BigFloat is
+	// the one carrier whose literal is not required to be positional.
+	return f.Text('g', -1), ""
+}
+
+// absAndSign reads a magnitude field and a sign flag out of a nested
+// big-number message.
+func absAndSign(b []byte, magField, signField protowire.Number) (*big.Int, bool, bool) {
+	var abs []byte
+	var negative bool
+	for len(b) > 0 {
+		num, _, u, v, n := nextField(b)
+		if n < 0 {
+			return nil, false, false
+		}
+		switch num {
+		case magField:
+			abs = v
+		case signField:
+			negative = u != 0
+		}
+		b = b[n:]
+	}
+	return new(big.Int).SetBytes(abs), negative, true
+}
+
 // [ApplyDefault] the same thing. Returns a problem string instead for an
 // argument no single literal can denote.
 //
@@ -265,6 +400,18 @@ func argLiteral(b []byte, fd protoreflect.FieldDescriptor) (lit string, problem 
 				// The bracket form spells a bytes default as bare
 				// base64 ("AQID"), which is what [ApplyDefault] parses.
 				return base64.StdEncoding.EncodeToString(v), ""
+			}
+		case fnArgBigIntValue:
+			if v != nil {
+				return bigIntLiteral(v)
+			}
+		case fnArgDecimalValue:
+			if v != nil {
+				return decimalLiteral(v)
+			}
+		case fnArgBigFloatValue:
+			if v != nil {
+				return bigFloatLiteral(v)
 			}
 		case fnArgLiteral:
 			if v != nil {
