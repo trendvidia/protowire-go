@@ -412,6 +412,51 @@ format changes.
   it is a family-wide question rather than this repo's alone — see the PR
   for the cross-port measurement and what it implies for the other three
   hand-rolled implementations.
+  
+- **A bool default that is neither `true` nor `false` is now an error,
+  not a silent `false`**
+  ([#90](https://github.com/trendvidia/protowire-go/issues/90)).
+  `applyDefaultImpl` handled `BoolKind` with a bare `def == "true"` and
+  no validation, so every other spelling became `false` — the *opposite*
+  of what the author asked for, with no diagnostic at bind time and none
+  at decode time. The value was wrong rather than absent, so nothing
+  downstream could notice:
+
+  ```
+  [(pxf.default) = "true"]      -> true      ✅
+  [(pxf.default) = "True"]      -> false     ❌  now an error
+  [(pxf.default) = "TRUE"]      -> false     ❌  now an error
+  [(pxf.default) = "1"]         -> false     ❌  now an error
+  [(pxf.default) = ""]          -> false     ❌  now an error
+  ```
+
+  Every other kind already parsed its literal and errored when it did not
+  fit; bool alone treated "not the string `true`" as "false".
+
+  **This is the code matching ground truth, not a new rule.** Draft `-01`
+  §abnf-grammar gives `bool = %s"true" / %s"false"` and
+  §booleans-null-and-identifier-values makes all three value keywords
+  case-sensitive. The document path already had it right — the lexer
+  emits `BOOL` for exactly those two words — but a default literal
+  arrives as a string from an option or the annotation carrier, with no
+  lexer between it and the setter.
+
+  **`strconv.ParseBool` is not the fix.** It accepts `1`, `t`, `T`,
+  `TRUE`, `True` and their false counterparts, which is most of the set
+  that has to be rejected; widening a bool default beyond the grammar
+  would let a schema mean one thing here and another in a port that reads
+  the same literal by the spec.
+
+  The bare equality was in **two** places, not the one the issue quotes:
+  `applyDefaultImpl`'s own `BoolKind` arm (a plain `bool` field) and
+  `parseScalarDefault`'s (a `google.protobuf.BoolValue` wrapper). Both go
+  through one `parseBoolDefault` now. Reached through every path that
+  applies a default — the exported
+  [`ApplyDefault`](https://pkg.go.dev/github.com/trendvidia/protowire-go/encoding/pxf#ApplyDefault),
+  `postDecode`, and the layered-config consumers that run their own
+  passes with `SkipPostDecode` — and covered at all three.
+
+  A rejected literal leaves the field untouched rather than half-set.
 
 - **A type error names the field the document wrote, not the synthetic
   one that types it**
