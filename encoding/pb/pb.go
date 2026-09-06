@@ -621,8 +621,11 @@ func marshalBigRat(rat *big.Rat) []byte {
 		msg = protowire.AppendBytes(msg, absBytes)
 	}
 	if scale != 0 {
+		// `int32 scale = 2` in pxf/bignum.proto: a PLAIN varint, with a
+		// negative value sign-extended to 64 bits. Zigzag is sint32,
+		// which this field is not (#92).
 		msg = protowire.AppendTag(msg, 2, protowire.VarintType)
-		msg = protowire.AppendVarint(msg, protowire.EncodeZigZag(int64(scale)))
+		msg = protowire.AppendVarint(msg, uint64(int64(scale)))
 	}
 	if negative {
 		msg = protowire.AppendTag(msg, 3, protowire.VarintType)
@@ -651,8 +654,11 @@ func marshalBigFloat(bf *big.Float) []byte {
 	}
 	adjExp := int32(exp) - int32(prec)
 	if adjExp != 0 {
+		// `int32 exponent = 2`: a plain varint, as for Decimal.scale
+		// above. adjExp is negative for almost every value, which is why
+		// this field is where #92 bit hardest.
 		msg = protowire.AppendTag(msg, 2, protowire.VarintType)
-		msg = protowire.AppendVarint(msg, protowire.EncodeZigZag(int64(adjExp)))
+		msg = protowire.AppendVarint(msg, uint64(int64(adjExp)))
 	}
 	msg = protowire.AppendTag(msg, 3, protowire.VarintType)
 	msg = protowire.AppendVarint(msg, uint64(prec))
@@ -786,7 +792,8 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
 			if vn < 0 {
 				return fmt.Errorf("corrupt scale in Decimal")
 			}
-			scale = int32(protowire.DecodeZigZag(v))
+			// Plain varint: the low 32 bits, read as signed.
+			scale = int32(v)
 			data = data[vn:]
 		case 3:
 			v, vn := protowire.ConsumeVarint(data)
@@ -803,9 +810,26 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
 			data = data[n:]
 		}
 	}
+	// value = unscaled x 10^(-scale). A NEGATIVE scale therefore means
+	// trailing zeros, not a fraction — big.Int.Exp returns 1 for a
+	// negative exponent, so the single-branch form silently read a
+	// negative scale as 0 and dropped the zeros (#92). encoding/pxf's
+	// carrier reader has always treated it this way; this is the two
+	// agreeing.
+	//
+	// encoding/pb never writes a negative scale itself (ratToDecimal
+	// returns max(twos, fives) or a digit count, both >= 0), so this arm
+	// exists for bytes from a conformant producer.
 	unscaled := new(big.Int).SetBytes(unscaledBytes)
-	denom := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
-	rat.SetFrac(unscaled, denom)
+	if scale < 0 {
+		// -int64(scale), not int64(-scale): negating math.MinInt32 as an
+		// int32 overflows.
+		unscaled.Mul(unscaled, new(big.Int).Exp(big.NewInt(10), big.NewInt(-int64(scale)), nil))
+		rat.SetInt(unscaled)
+	} else {
+		denom := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
+		rat.SetFrac(unscaled, denom)
+	}
 	if negative {
 		rat.Neg(rat)
 	}
@@ -836,7 +860,8 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float) error {
 			if vn < 0 {
 				return fmt.Errorf("corrupt exponent in BigFloat")
 			}
-			exp = int32(protowire.DecodeZigZag(v))
+			// Plain varint, as for Decimal.scale.
+			exp = int32(v)
 			data = data[vn:]
 		case 3:
 			v, vn := protowire.ConsumeVarint(data)
