@@ -273,6 +273,26 @@ format changes.
 
 ### Added
 
+- **The `pb` codec is tested against protobuf-go, not only against
+  itself** ([#99](https://github.com/trendvidia/protowire-go/issues/99)).
+  Every earlier `pb` test marshalled and unmarshalled with this package,
+  so a wrong encoding passed as long as it was wrong consistently, which
+  is how #92 shipped and survived four months. `conformance_test.go`
+  compiles a schema written for the purpose and checks the scalar,
+  negative-integer, float-special, nested, repeated, packed, map and
+  oneof-shaped paths in both directions: bytes this package writes must
+  read as the same message in protobuf-go and match its records byte for
+  byte, and bytes protobuf-go writes must decode here to the same values.
+  One helper, `oracleMarshal`, is now the only way the tests ask
+  protobuf-go for bytes, with `Deterministic: true` and the reason it is
+  required written once; the big-number conformance tests use it too.
+  The first run found one byte-level divergence — a map entry omits a
+  zero-valued key or value where protobuf-go always writes both, lossless
+  in every reader tried — which is pinned as
+  `TestConformance_MapEntriesOmitZeroValues` and decided in
+  [#105](https://github.com/trendvidia/protowire-go/issues/105), because
+  the bytes `pb.Marshal` writes are promise 2's contract. Test-only; no
+  API or wire-format change.
 - **The binder reads the `1327` schema-extension annotation carrier, so a
   schema written `@required` / `@default(v)` is enforced**
   ([#81](https://github.com/trendvidia/protowire-go/issues/81)).
