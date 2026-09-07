@@ -93,3 +93,119 @@ func TestDecimalScaleBound(t *testing.T) {
 		})
 	}
 }
+
+type bigFloatHolder struct {
+	F *big.Float `protowire:"1"`
+}
+
+// bigFloatWire builds field 1 as a pxf.BigFloat by hand.
+func bigFloatWire(mant []byte, exp int32, prec uint32) []byte {
+	var sub []byte
+	sub = protowire.AppendTag(sub, 1, protowire.BytesType)
+	sub = protowire.AppendBytes(sub, mant)
+	sub = protowire.AppendTag(sub, 2, protowire.VarintType)
+	sub = protowire.AppendVarint(sub, uint64(int64(exp)))
+	sub = protowire.AppendTag(sub, 3, protowire.VarintType)
+	sub = protowire.AppendVarint(sub, uint64(prec))
+	var out []byte
+	out = protowire.AppendTag(out, 1, protowire.BytesType)
+	return protowire.AppendBytes(out, sub)
+}
+
+// TestBigFloatExponentNeedsNoBound is the written reason #95 asks for:
+// decoding is prompt across the whole int32 exponent range because
+// big.Float stores the exponent rather than materialising 2^exponent,
+// and the decoded value is exact.
+func TestBigFloatExponentNeedsNoBound(t *testing.T) {
+	for _, exp := range []int32{math.MinInt32, -1_000_000, -1, 0, 1, 1_000_000, math.MaxInt32 - 8} {
+		t.Run(big.NewInt(int64(exp)).String(), func(t *testing.T) {
+			var h bigFloatHolder
+			err := promptly(t, 5*time.Second, func() error { return Unmarshal(bigFloatWire([]byte{25}, exp, 64), &h) })
+			if err != nil {
+				t.Fatalf("exponent %d: %v", exp, err)
+			}
+			// 25 = 0b11001, so v = 25 × 2^exp has MantExp exponent exp+5.
+			if got := h.F.MantExp(nil); got != int(exp)+5 {
+				t.Fatalf("exponent %d: decoded MantExp %d, want %d", exp, got, int(exp)+5)
+			}
+			if h.F.IsInf() {
+				t.Fatalf("exponent %d: decoded to an infinity", exp)
+			}
+		})
+	}
+}
+
+// TestBigFloatOverflowIsAnError: a mantissa whose bits push the exponent
+// past big.Float's range used to decode as +Inf, which pxf.BigFloat
+// cannot represent. protowire#278 makes that an error.
+func TestBigFloatOverflowIsAnError(t *testing.T) {
+	var h bigFloatHolder
+	err := promptly(t, 5*time.Second, func() error { return Unmarshal(bigFloatWire([]byte{25}, math.MaxInt32, 64), &h) })
+	if err == nil || !strings.Contains(err.Error(), "overflows") {
+		t.Fatalf("err = %v, want an overflow error", err)
+	}
+}
+
+// TestMarshalRefusesWhatUnmarshalRejects: the encoders refuse a value the
+// wire cannot carry, instead of writing bytes no conformant decoder
+// accepts (a scale past the limit), a wrong exponent (int32 wrap), or
+// panicking (an infinity).
+func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
+	two := func(k int64) *big.Int { return new(big.Int).Exp(big.NewInt(2), big.NewInt(k), nil) }
+
+	t.Run("Decimal scale past the limit", func(t *testing.T) {
+		_, err := Marshal(&decimalHolder{D: new(big.Rat).SetFrac(big.NewInt(1), two(MaxNumericLiteralDigits+1))})
+		if err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits") {
+			t.Fatalf("err = %v, want the MaxNumericLiteralDigits error", err)
+		}
+	})
+	t.Run("Decimal scale at the limit round-trips", func(t *testing.T) {
+		in := &decimalHolder{D: new(big.Rat).SetFrac(big.NewInt(1), two(MaxNumericLiteralDigits))}
+		data, err := Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out decimalHolder
+		if err := Unmarshal(data, &out); err != nil {
+			t.Fatal(err)
+		}
+		if in.D.Cmp(out.D) != 0 {
+			t.Fatalf("round trip changed the value")
+		}
+	})
+	t.Run("infinite BigFloat", func(t *testing.T) {
+		// At precision 0 the encoder used to write an empty message that
+		// read back as zero; at any other precision it dereferenced nil.
+		for _, prec := range []uint{0, 64} {
+			for _, sign := range []int{1, -1} {
+				_, err := Marshal(&bigFloatHolder{F: new(big.Float).SetPrec(prec).SetInf(sign < 0)})
+				if err == nil || !strings.Contains(err.Error(), "infinite") {
+					t.Fatalf("prec %d sign %d: err = %v, want the infinity error", prec, sign, err)
+				}
+			}
+		}
+	})
+	t.Run("BigFloat exponent below int32 after adjustment", func(t *testing.T) {
+		// exp - prec leaves int32: 0.75 × 2^(MinInt32+3) with 53 bits of
+		// precision has wire exponent MinInt32+3-53.
+		f := new(big.Float).SetPrec(53).SetMantExp(big.NewFloat(0.75), math.MinInt32+3)
+		_, err := Marshal(&bigFloatHolder{F: f})
+		if err == nil || !strings.Contains(err.Error(), "does not fit int32") {
+			t.Fatalf("err = %v, want the exponent-range error", err)
+		}
+	})
+	t.Run("BigFloat exponent just inside int32 round-trips", func(t *testing.T) {
+		in := &bigFloatHolder{F: new(big.Float).SetPrec(53).SetMantExp(big.NewFloat(0.75), math.MinInt32+53)}
+		data, err := Marshal(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := &bigFloatHolder{F: new(big.Float)}
+		if err := Unmarshal(data, out); err != nil {
+			t.Fatal(err)
+		}
+		if in.F.Cmp(out.F) != 0 {
+			t.Fatalf("round trip changed the value: %s → %s", in.F.Text('p', 0), out.F.Text('p', 0))
+		}
+	})
+}
