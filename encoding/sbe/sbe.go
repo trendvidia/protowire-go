@@ -121,6 +121,9 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 	for _, fd := range files {
 		schemaID, ok := getFileUint32Option(fd, extSchemaID)
 		if !ok {
+			if err := staleFileError(fd); err != nil {
+				return nil, err
+			}
 			return nil, fmt.Errorf("sbe: file %s missing (sbe.schema_id) option", fd.Path())
 		}
 		version, _ := getFileUint32Option(fd, extVersion)
@@ -137,7 +140,11 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 
 func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, version uint16) error {
 	// Only register messages that have a template_id (top-level SBE messages).
-	if _, ok := getMessageUint32Option(md, extTemplateID); ok {
+	if _, ok := getMessageUint32Option(md, extTemplateID); !ok {
+		if err := staleMessageError(md); err != nil {
+			return err
+		}
+	} else {
 		tmpl, err := buildTemplate(md, schemaID, version)
 		if err != nil {
 			return err

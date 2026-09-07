@@ -21,6 +21,9 @@ func ProtoToXML(files ...protoreflect.FileDescriptor) ([]byte, error) {
 
 	schemaID, ok := getFileUint32Option(fd, extSchemaID)
 	if !ok {
+		if err := staleFileError(fd); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("sbe: file %s missing (sbe.schema_id)", fd.Path())
 	}
 	version, _ := getFileUint32Option(fd, extVersion)
