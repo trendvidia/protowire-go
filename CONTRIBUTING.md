@@ -47,6 +47,38 @@ You do not need a local checkout.
 - Avoid new dependencies. The current go.mod is intentionally small; a
   PR that adds a third-party module will be asked to justify it.
 
+## When CI Fails
+
+Read the log before rerunning anything, and classify first:
+
+- **An infrastructure drop** — a job with zero step results, a lost
+  runner, a cache fetch that timed out. Rerun it, and say that is why.
+- **A real regression** — the failure reproduces locally at `-count=1`.
+  Fix it.
+- **A flake** — the failure does not reproduce on every run. A flake is
+  a real bug at low frequency (a shutdown race, an ordering assumption,
+  a byte-for-byte comparison of something whose order is not promised),
+  and it gets an issue that states the **measured rate**: run the test
+  at `-count=100` or more and read the counts. It does not get a retry
+  annotation — a retry hides the rate, and the rate is the diagnosis.
+
+One red leg of the matrix and eight green ones is not evidence of a
+toolchain problem. It is the profile a ~10% flake produces by chance,
+and a rerun has ~90% odds of turning it green and teaching the wrong
+lesson. Measure the distribution before touching the rerun button;
+[#100](https://github.com/trendvidia/protowire-go/issues/100) records
+the case that made this rule.
+
+The nightly workflow (`.github/workflows/nightly.yml`) runs the suite at
+`-count=10` for exactly this reason: a flake surfaces there as a flake,
+on its own, rather than on someone's PR.
+
+The fuzz smoke leg is the one place a non-zero exit is demoted: when
+the `-fuzztime` boundary alone produced it (`context deadline exceeded`
+with no reproducer under `testdata/fuzz/`), the step warns instead of
+failing ([#70](https://github.com/trendvidia/protowire-go/issues/70)).
+A reproducer, or any other failure, is fatal as before.
+
 ## Reporting Bugs
 
 Open a GitHub issue with a reproducer (Go test, raw payload bytes

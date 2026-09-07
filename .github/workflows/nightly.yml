@@ -1,0 +1,44 @@
+# Nightly repetition of the test suite (#100).
+#
+# CI runs every test exactly once per leg, so a flake is
+# indistinguishable from a real failure and from luck: a test that
+# fails ~13% of the time reads as "one red leg on the newest Go", which
+# is the exact profile that invites a rerun — and a rerun has ~87% odds
+# of hiding it. That happened once (#96's byte-for-byte comparison,
+# which depended on protobuf-go's non-deterministic field order).
+#
+# At -count=10 a 13% flake fails with probability 1 - 0.87^10 ≈ 75% on
+# any given night, so it surfaces as what it is, on its own, rather than
+# on someone's PR. A failure here gets an issue with the measured rate
+# (CONTRIBUTING.md § When CI Fails), never a retry annotation.
+name: nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    name: go test -race -count=10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.x'
+          check-latest: true
+          cache: true
+
+      - name: go version
+        run: go version
+
+      - name: go test (race, count=10)
+        run: go test -race -count=10 ./...
+
+      - name: go test (check/protovalidate, race, count=10)
+        run: go test -race -count=10 ./...
+        working-directory: check/protovalidate
