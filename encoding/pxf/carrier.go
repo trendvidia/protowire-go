@@ -28,6 +28,7 @@ package pxf
 
 import (
 	"encoding/base64"
+	"fmt"
 	"math"
 	"math/big"
 	"strconv"
@@ -282,6 +283,13 @@ func decimalLiteral(b []byte) (string, string) {
 		b = b[n:]
 	}
 
+	// The bound comes before the value: both arms below materialise
+	// 10^|scale|, and the scale is five bytes the descriptor's producer
+	// chose, so the work is proportional to a number rather than to the
+	// carrier's length (#95). The same limit as the PB decoder's.
+	if scale > MaxNumericLiteralDigits || scale < -MaxNumericLiteralDigits {
+		return "", fmt.Sprintf("@default's decimal_value has scale %d, and MaxNumericLiteralDigits=%d bounds its magnitude", scale, MaxNumericLiteralDigits)
+	}
 	// value = unscaled x 10^(-scale), rendered positionally so that
 	// parseDecimal takes it. A negative scale means trailing zeros.
 	d := new(big.Int).SetBytes(unscaled)
@@ -290,7 +298,11 @@ func decimalLiteral(b []byte) (string, string) {
 	}
 	if scale <= 0 {
 		if scale < 0 {
-			d.Mul(d, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-scale)), nil))
+			// -int64(scale), not int64(-scale): negating MinInt32 as an
+			// int32 is MinInt32 again, and big.Int.Exp of a negative
+			// exponent is 1, so the zeros were silently dropped.
+			// Unreachable past the bound above; kept correct anyway.
+			d.Mul(d, new(big.Int).Exp(big.NewInt(10), big.NewInt(-int64(scale)), nil))
 		}
 		return d.String(), ""
 	}
@@ -331,6 +343,14 @@ func bigFloatLiteral(b []byte) (string, string) {
 	// value = mantissa x 2^exponent.
 	m := new(big.Float).SetPrec(uint(prec)).SetInt(new(big.Int).SetBytes(mantissa))
 	f := new(big.Float).SetPrec(uint(prec)).SetMantExp(m, int(exponent))
+	// SetMantExp hands back +Inf past big.Float's range, and pxf.BigFloat
+	// has no infinity: an error, not a value (protowire#278). What this
+	// does NOT bound is the cost of Text below, which is proportional to
+	// |exponent| however short the printed form — that limit is a spec
+	// question, open as protowire#281.
+	if f.IsInf() {
+		return "", fmt.Sprintf("@default's big_float_value (exponent %d, %d-bit mantissa) is above big.Float's range", exponent, m.MantExp(nil))
+	}
 	if negative {
 		f.Neg(f)
 	}
