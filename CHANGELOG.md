@@ -273,6 +273,45 @@ format changes.
 
 ### Added
 
+- **A descriptor compiled before protowire v1.12.0 is diagnosed as
+  stale instead of silently losing its annotations**
+  ([#98](https://github.com/trendvidia/protowire-go/issues/98)). The
+  readers look only at the registered extension numbers, so a descriptor
+  still carrying `(pxf.required)` at `50000`, `(sbe.schema_id)` at
+  `50100` or the annotation carrier at `50400` used to fail in one of two
+  silent ways: `(pxf.required)` and `(pxf.default)` stopped applying, and
+  `sbe.NewCodec` said "missing (sbe.schema_id)" about a file that
+  declares it. `ValidateFile` now reports a `ViolationRetiredNumber` for
+  every retired number on the Options kind it was allocated on — naming
+  the number, what it was, what it is now, and that the descriptor must
+  be recompiled — over the import closure like every other bind-time
+  check, and `sbe.NewCodec` says the same for `50100` on a file and
+  `50200` on a message. The check runs only in files that import one of
+  protowire's own annotation files, because `50000`-and-up is where every
+  unregistered project puts its options; a third party's `50000` in a
+  file that never heard of protowire is left alone, and that is pinned.
+  Descriptors carrying neither range are unaffected.
+  
+- **The `pb` codec is tested against protobuf-go, not only against
+  itself** ([#99](https://github.com/trendvidia/protowire-go/issues/99)).
+  Every earlier `pb` test marshalled and unmarshalled with this package,
+  so a wrong encoding passed as long as it was wrong consistently, which
+  is how #92 shipped and survived four months. `conformance_test.go`
+  compiles a schema written for the purpose and checks the scalar,
+  negative-integer, float-special, nested, repeated, packed, map and
+  oneof-shaped paths in both directions: bytes this package writes must
+  read as the same message in protobuf-go and match its records byte for
+  byte, and bytes protobuf-go writes must decode here to the same values.
+  One helper, `oracleMarshal`, is now the only way the tests ask
+  protobuf-go for bytes, with `Deterministic: true` and the reason it is
+  required written once; the big-number conformance tests use it too.
+  The first run found one byte-level divergence — a map entry omits a
+  zero-valued key or value where protobuf-go always writes both, lossless
+  in every reader tried — which is pinned as
+  `TestConformance_MapEntriesOmitZeroValues` and decided in
+  [#105](https://github.com/trendvidia/protowire-go/issues/105), because
+  the bytes `pb.Marshal` writes are promise 2's contract. Test-only; no
+  API or wire-format change.
 - **The binder reads the `1327` schema-extension annotation carrier, so a
   schema written `@required` / `@default(v)` is enforced**
   ([#81](https://github.com/trendvidia/protowire-go/issues/81)).
@@ -551,6 +590,71 @@ format changes.
 
   Plain message fields are unchanged apart from gaining the offending
   token: `expected '{' for message field "nested_field", got integer ("5")`.
+
+- **`encoding/pb` encoders refuse what a decoder must reject, instead of
+  writing it or panicking.** `Marshal` of an infinite `*big.Float`
+  dereferenced a nil mantissa (a panic on the public API) or, at
+  precision 0, wrote an empty message that read back as zero;
+  `exp − prec` was subtracted in `int32` and wrapped silently for a value
+  near `big.Float`'s floor; and a `*big.Rat` whose terminating
+  denominator is `2^k` or `5^k` with `k > 4096` has a scale no conformant
+  decoder accepts. Each returns an error now, and `Unmarshal` of a
+  `BigFloat` whose exponent leaves `big.Float`'s range returns an error
+  instead of `+Inf` ([#95](https://github.com/trendvidia/protowire-go/issues/95)).
+
+### Security
+
+- **`encoding/pb` bounds `Decimal.scale` at `MaxNumericLiteralDigits`
+  (4096) before materialising `10^scale`**
+  ([#95](https://github.com/trendvidia/protowire-go/issues/95),
+  [protowire#278](https://github.com/trendvidia/protowire/issues/278)).
+  A `pxf.Decimal` is *unscaled × 10^(−scale)* and `scale` is a plain
+  `int32` the input writes directly, so `pb.Unmarshal` computed
+  `10^|scale|` from five bytes with no bound, on both signs: scale 10⁷
+  took 790 ms and 2³¹−1 did not return. Reachable from `pb.Unmarshal`
+  and through `envelope` on any struct with a `*big.Rat` field, no
+  schema needed. A scale is a digit count, so the bound is the draft's
+  numeric-literal digit cap rather than a new limit — a Decimal with
+  scale 4096 is the wire form of a 4096-digit literal — and the spec's
+  Mandatory Limits table now says so. The error names the limit, the
+  constant is exported beside `MaxNestingDepth`, and `FuzzUnmarshal`'s
+  corpus gains the two int32 extremes it could not reach on its own
+  (unbounded, they read as a timeout). `BigFloat.exponent` was measured
+  rather than assumed: `big.Float` stores it, decode is flat at ~4 µs
+  across the whole `int32` range, and it needs no bound; the cost of a
+  huge exponent falls on whoever renders the value in decimal, which is
+  [protowire#281](https://github.com/trendvidia/protowire/issues/281).
+- **`encoding/pxf` enforces `MaxNumericLiteralDigits` on numeric
+  literals, which the reference port never did.** The draft mandates
+  the 4096-digit cap; a 10⁶-digit `pxf.BigInt` literal cost 0.6 s in
+  `big.Int.SetString` and the cost is quadratic, so a `MaxMessageSize`
+  document would run for the better part of an hour. The adversarial
+  corpus did not notice because its `long-numeric` entry targets an
+  `int64` field, which rejects 5000 digits for its own reasons
+  ([protowire#279](https://github.com/trendvidia/protowire/issues/279)).
+  Enforced where the literal is parsed rather than in the lexer, so a
+  `(pxf.default)` string is under the same limit; one length comparison
+  for any literal within it. `int64` and `double` targets were never
+  affected: `strconv` bails on overflow in linear time.
+- **A `pxf.BigFloat` literal outside `big.Float`'s range is an error,
+  not a panic, a zero or a wrapped exponent.** `big.Float.Parse`
+  substitutes `+Inf` above its range and `0` below it, reporting
+  neither, and the decoder took both: `bf = 1e999999999` reached the
+  field setter, whose `mant.Int` returned nil for `+Inf`, and the decoder
+  panicked on a sixteen-byte document; `1e-2000000000` silently decoded
+  as zero; `1e-646456992` parsed but wrapped the wire's `int32` exponent.
+  Each is an error now, per the amended draft text, and each returns
+  promptly. The compiler has the mirror-image hang on
+  `@default(1e999999999)`, filed as
+  [protocompile#210](https://github.com/trendvidia/protocompile/issues/210).
+- **The `@default` carrier reader carries the same bounds.** Its
+  `decimal_value` arm materialised `10^|scale|` like the PB decoder, from
+  bytes the descriptor's producer chose, on schema input HARDENING says
+  must apply the limits too; a `big_float_value` past `big.Float`'s range
+  rendered `+Inf` as a literal no parser takes and is a bind-time
+  diagnostic now. The negative-scale arm also negated before widening,
+  so a scale of −2³¹ silently read as zero — unreachable past the bound,
+  fixed anyway.
 
 ## [1.5.1] — 2026-08-31
 

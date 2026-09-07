@@ -23,6 +23,13 @@ package pxf_test
 //   - proto.Equal(m2, m3)        re-encoded text decodes the same
 //   - bin1 == bin3                wire format is byte-stable across the loop
 //
+// bin1 and bin3 both come from the one proto.MarshalOptions{Deterministic:
+// true} in runFullPipeline, and that is load-bearing rather than a
+// preference: without it protobuf-go promises neither field order nor
+// map-entry order, and bin1 == bin3 is a ~13% flake on a message with
+// more than one field (#99, #100). encoding/pb's oracleMarshal is the
+// same rule for the pb conformance tests.
+//
 // This is the "every type at once" matrix the existing test suite was
 // missing — TestRoundTrip only checked four fields, and the binary chain
 // previously appeared only in null-related tests.

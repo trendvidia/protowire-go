@@ -23,6 +23,19 @@ import (
 // only run on already-bounded inputs.
 const MaxNestingDepth = 100
 
+// MaxNumericLiteralDigits caps the digit count of a numeric literal
+// before it reaches a big-number parser, per
+// protowire/docs/HARDENING.md § Mandatory limits: big.Int.SetString and
+// big.Float.Parse are superlinear in the digit count (a 10^6-digit
+// literal cost ~0.6s here, growing quadratically), and the check is one
+// length comparison on the way in. Fixed-width targets need no cap —
+// strconv bails on overflow in linear time. Enforced in the parse
+// helpers rather than the lexer so that a (pxf.default) string, which
+// never passes through the lexer, is under the same limit. The same
+// constant bounds Decimal.scale, on the PB wire (encoding/pb) and in
+// the @default carrier (carrier.go).
+const MaxNumericLiteralDigits = 4096
+
 // fastSet writes v into msg's fd. When msg's underlying implementation
 // exposes SetUnsafe (the trendvidia/protobuf-go fork's addition on
 // *dynamicpb.Message) we can skip the runtime typecheck because the

@@ -66,6 +66,18 @@ var (
 // the parent's depth).
 const MaxNestingDepth = 100
 
+// MaxNumericLiteralDigits bounds the magnitude of Decimal.scale, per
+// protowire/docs/HARDENING.md § Mandatory limits. A pxf.Decimal is
+// unscaled × 10^(-scale), so decoding one materialises 10^|scale| — work
+// and memory proportional to a value the input sets directly, in five
+// bytes (#95). A scale is a digit count, which is why the draft's
+// numeric-literal digit cap is the bound rather than a new one: a
+// Decimal with scale 4096 is the wire form of a 4096-digit literal.
+//
+// BigFloat.exponent is a binary exponent that big.Float stores as-is,
+// so it needs no bound here; see unmarshalBigFloatMsg.
+const MaxNumericLiteralDigits = 4096
+
 // Marshal encodes a struct into protobuf binary format.
 // v must be a pointer to a struct with protowire:"N" tags.
 func Marshal(v any) ([]byte, error) {
@@ -270,7 +282,10 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 			if rat.Sign() == 0 && !element {
 				return b, nil
 			}
-			msg := marshalBigRat(rat)
+			msg, err := marshalBigRat(rat)
+			if err != nil {
+				return nil, err
+			}
 			b = protowire.AppendTag(b, num, protowire.BytesType)
 			b = protowire.AppendBytes(b, msg)
 		case bigFloatType:
@@ -278,7 +293,10 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 			if bf.Sign() == 0 && bf.Prec() == 0 && !element {
 				return b, nil
 			}
-			msg := marshalBigFloat(bf)
+			msg, err := marshalBigFloat(bf)
+			if err != nil {
+				return nil, err
+			}
 			b = protowire.AppendTag(b, num, protowire.BytesType)
 			b = protowire.AppendBytes(b, msg)
 		default:
@@ -609,8 +627,15 @@ func marshalBigInt(bi *big.Int) []byte {
 	return msg
 }
 
-func marshalBigRat(rat *big.Rat) []byte {
+func marshalBigRat(rat *big.Rat) ([]byte, error) {
 	unscaled, scale := ratToDecimal(rat)
+	// A terminating rat with denominator 2^k or 5^k has scale k, which
+	// nothing above bounds. A conformant decoder rejects a scale past
+	// MaxNumericLiteralDigits, so writing one would produce bytes this
+	// package's own Unmarshal refuses (#95).
+	if scale > MaxNumericLiteralDigits {
+		return nil, fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+	}
 	negative := rat.Sign() < 0
 	if negative {
 		unscaled.Neg(unscaled)
@@ -631,13 +656,23 @@ func marshalBigRat(rat *big.Rat) []byte {
 		msg = protowire.AppendTag(msg, 3, protowire.VarintType)
 		msg = protowire.AppendVarint(msg, 1)
 	}
-	return msg
+	return msg, nil
 }
 
-func marshalBigFloat(bf *big.Float) []byte {
+func marshalBigFloat(bf *big.Float) ([]byte, error) {
+	// pxf.BigFloat has no infinity: mant.Int returns nil for ±Inf, and
+	// the encoder used to dereference it — or, at precision 0, write an
+	// empty message that reads back as zero. Checked before the
+	// precision, for that second reason.
+	if bf.IsInf() {
+		return nil, fmt.Errorf("cannot encode an infinite big.Float as pxf.BigFloat")
+	}
 	prec := bf.Prec()
 	if prec == 0 {
-		return nil
+		return nil, nil
+	}
+	if prec > math.MaxUint32 {
+		return nil, fmt.Errorf("pxf.BigFloat precision %d exceeds uint32", prec)
 	}
 	mant := new(big.Float).SetPrec(prec)
 	exp := bf.MantExp(mant)
@@ -652,7 +687,15 @@ func marshalBigFloat(bf *big.Float) []byte {
 		msg = protowire.AppendTag(msg, 1, protowire.BytesType)
 		msg = protowire.AppendBytes(msg, mantBytes)
 	}
-	adjExp := int32(exp) - int32(prec)
+	// v = mantInt × 2^(exp - prec). big.Float's exponent spans the whole
+	// int32 range, so exp - prec can leave it; subtracting in int32 wrapped
+	// silently and wrote a wrong exponent for a value the wire cannot
+	// carry.
+	adj := int64(exp) - int64(prec)
+	if adj < math.MinInt32 || adj > math.MaxInt32 {
+		return nil, fmt.Errorf("pxf.BigFloat exponent %d does not fit int32", adj)
+	}
+	adjExp := int32(adj)
 	if adjExp != 0 {
 		// `int32 exponent = 2`: a plain varint, as for Decimal.scale
 		// above. adjExp is negative for almost every value, which is why
@@ -666,7 +709,7 @@ func marshalBigFloat(bf *big.Float) []byte {
 		msg = protowire.AppendTag(msg, 4, protowire.VarintType)
 		msg = protowire.AppendVarint(msg, 1)
 	}
-	return msg
+	return msg, nil
 }
 
 // ratToDecimal converts a big.Rat to (unscaled, scale) where value = unscaled × 10^(-scale).
@@ -820,6 +863,14 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
 	// encoding/pb never writes a negative scale itself (ratToDecimal
 	// returns max(twos, fives) or a digit count, both >= 0), so this arm
 	// exists for bytes from a conformant producer.
+	//
+	// Both arms materialise 10^|scale|, so the bound comes first: past it
+	// the work is proportional to a number the input wrote, not to the
+	// input's length (#95). Measured, 10^4096 costs ~150µs and 10^(2^31-1)
+	// does not return.
+	if scale > MaxNumericLiteralDigits || scale < -MaxNumericLiteralDigits {
+		return fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+	}
 	unscaled := new(big.Int).SetBytes(unscaledBytes)
 	if scale < 0 {
 		// -int64(scale), not int64(-scale): negating math.MinInt32 as an
@@ -891,7 +942,18 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float) error {
 	}
 	mantInt := new(big.Int).SetBytes(mantBytes)
 	bf.SetPrec(prec).SetInt(mantInt)
+	// exponent needs no bound, unlike Decimal.scale: big.Float keeps the
+	// exponent as an int32, and SetMantExp adds to it without allocating.
+	// Measured flat at ~4µs from -2^31 to 2^31-1 (#95); the cost of a huge
+	// exponent falls on whoever renders the value in decimal, which is
+	// the caller's call. What it can do is leave big.Float's range, and
+	// SetMantExp then returns ±Inf, which pxf.BigFloat cannot mean; that
+	// is an error, not a value. Underflow is unreachable: the mantissa's
+	// own exponent is at least 1, so the sum never drops below MinInt32.
 	bf.SetMantExp(bf, int(exp))
+	if bf.IsInf() {
+		return fmt.Errorf("pxf.BigFloat exponent %d with a %d-bit mantissa overflows big.Float", exp, mantInt.BitLen())
+	}
 	if negative {
 		bf.Neg(bf)
 	}
