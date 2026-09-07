@@ -67,3 +67,23 @@ func TestUnmarshalOptionsLimits(t *testing.T) {
 		require.ErrorContains(t, err, "MaxNestingDepth=2")
 	})
 }
+
+// TestNestingDepthBoundary pins where pb's counter sits (#111): the root
+// struct is depth 1, as protobuf-go and prost count their recursion
+// limits, so MaxNestingDepth structs deep including the root is the last
+// accepted shape.
+func TestNestingDepthBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		depth int
+		ok    bool
+	}{{MaxNestingDepth, true}, {MaxNestingDepth + 1, false}} {
+		data, err := Marshal(nestTo(tc.depth))
+		require.NoError(t, err)
+		err = Unmarshal(data, &nestHolder{})
+		if tc.ok {
+			require.NoError(t, err, "%d structs deep, root included", tc.depth)
+		} else {
+			require.ErrorContains(t, err, "MaxNestingDepth=100", "%d structs deep", tc.depth)
+		}
+	}
+}

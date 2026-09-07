@@ -4,6 +4,7 @@
 package pxf_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -81,4 +82,26 @@ func TestParseOptionsLimits(t *testing.T) {
 	require.NotNil(t, doc, "tolerant mode still returns a document")
 	require.NotEmpty(t, errs)
 	require.Contains(t, errs[0].Msg, "MaxNestingDepth=2")
+}
+
+// TestNestingDepthBoundary pins a divergence, not a rule (#111): the
+// direct decoder counts the root message as depth 1, so the hundredth
+// nested brace is depth 101 and rejected, while the AST parser counts
+// descents and accepts it. HARDENING.md § Recursion reads like the
+// parser, the corpus measures nothing between 10 and 200, and the rule
+// is the spec's to state; until it does, this is what the port does.
+func TestNestingDepthBoundary(t *testing.T) {
+	md := nestDesc(t)
+	nested := func(n int) []byte {
+		return []byte(strings.Repeat("child { ", n) + "v = 1" + strings.Repeat(" }", n))
+	}
+	_, err := pxf.UnmarshalDescriptor(nested(pxf.MaxNestingDepth-1), md)
+	require.NoError(t, err, "decoder: MaxNestingDepth-1 braces")
+	_, err = pxf.UnmarshalDescriptor(nested(pxf.MaxNestingDepth), md)
+	require.ErrorContains(t, err, "MaxNestingDepth=100", "decoder: the root counts, so MaxNestingDepth braces is one too many")
+
+	_, err = pxf.Parse(nested(pxf.MaxNestingDepth))
+	require.NoError(t, err, "parser: MaxNestingDepth braces is at the bound")
+	_, err = pxf.Parse(nested(pxf.MaxNestingDepth + 1))
+	require.ErrorContains(t, err, "MaxNestingDepth=100", "parser: one past")
 }
