@@ -634,7 +634,7 @@ func marshalBigRat(rat *big.Rat) ([]byte, error) {
 	// MaxNumericLiteralDigits, so writing one would produce bytes this
 	// package's own Unmarshal refuses (#95).
 	if scale > MaxNumericLiteralDigits {
-		return nil, fmt.Errorf("Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+		return nil, fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
 	}
 	negative := rat.Sign() < 0
 	if negative {
@@ -672,7 +672,7 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 		return nil, nil
 	}
 	if prec > math.MaxUint32 {
-		return nil, fmt.Errorf("BigFloat precision %d exceeds uint32", prec)
+		return nil, fmt.Errorf("pxf.BigFloat precision %d exceeds uint32", prec)
 	}
 	mant := new(big.Float).SetPrec(prec)
 	exp := bf.MantExp(mant)
@@ -693,7 +693,7 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 	// carry.
 	adj := int64(exp) - int64(prec)
 	if adj < math.MinInt32 || adj > math.MaxInt32 {
-		return nil, fmt.Errorf("BigFloat exponent %d does not fit int32", adj)
+		return nil, fmt.Errorf("pxf.BigFloat exponent %d does not fit int32", adj)
 	}
 	adjExp := int32(adj)
 	if adjExp != 0 {
@@ -869,7 +869,7 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
 	// input's length (#95). Measured, 10^4096 costs ~150µs and 10^(2^31-1)
 	// does not return.
 	if scale > MaxNumericLiteralDigits || scale < -MaxNumericLiteralDigits {
-		return fmt.Errorf("Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+		return fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
 	}
 	unscaled := new(big.Int).SetBytes(unscaledBytes)
 	if scale < 0 {
@@ -952,7 +952,7 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float) error {
 	// own exponent is at least 1, so the sum never drops below MinInt32.
 	bf.SetMantExp(bf, int(exp))
 	if bf.IsInf() {
-		return fmt.Errorf("BigFloat exponent %d with a %d-bit mantissa overflows big.Float", exp, mantInt.BitLen())
+		return fmt.Errorf("pxf.BigFloat exponent %d with a %d-bit mantissa overflows big.Float", exp, mantInt.BitLen())
 	}
 	if negative {
 		bf.Neg(bf)
