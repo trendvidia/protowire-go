@@ -273,6 +273,24 @@ format changes.
 
 ### Added
 
+- **A descriptor compiled before protowire v1.12.0 is diagnosed as
+  stale instead of silently losing its annotations**
+  ([#98](https://github.com/trendvidia/protowire-go/issues/98)). The
+  readers look only at the registered extension numbers, so a descriptor
+  still carrying `(pxf.required)` at `50000`, `(sbe.schema_id)` at
+  `50100` or the annotation carrier at `50400` used to fail in one of two
+  silent ways: `(pxf.required)` and `(pxf.default)` stopped applying, and
+  `sbe.NewCodec` said "missing (sbe.schema_id)" about a file that
+  declares it. `ValidateFile` now reports a `ViolationRetiredNumber` for
+  every retired number on the Options kind it was allocated on — naming
+  the number, what it was, what it is now, and that the descriptor must
+  be recompiled — over the import closure like every other bind-time
+  check, and `sbe.NewCodec` says the same for `50100` on a file and
+  `50200` on a message. The check runs only in files that import one of
+  protowire's own annotation files, because `50000`-and-up is where every
+  unregistered project puts its options; a third party's `50000` in a
+  file that never heard of protowire is left alone, and that is pinned.
+  Descriptors carrying neither range are unaffected.
 - **The binder reads the `1327` schema-extension annotation carrier, so a
   schema written `@required` / `@default(v)` is enforced**
   ([#81](https://github.com/trendvidia/protowire-go/issues/81)).
