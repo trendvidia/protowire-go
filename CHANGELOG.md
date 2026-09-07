@@ -534,6 +534,71 @@ format changes.
   Plain message fields are unchanged apart from gaining the offending
   token: `expected '{' for message field "nested_field", got integer ("5")`.
 
+- **`encoding/pb` encoders refuse what a decoder must reject, instead of
+  writing it or panicking.** `Marshal` of an infinite `*big.Float`
+  dereferenced a nil mantissa (a panic on the public API) or, at
+  precision 0, wrote an empty message that read back as zero;
+  `exp − prec` was subtracted in `int32` and wrapped silently for a value
+  near `big.Float`'s floor; and a `*big.Rat` whose terminating
+  denominator is `2^k` or `5^k` with `k > 4096` has a scale no conformant
+  decoder accepts. Each returns an error now, and `Unmarshal` of a
+  `BigFloat` whose exponent leaves `big.Float`'s range returns an error
+  instead of `+Inf` ([#95](https://github.com/trendvidia/protowire-go/issues/95)).
+
+### Security
+
+- **`encoding/pb` bounds `Decimal.scale` at `MaxNumericLiteralDigits`
+  (4096) before materialising `10^scale`**
+  ([#95](https://github.com/trendvidia/protowire-go/issues/95),
+  [protowire#278](https://github.com/trendvidia/protowire/issues/278)).
+  A `pxf.Decimal` is *unscaled × 10^(−scale)* and `scale` is a plain
+  `int32` the input writes directly, so `pb.Unmarshal` computed
+  `10^|scale|` from five bytes with no bound, on both signs: scale 10⁷
+  took 790 ms and 2³¹−1 did not return. Reachable from `pb.Unmarshal`
+  and through `envelope` on any struct with a `*big.Rat` field, no
+  schema needed. A scale is a digit count, so the bound is the draft's
+  numeric-literal digit cap rather than a new limit — a Decimal with
+  scale 4096 is the wire form of a 4096-digit literal — and the spec's
+  Mandatory Limits table now says so. The error names the limit, the
+  constant is exported beside `MaxNestingDepth`, and `FuzzUnmarshal`'s
+  corpus gains the two int32 extremes it could not reach on its own
+  (unbounded, they read as a timeout). `BigFloat.exponent` was measured
+  rather than assumed: `big.Float` stores it, decode is flat at ~4 µs
+  across the whole `int32` range, and it needs no bound; the cost of a
+  huge exponent falls on whoever renders the value in decimal, which is
+  [protowire#281](https://github.com/trendvidia/protowire/issues/281).
+- **`encoding/pxf` enforces `MaxNumericLiteralDigits` on numeric
+  literals, which the reference port never did.** The draft mandates
+  the 4096-digit cap; a 10⁶-digit `pxf.BigInt` literal cost 0.6 s in
+  `big.Int.SetString` and the cost is quadratic, so a `MaxMessageSize`
+  document would run for the better part of an hour. The adversarial
+  corpus did not notice because its `long-numeric` entry targets an
+  `int64` field, which rejects 5000 digits for its own reasons
+  ([protowire#279](https://github.com/trendvidia/protowire/issues/279)).
+  Enforced where the literal is parsed rather than in the lexer, so a
+  `(pxf.default)` string is under the same limit; one length comparison
+  for any literal within it. `int64` and `double` targets were never
+  affected: `strconv` bails on overflow in linear time.
+- **A `pxf.BigFloat` literal outside `big.Float`'s range is an error,
+  not a panic, a zero or a wrapped exponent.** `big.Float.Parse`
+  substitutes `+Inf` above its range and `0` below it, reporting
+  neither, and the decoder took both: `bf = 1e999999999` reached the
+  field setter, whose `mant.Int` returned nil for `+Inf`, and the decoder
+  panicked on a sixteen-byte document; `1e-2000000000` silently decoded
+  as zero; `1e-646456992` parsed but wrapped the wire's `int32` exponent.
+  Each is an error now, per the amended draft text, and each returns
+  promptly. The compiler has the mirror-image hang on
+  `@default(1e999999999)`, filed as
+  [protocompile#210](https://github.com/trendvidia/protocompile/issues/210).
+- **The `@default` carrier reader carries the same bounds.** Its
+  `decimal_value` arm materialised `10^|scale|` like the PB decoder, from
+  bytes the descriptor's producer chose, on schema input HARDENING says
+  must apply the limits too; a `big_float_value` past `big.Float`'s range
+  rendered `+Inf` as a literal no parser takes and is a bind-time
+  diagnostic now. The negative-scale arm also negated before widening,
+  so a scale of −2³¹ silently read as zero — unreachable past the bound,
+  fixed anyway.
+
 ## [1.5.1] — 2026-08-31
 
 Dependency bumps only — no source change, no API change, and no change to
