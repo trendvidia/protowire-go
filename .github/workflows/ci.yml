@@ -119,12 +119,39 @@ jobs:
           go-version: '1.26.x'
           check-latest: true
           cache: true
+      # A smoke run is a liveness check, not a search: it exists to catch
+      # a crash a seed or a few seconds of mutation can reach. Its exit
+      # code conflates two things — "found a reproducer" and "the
+      # -fuzztime boundary closed untidily" (`context deadline exceeded`
+      # with nothing written under testdata/fuzz/, #70) — and only the
+      # first is a finding. The step therefore fails on a reproducer, or
+      # on any failure that is not that exact boundary signature, and
+      # demotes the boundary alone to a warning. Read the log before
+      # rerunning: CONTRIBUTING.md § When CI Fails.
       - name: short fuzz run
         run: |
-          tests=$(go test -list 'Fuzz.*' ${{ matrix.pkg }} | grep '^Fuzz' || true)
+          echo "cores: $(nproc)"
+          pkgdir="${{ matrix.pkg }}"
+          tests=$(go test -list 'Fuzz.*' "$pkgdir" | grep '^Fuzz' || true)
           for t in $tests; do
             echo "=== $t ==="
-            go test -run='^$' -fuzz="^${t}$" -fuzztime=15s ${{ matrix.pkg }}
+            before=$(find "$pkgdir/testdata/fuzz" -type f 2>/dev/null | sort)
+            if go test -run='^$' -fuzz="^${t}$" -fuzztime=15s "$pkgdir" 2>&1 | tee "fuzz-$t.log"; then
+              continue
+            fi
+            after=$(find "$pkgdir/testdata/fuzz" -type f 2>/dev/null | sort)
+            new=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+            if [ -n "$new" ]; then
+              echo "::error::$t found a reproducer:"
+              echo "$new"
+              exit 1
+            fi
+            if grep -q 'context deadline exceeded' "fuzz-$t.log"; then
+              echo "::warning::$t hit the -fuzztime boundary (context deadline exceeded) with no reproducer — not a finding (#70)"
+              continue
+            fi
+            echo "::error::$t failed without a reproducer and without the -fuzztime signature; read the log"
+            exit 1
           done
 
   # Aggregate gate for branch protection: the "main protection — port" ruleset
