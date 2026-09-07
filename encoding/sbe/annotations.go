@@ -4,6 +4,7 @@
 package sbe
 
 import (
+	"fmt"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -156,4 +157,68 @@ func getStringFromMessage(rm protoreflect.Message, num protoreflect.FieldNumber)
 		}
 	}
 	return "", false
+}
+
+// Retired option numbers (STABILITY.md promise 3, #98). Before protowire
+// v1.12.0 the SBE options lived at 50100–50301; a descriptor compiled
+// then still carries them, and this codec — which reads only the
+// registered numbers — used to report such a file as "missing
+// (sbe.schema_id)", sending the reader to check a .proto that does
+// declare it. The two numbers whose absence the codec reports are
+// diagnosed instead. encoding/pxf's bind-time check covers the whole
+// retired surface with the reasoning behind the scoping; here the file
+// or message was handed to the SBE codec explicitly, so no gate is
+// needed.
+const (
+	retiredSchemaID   protoreflect.FieldNumber = 50100
+	retiredTemplateID protoreflect.FieldNumber = 50200
+)
+
+// hasUnknownField reports whether rm's unknown bytes carry field num.
+// Nothing declares the retired numbers any more, so unknown bytes are
+// where they land.
+func hasUnknownField(rm protoreflect.Message, num protoreflect.FieldNumber) bool {
+	if !rm.IsValid() {
+		return false
+	}
+	b := rm.GetUnknown()
+	for len(b) > 0 {
+		fnum, wtype, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return false
+		}
+		vn := protowire.ConsumeFieldValue(fnum, wtype, b[n:])
+		if vn < 0 {
+			return false
+		}
+		if fnum == num {
+			return true
+		}
+		b = b[n+vn:]
+	}
+	return false
+}
+
+// staleFileError is the diagnosis for a file whose (sbe.schema_id) sits
+// at the retired number, or nil when it does not.
+func staleFileError(fd protoreflect.FileDescriptor) error {
+	opts, ok := fd.Options().(*descriptorpb.FileOptions)
+	if !ok || opts == nil || !hasUnknownField(opts.ProtoReflect(), retiredSchemaID) {
+		return nil
+	}
+	return fmt.Errorf("sbe: file %s carries (sbe.schema_id) at retired option number %d (registered as %d since protowire v1.12.0): "+
+		"the descriptor predates the registered extension block and must be recompiled against the current sbe/annotations.proto",
+		fd.Path(), retiredSchemaID, extSchemaID)
+}
+
+// staleMessageError is the same diagnosis for a message whose
+// (sbe.template_id) sits at the retired number.
+func staleMessageError(md protoreflect.MessageDescriptor) error {
+	opts, ok := md.Options().(*descriptorpb.MessageOptions)
+	if !ok || opts == nil || !hasUnknownField(opts.ProtoReflect(), retiredTemplateID) {
+		return nil
+	}
+	return fmt.Errorf("sbe: message %s carries (sbe.template_id) at retired option number %d (registered as %d since protowire v1.12.0): "+
+		"the descriptor predates the registered extension block and must be recompiled against the current sbe/annotations.proto",
+		md.FullName(), retiredTemplateID, extTemplateID)
 }

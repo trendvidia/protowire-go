@@ -105,6 +105,13 @@ const (
 	// always be chosen, which makes every other arm of the oneof
 	// undecodable.
 	ViolationRequiredOption
+	// ViolationRetiredNumber is an option carried at one of the extension
+	// numbers protowire retired when it moved into its registered block
+	// (STABILITY.md promise 3): the descriptor was compiled before
+	// protowire v1.12.0 and must be recompiled, because a reader that
+	// looks only at the registered numbers would otherwise silently see
+	// none of its annotations (#98). Name is the retired number.
+	ViolationRetiredNumber
 )
 
 func (k ViolationKind) String() string {
@@ -121,15 +128,17 @@ func (k ViolationKind) String() string {
 		return "default field option"
 	case ViolationRequiredOption:
 		return "required field option"
+	case ViolationRetiredNumber:
+		return "retired option number"
 	default:
 		return "unknown"
 	}
 }
 
 // Violation describes one schema element that fails a PXF bind-time
-// check: a name colliding with a reserved PXF keyword, or an invalid
-// (pxf.key), (pxf.default) or (pxf.required) placement. Returned by
-// [ValidateDescriptor].
+// check: a name colliding with a reserved PXF keyword, an invalid
+// (pxf.key), (pxf.default) or (pxf.required) placement, or an option at
+// a retired extension number. Returned by [ValidateDescriptor].
 type Violation struct {
 	// File is the .proto file path the offending element is declared in.
 	File string
@@ -180,6 +189,8 @@ func (v Violation) String() string {
 	case ViolationRequiredOption:
 		return fmt.Sprintf("%s: field %q: invalid %s: %s (draft -01 §annotation-extensions)",
 			v.File, v.Element, v.surface.requiredName(), v.Detail)
+	case ViolationRetiredNumber:
+		return fmt.Sprintf("%s: %q: %s (STABILITY.md promise 3)", v.File, v.Element, v.Detail)
 	}
 	return fmt.Sprintf("%s: %s %q uses PXF-reserved name %q (draft §3.13)",
 		v.File, v.Kind, v.Element, v.Name)
@@ -366,6 +377,11 @@ func fileViolations(fd protoreflect.FileDescriptor) []Violation {
 	path := fd.Path()
 	walkMessages(path, fd.Messages(), &out)
 	walkEnums(path, fd.Enums(), &out)
+	// Retired option numbers are looked for only in files that import
+	// protowire's annotations; see retired.go for why the gate exists.
+	if importsProtowire(fd) {
+		walkRetired(path, fd, &out)
+	}
 	// Deliberately unsorted: [ValidateFile] sorts the assembled closure
 	// once, and walkMessages appends deterministically, so a per-file
 	// sort here would be redundant work on the miss path.
