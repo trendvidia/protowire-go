@@ -273,6 +273,24 @@ format changes.
 
 ### Added
 
+- **A bare `true` / `false` is a bool map key**
+  ([#109](https://github.com/trendvidia/protowire-go/issues/109)). Draft
+  `-01` now has `map-key = identifier / string / integer / bool`, and
+  § Entries and Keys says the keyword matches a `map<bool,V>` field
+  (trendvidia/protowire#284, decided after #93 measured four ports
+  binding four sets of spellings). Both parsers admit it: the decoder
+  binds `{ true: "v" }`, and `Parse` — what `fmt` and `validate` run
+  first — keeps it as a map entry, taking only the `:` tail as an integer
+  key does. The encoder had always written a bool key as the bare
+  keyword, so a `map<bool,V>` did not survive its own round trip until
+  now; that is pinned. On any other key type the keyword is rejected
+  naming the key: a string `"true"` is spelled quoted. The rejection for
+  the eight `strconv.ParseBool` spellings now lists all six admitted ones.
+  The spec repo's sixteen-document `testdata/map-keys/` corpus is
+  vendored verbatim and run: three MUST-bind documents decode to the
+  keys `true` and `false`, and every `invalid/` document is rejected
+  naming its key.
+
 - **A descriptor compiled before protowire v1.12.0 is diagnosed as
   stale instead of silently losing its annotations**
   ([#98](https://github.com/trendvidia/protowire-go/issues/98)). The

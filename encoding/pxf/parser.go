@@ -119,7 +119,7 @@ func (p *parser) skipBalanced(open, close TokenKind) Position {
 // construct being parsed.
 func (p *parser) currentStartsEntry() bool {
 	switch p.current.Kind {
-	case IDENT, STRING, INT:
+	case IDENT, STRING, INT, BOOL:
 		switch p.peekKind() {
 		case EQUALS, COLON, LBRACE:
 			return true
@@ -799,14 +799,17 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 	leading := p.flushComments()
 
 	pos := p.current.Pos
-	if p.current.Kind != IDENT && p.current.Kind != STRING && p.current.Kind != INT {
+	// map-key = identifier / string / integer / bool (draft -01 §abnf-grammar;
+	// the keyword spelling landed in protowire#284). Only the ':' tail
+	// takes a bool key, like an integer key.
+	if p.current.Kind != IDENT && p.current.Kind != STRING && p.current.Kind != INT && p.current.Kind != BOOL {
 		if !p.tolerant {
-			return nil, errorf(pos, "expected identifier, string, or integer, got %s", p.tokenErrMsg())
+			return nil, errorf(pos, "expected identifier, string, integer, or bool, got %s", p.tokenErrMsg())
 		}
 		// Skip the offending token and let the caller's loop retry at
 		// the next one. Hand the leading comments back so they attach
 		// to the next real entry.
-		p.record(errorf(pos, "expected identifier, string, or integer, got %s", p.tokenErrMsg()))
+		p.record(errorf(pos, "expected identifier, string, integer, or bool, got %s", p.tokenErrMsg()))
 		p.comments = append(leading, p.comments...)
 		p.advance()
 		return nil, nil
@@ -822,7 +825,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// entry name, draft -01 §3.13 — the grammar accepts it everywhere,
 		// the schema layer restricts it to keyed repeated fields). Integer
 		// keys are only valid with `:` (map entries).
-		if keyKind == INT {
+		if keyKind == INT || keyKind == BOOL {
 			// Tolerant mode records and keeps the entry as an assignment.
 			if err := p.soft(errorf(pos,
 				"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
@@ -860,7 +863,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// `{ ... }` denotes a submessage field; the name is an identifier
 		// or a string literal (quoted entry name, draft -01 §3.13). Same
 		// integer-key rule as `=` applies.
-		if keyKind == INT {
+		if keyKind == INT || keyKind == BOOL {
 			if err := p.soft(errorf(pos,
 				"submessage block requires an identifier or string key, got %s (%q)",
 				keyKind, key)); err != nil {

@@ -1242,11 +1242,13 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 
 	for d.current.Kind != RBRACE && d.current.Kind != EOF {
 		pos := d.current.Pos
-		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
+		// map-key = identifier / string / integer / bool (draft -01
+		// §abnf-grammar; the keyword spelling landed in protowire#284).
+		keyKind := d.current.Kind
+		if keyKind != IDENT && keyKind != STRING && keyKind != INT && keyKind != BOOL {
 			return errorf(pos, "expected map key, got %s", d.tokenErrMsg())
 		}
 		keyStr := strings.Clone(d.current.Value)
-		quoted := d.current.Kind == STRING
 		d.advance()
 
 		switch d.current.Kind {
@@ -1258,7 +1260,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			return errorf(d.current.Pos, "expected ':' after map key, got %s", d.current.Kind)
 		}
 
-		k, err := decodeMapKey(fd, keyStr, quoted, pos)
+		k, err := decodeMapKey(fd, keyStr, keyKind, pos)
 		if err != nil {
 			return err
 		}
