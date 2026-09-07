@@ -66,6 +66,18 @@ var (
 // the parent's depth).
 const MaxNestingDepth = 100
 
+// MaxNumericLiteralDigits bounds the magnitude of Decimal.scale, per
+// protowire/docs/HARDENING.md § Mandatory limits. A pxf.Decimal is
+// unscaled × 10^(-scale), so decoding one materialises 10^|scale| — work
+// and memory proportional to a value the input sets directly, in five
+// bytes (#95). A scale is a digit count, which is why the draft's
+// numeric-literal digit cap is the bound rather than a new one: a
+// Decimal with scale 4096 is the wire form of a 4096-digit literal.
+//
+// BigFloat.exponent is a binary exponent that big.Float stores as-is,
+// so it needs no bound here; see unmarshalBigFloatMsg.
+const MaxNumericLiteralDigits = 4096
+
 // Marshal encodes a struct into protobuf binary format.
 // v must be a pointer to a struct with protowire:"N" tags.
 func Marshal(v any) ([]byte, error) {
@@ -820,6 +832,14 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
 	// encoding/pb never writes a negative scale itself (ratToDecimal
 	// returns max(twos, fives) or a digit count, both >= 0), so this arm
 	// exists for bytes from a conformant producer.
+	//
+	// Both arms materialise 10^|scale|, so the bound comes first: past it
+	// the work is proportional to a number the input wrote, not to the
+	// input's length (#95). Measured, 10^4096 costs ~150µs and 10^(2^31-1)
+	// does not return.
+	if scale > MaxNumericLiteralDigits || scale < -MaxNumericLiteralDigits {
+		return fmt.Errorf("Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+	}
 	unscaled := new(big.Int).SetBytes(unscaledBytes)
 	if scale < 0 {
 		// -int64(scale), not int64(-scale): negating math.MinInt32 as an
