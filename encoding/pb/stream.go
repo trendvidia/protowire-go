@@ -51,10 +51,20 @@ type byteReader interface {
 // buffer is reused across Decode calls; Unmarshal copies parsed values into
 // v, so the buffer is the decoder's to overwrite on the next call.
 type Decoder struct {
-	r   byteReader
-	buf []byte
-	max int
-	err error
+	r    byteReader
+	buf  []byte
+	max  int
+	err  error
+	opts UnmarshalOptions
+}
+
+// NewDecoder returns a [Decoder] whose frames decode under the options —
+// the per-call limits and the Validator; the package-level [NewDecoder]
+// is the zero-options form.
+func (o UnmarshalOptions) NewDecoder(r io.Reader) *Decoder {
+	d := NewDecoder(r)
+	d.opts = o
+	return d
 }
 
 func NewDecoder(r io.Reader) *Decoder {
@@ -101,5 +111,5 @@ func (d *Decoder) Decode(v any) error {
 		d.err = err
 		return err
 	}
-	return Unmarshal(d.buf, v)
+	return d.opts.Unmarshal(d.buf, v)
 }

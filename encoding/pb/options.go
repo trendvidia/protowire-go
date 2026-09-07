@@ -16,13 +16,35 @@ type UnmarshalOptions struct {
 	// validator reports violations, Unmarshal fails with a
 	// *check.Error, retrievable via errors.As.
 	Validator check.Validator
+
+	// MaxNestingDepth caps submessage / map-entry recursion for this
+	// call, and MaxNumericLiteralDigits the magnitude of a pxf.Decimal's
+	// scale (draft -01 § Mandatory Limits: every limit but
+	// MaxVarintBytes is "configurable per call by the calling
+	// application"). Zero means the package constant of the same name,
+	// so the zero value of UnmarshalOptions is unchanged.
+	MaxNestingDepth         int
+	MaxNumericLiteralDigits int
 }
 
-// Unmarshal decodes protobuf binary into a struct, then applies the
-// configured Validator. v must be a pointer to a struct with
-// protowire:"N" tags.
+// limits resolves the per-call limits, the package constants standing in
+// for zero.
+func (o UnmarshalOptions) limits() limits {
+	lim := defaultLimits
+	if o.MaxNestingDepth > 0 {
+		lim.maxDepth = o.MaxNestingDepth
+	}
+	if o.MaxNumericLiteralDigits > 0 {
+		lim.maxDigits = o.MaxNumericLiteralDigits
+	}
+	return lim
+}
+
+// Unmarshal decodes protobuf binary into a struct under the options'
+// limits, then applies the configured Validator. v must be a pointer to
+// a struct with protowire:"N" tags.
 func (o UnmarshalOptions) Unmarshal(data []byte, v any) error {
-	if err := Unmarshal(data, v); err != nil {
+	if err := unmarshal(data, v, o.limits()); err != nil {
 		return err
 	}
 	_, err := check.Validate(o.Validator, v)

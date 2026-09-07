@@ -110,6 +110,17 @@ type UnmarshalOptions struct {
 	// engine-defined rule set (e.g. buf.validate annotations via a
 	// protovalidate adapter, or the RFC-001 surface via protocheck).
 	Validator check.Validator
+
+	// MaxNestingDepth caps block / list nesting for this call, and
+	// MaxNumericLiteralDigits the digit count of any numeric literal in
+	// the document (draft -01 § Mandatory Limits: every limit but
+	// MaxVarintBytes is "configurable per call by the calling
+	// application"). Zero means the package constant of the same name,
+	// so the zero value of UnmarshalOptions is unchanged. Schema input —
+	// a (pxf.default) literal, a carrier default — stays under the
+	// constants: it is the schema author's, not the document's.
+	MaxNestingDepth         int
+	MaxNumericLiteralDigits int
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -129,10 +140,23 @@ func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result
 			return nil, err
 		}
 	}
-	result, err := unmarshalDirectFull(data, r, o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode, o.OnSecretField)
+	result, err := unmarshalDirectFull(data, r, o)
 	if err != nil {
 		return nil, err
 	}
 	result.report, err = check.Validate(o.Validator, msg)
 	return result, err
+}
+
+// limits resolves the per-call limits, the package constants standing in
+// for zero.
+func (o UnmarshalOptions) limits() (maxDepth, maxDigits int) {
+	maxDepth, maxDigits = MaxNestingDepth, MaxNumericLiteralDigits
+	if o.MaxNestingDepth > 0 {
+		maxDepth = o.MaxNestingDepth
+	}
+	if o.MaxNumericLiteralDigits > 0 {
+		maxDigits = o.MaxNumericLiteralDigits
+	}
+	return maxDepth, maxDigits
 }

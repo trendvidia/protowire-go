@@ -273,6 +273,26 @@ format changes.
 
 ### Added
 
+- **The decoder limits are configurable per call**
+  ([#101](https://github.com/trendvidia/protowire-go/issues/101)). Draft
+  `-01` § Mandatory Limits says every limit but `MaxVarintBytes` is
+  "configurable per call by the calling application"; this port had them
+  as package constants. `pb.UnmarshalOptions` and `pxf.UnmarshalOptions`
+  now carry `MaxNestingDepth` and `MaxNumericLiteralDigits` — the two
+  limits the port enforces — with the package constants as their
+  zero-value defaults, so existing callers see no change and the error
+  names the effective value. `pxf.ParseOptions` does the same for the AST
+  parser behind `fmt` and `validate`, in strict and tolerant mode, and
+  `pb.UnmarshalOptions.NewDecoder` gives the length-prefixed stream
+  decoder the same options, Validator included. Schema input — a
+  `(pxf.default)` literal, a carrier default — stays under the constants:
+  it is the schema author's, not the document's. Found on the way and
+  filed: the direct decoder and the AST parser disagree at exactly
+  `MaxNestingDepth` ([#111](https://github.com/trendvidia/protowire-go/issues/111),
+  pinned), and `MaxMessageSize`, `MaxBytesLiteralLength` and
+  `MaxRepeatedCount` are not enforced at all
+  ([#112](https://github.com/trendvidia/protowire-go/issues/112)).
+  
 - **A bare `true` / `false` is a bool map key**
   ([#109](https://github.com/trendvidia/protowire-go/issues/109)). Draft
   `-01` now has `map-key = identifier / string / integer / bool`, and

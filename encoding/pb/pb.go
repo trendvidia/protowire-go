@@ -78,6 +78,17 @@ const MaxNestingDepth = 100
 // so it needs no bound here; see unmarshalBigFloatMsg.
 const MaxNumericLiteralDigits = 4096
 
+// limits is the per-call form of the two constants above, as
+// [UnmarshalOptions] resolves them for one decode: draft -01 § Mandatory
+// Limits makes every limit but MaxVarintBytes "configurable per call by
+// the calling application", with the constants as the defaults.
+type limits struct {
+	maxDepth  int
+	maxDigits int
+}
+
+var defaultLimits = limits{maxDepth: MaxNestingDepth, maxDigits: MaxNumericLiteralDigits}
+
 // Marshal encodes a struct into protobuf binary format.
 // v must be a pointer to a struct with protowire:"N" tags.
 func Marshal(v any) ([]byte, error) {
@@ -94,11 +105,15 @@ func Marshal(v any) ([]byte, error) {
 // Unmarshal decodes protobuf binary into a struct.
 // v must be a pointer to a struct with protowire:"N" tags.
 func Unmarshal(data []byte, v any) error {
+	return unmarshal(data, v, defaultLimits)
+}
+
+func unmarshal(data []byte, v any, lim limits) error {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("pb.Unmarshal: expected pointer to struct, got %s", rv.Type())
 	}
-	return unmarshalStruct(data, rv.Elem(), 1)
+	return unmarshalStruct(data, rv.Elem(), 1, lim)
 }
 
 // fieldInfo caches parsed struct tag info for a field.
@@ -388,9 +403,9 @@ func appendPacked(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 // unmarshalStruct decodes data into rv. depth is the current submessage
 // depth (top-level call = 1); it is threaded through nested stream
 // construction so a fresh inner buffer cannot reset the recursion counter.
-func unmarshalStruct(data []byte, rv reflect.Value, depth int) error {
-	if depth > MaxNestingDepth {
-		return fmt.Errorf("nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+func unmarshalStruct(data []byte, rv reflect.Value, depth int, lim limits) error {
+	if depth > lim.maxDepth {
+		return fmt.Errorf("nesting depth exceeds MaxNestingDepth=%d", lim.maxDepth)
 	}
 	info := getStructInfo(rv.Type())
 
@@ -413,7 +428,7 @@ func unmarshalStruct(data []byte, rv reflect.Value, depth int) error {
 		}
 
 		fv := rv.Field(fi.index)
-		consumed, err := unmarshalField(data, num, typ, fv, fi.zigzag, depth)
+		consumed, err := unmarshalField(data, num, typ, fv, fi.zigzag, depth, lim)
 		if err != nil {
 			return fmt.Errorf("field %s: %w", rv.Type().Field(fi.index).Name, err)
 		}
@@ -422,7 +437,7 @@ func unmarshalStruct(data []byte, rv reflect.Value, depth int) error {
 	return nil
 }
 
-func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv reflect.Value, zigzag bool, depth int) (int, error) {
+func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv reflect.Value, zigzag bool, depth int, lim limits) (int, error) {
 	// Handle pointer: allocate if nil
 	if fv.Kind() == reflect.Ptr {
 		if fv.IsNil() {
@@ -451,7 +466,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 				if elem.Kind() == reflect.Ptr {
 					elem.Set(reflect.New(elem.Type().Elem()))
 				}
-				consumed, err := unmarshalField(payload, num, typ, elem, zigzag, depth)
+				consumed, err := unmarshalField(payload, num, typ, elem, zigzag, depth, lim)
 				if err != nil {
 					return 0, err
 				}
@@ -465,7 +480,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 		if elem.Kind() == reflect.Ptr {
 			elem.Set(reflect.New(elem.Type().Elem()))
 		}
-		consumed, err := unmarshalField(data, num, typ, elem, zigzag, depth)
+		consumed, err := unmarshalField(data, num, typ, elem, zigzag, depth, lim)
 		if err != nil {
 			return 0, err
 		}
@@ -549,7 +564,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 			}
 		case bigRatType:
 			rat := fv.Addr().Interface().(*big.Rat)
-			if err := unmarshalBigRatMsg(v, rat); err != nil {
+			if err := unmarshalBigRatMsg(v, rat, lim.maxDigits); err != nil {
 				return 0, err
 			}
 		case bigFloatType:
@@ -558,7 +573,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 				return 0, err
 			}
 		default:
-			if err := unmarshalStruct(v, fv, depth+1); err != nil {
+			if err := unmarshalStruct(v, fv, depth+1, lim); err != nil {
 				return 0, err
 			}
 		}
@@ -583,13 +598,13 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 			entry = entry[en:]
 			switch enum {
 			case 1:
-				consumed, err := unmarshalField(entry, enum, etyp, key, zigzag, depth+1)
+				consumed, err := unmarshalField(entry, enum, etyp, key, zigzag, depth+1, lim)
 				if err != nil {
 					return 0, fmt.Errorf("map key: %w", err)
 				}
 				entry = entry[consumed:]
 			case 2:
-				consumed, err := unmarshalField(entry, enum, etyp, val, zigzag, depth+1)
+				consumed, err := unmarshalField(entry, enum, etyp, val, zigzag, depth+1, lim)
 				if err != nil {
 					return 0, fmt.Errorf("map value: %w", err)
 				}
@@ -812,7 +827,7 @@ func unmarshalBigIntMsg(data []byte, bi *big.Int) error {
 	return nil
 }
 
-func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
+func unmarshalBigRatMsg(data []byte, rat *big.Rat, maxDigits int) error {
 	var unscaledBytes []byte
 	var scale int32
 	var negative bool
@@ -868,8 +883,8 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat) error {
 	// the work is proportional to a number the input wrote, not to the
 	// input's length (#95). Measured, 10^4096 costs ~150µs and 10^(2^31-1)
 	// does not return.
-	if scale > MaxNumericLiteralDigits || scale < -MaxNumericLiteralDigits {
-		return fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+	if int64(scale) > int64(maxDigits) || int64(scale) < -int64(maxDigits) {
+		return fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, maxDigits)
 	}
 	unscaled := new(big.Int).SetBytes(unscaledBytes)
 	if scale < 0 {

@@ -320,8 +320,8 @@ func formatBigFloat(msg protoreflect.Message) string {
 // counts, so a sign, a point or an exponent marker does not — but a
 // literal short enough to be within the limit needs no counting at all,
 // and that is every literal a real document carries.
-func checkLiteralDigits(s string) error {
-	if len(s) <= MaxNumericLiteralDigits {
+func checkLiteralDigits(s string, maxDigits int) error {
+	if len(s) <= maxDigits {
 		return nil
 	}
 	n := 0
@@ -330,8 +330,8 @@ func checkLiteralDigits(s string) error {
 			n++
 		}
 	}
-	if n > MaxNumericLiteralDigits {
-		return fmt.Errorf("numeric literal has %d digits; MaxNumericLiteralDigits=%d", n, MaxNumericLiteralDigits)
+	if n > maxDigits {
+		return fmt.Errorf("numeric literal has %d digits; MaxNumericLiteralDigits=%d", n, maxDigits)
 	}
 	return nil
 }
@@ -346,8 +346,8 @@ func clipLiteral(s string) string {
 	return s[:24] + "…"
 }
 
-func parseBigInt(s string) (*big.Int, error) {
-	if err := checkLiteralDigits(s); err != nil {
+func parseBigInt(s string, maxDigits int) (*big.Int, error) {
+	if err := checkLiteralDigits(s, maxDigits); err != nil {
 		return nil, err
 	}
 	v, ok := new(big.Int).SetString(s, 10)
@@ -357,8 +357,8 @@ func parseBigInt(s string) (*big.Int, error) {
 	return v, nil
 }
 
-func parseDecimal(s string) (unscaled *big.Int, scale int32, negative bool, err error) {
-	if err := checkLiteralDigits(s); err != nil {
+func parseDecimal(s string, maxDigits int) (unscaled *big.Int, scale int32, negative bool, err error) {
+	if err := checkLiteralDigits(s, maxDigits); err != nil {
 		return nil, 0, false, err
 	}
 	raw := s
@@ -381,8 +381,8 @@ func parseDecimal(s string) (unscaled *big.Int, scale int32, negative bool, err 
 // bigFloatPrec is the precision a PXF BigFloat literal is parsed at.
 const bigFloatPrec = 256
 
-func parseBigFloat(s string) (*big.Float, error) {
-	if err := checkLiteralDigits(s); err != nil {
+func parseBigFloat(s string, maxDigits int) (*big.Float, error) {
+	if err := checkLiteralDigits(s, maxDigits); err != nil {
 		return nil, err
 	}
 	bf, _, err := new(big.Float).SetPrec(bigFloatPrec).Parse(s, 10)
