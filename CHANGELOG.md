@@ -406,6 +406,24 @@ format changes.
 
 ### Fixed
 
+- **A bool map key accepts exactly the spellings the grammar admits:
+  bare `0` / `1`, and quoted `"true"` / `"false"`**
+  ([#93](https://github.com/trendvidia/protowire-go/issues/93)). The key
+  was parsed with `strconv.ParseBool`, which also takes `t`, `T`, `TRUE`,
+  `True` and their false counterparts — eight spellings that bound here
+  and were a syntax error in any port that follows the grammar, the
+  inverse of #90's defect on bool defaults. Quoted `"1"` / `"0"` are
+  rejected too: a string key is parsed as a literal of the key's type,
+  and an integer literal inside a string is not a bool literal (decided
+  here; the draft's integer-key rule is where "bool encoded as 0/1"
+  lives). The error names the key, the field and the four admitted
+  spellings; `{ true: "v" }` still reports the map-key production error.
+  Measured across four ports before deciding, and the family binds four
+  different sets — Java maps every other spelling to `false` silently,
+  Rust and TypeScript reject the bare `0` / `1` the text admits and bind
+  a bare `true` the text does not mention — which is recorded, with the
+  open question of identifier keys on a non-string key type, in
+  [protowire#284](https://github.com/trendvidia/protowire/issues/284).
 - **`encoding/pb` writes `Decimal.scale` and `BigFloat.exponent` as plain
   varints, matching `pxf/bignum.proto`**
   ([#92](https://github.com/trendvidia/protowire-go/issues/92)).

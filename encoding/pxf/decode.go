@@ -81,7 +81,12 @@ func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect
 	return msg, result, err
 }
 
-func decodeMapKey(fd protoreflect.FieldDescriptor, key string, pos Position) (protoreflect.MapKey, error) {
+// decodeMapKey parses one map key. field is the map field itself (its
+// MapKey() is the key's descriptor); quoted reports whether the key was
+// written as a string literal, which decides what it may spell for a
+// bool key.
+func decodeMapKey(field protoreflect.FieldDescriptor, key string, quoted bool, pos Position) (protoreflect.MapKey, error) {
+	fd := field.MapKey()
 	switch fd.Kind() {
 	case protoreflect.StringKind:
 		if !utf8.ValidString(key) {
@@ -113,11 +118,38 @@ func decodeMapKey(fd protoreflect.FieldDescriptor, key string, pos Position) (pr
 		}
 		return protoreflect.ValueOfUint64(n).MapKey(), nil
 	case protoreflect.BoolKind:
-		b, err := strconv.ParseBool(key)
-		if err != nil {
-			return protoreflect.MapKey{}, errorf(pos, "invalid bool map key: %s", key)
+		// A bool map key has two spellings in the grammar: the bare
+		// integers 0 / 1 (draft -01 §entries-and-keys: an integer key
+		// matches "bool encoded as 0/1"), and the quoted literals "true"
+		// / "false" (a string key "is parsed as a literal of K's type",
+		// and a PXF bool literal is exactly those two words, #90). Bare
+		// true / false never reach here: the lexer emits BOOL for them
+		// and map-key is identifier / string / integer, so the caller
+		// reports the production error.
+		//
+		// NOT strconv.ParseBool, which also takes t, T, TRUE, True, f, F,
+		// FALSE, False — eight spellings no port that follows the grammar
+		// binds, so a document using one bound here and was a syntax
+		// error everywhere else (#93). "1" / "0" in quotes are rejected
+		// too: an integer literal inside a string is not a bool literal
+		// (decided in #93). Whether a bare true / false should be a key
+		// at all is open as protowire#284.
+		if quoted {
+			switch key {
+			case "true":
+				return protoreflect.ValueOfBool(true).MapKey(), nil
+			case "false":
+				return protoreflect.ValueOfBool(false).MapKey(), nil
+			}
+			return protoreflect.MapKey{}, errorf(pos, "invalid bool map key %q for field %q: a bool key is 0, 1, \"true\" or \"false\"", key, field.Name())
 		}
-		return protoreflect.ValueOfBool(b).MapKey(), nil
+		switch key {
+		case "1":
+			return protoreflect.ValueOfBool(true).MapKey(), nil
+		case "0":
+			return protoreflect.ValueOfBool(false).MapKey(), nil
+		}
+		return protoreflect.MapKey{}, errorf(pos, "invalid bool map key %s for field %q: a bool key is 0, 1, \"true\" or \"false\"", key, field.Name())
 	default:
 		return protoreflect.MapKey{}, errorf(pos, "unsupported map key kind: %s", fd.Kind())
 	}

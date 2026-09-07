@@ -1238,7 +1238,6 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 	d.advance()
 
 	m := msg.Mutable(fd).Map()
-	keyFd := fd.MapKey()
 	valFd := fd.MapValue()
 
 	for d.current.Kind != RBRACE && d.current.Kind != EOF {
@@ -1247,6 +1246,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			return errorf(pos, "expected map key, got %s", d.tokenErrMsg())
 		}
 		keyStr := strings.Clone(d.current.Value)
+		quoted := d.current.Kind == STRING
 		d.advance()
 
 		switch d.current.Kind {
@@ -1258,7 +1258,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			return errorf(d.current.Pos, "expected ':' after map key, got %s", d.current.Kind)
 		}
 
-		k, err := decodeMapKey(keyFd, keyStr, pos)
+		k, err := decodeMapKey(fd, keyStr, quoted, pos)
 		if err != nil {
 			return err
 		}
