@@ -14,6 +14,7 @@ type parser struct {
 	lex      *lexer
 	current  Token
 	comments []Comment // pending comments not yet attached to an entry
+	maxDepth int       // this parse's MaxNestingDepth (ParseOptions)
 
 	// tolerant enables the error-recovering mode behind [ParseTolerant]:
 	// instead of returning the first syntax error, the parser records it
@@ -32,13 +33,13 @@ type parser struct {
 }
 
 func newParser(input []byte) *parser {
-	p := &parser{lex: newLexer(input)}
+	p := &parser{lex: newLexer(input), maxDepth: MaxNestingDepth}
 	p.advance()
 	return p
 }
 
 func newTolerantParser(input []byte) *parser {
-	p := &parser{lex: newLexer(input), tolerant: true}
+	p := &parser{lex: newLexer(input), tolerant: true, maxDepth: MaxNestingDepth}
 	p.lex.tolerant = true
 	p.lex.onErr = func(pos Position, msg string) {
 		p.errs = append(p.errs, Error{Pos: pos, Msg: msg})
@@ -214,9 +215,32 @@ func (p *parser) peekKind() TokenKind {
 	return next
 }
 
+// ParseOptions configures [Parse] and [ParseTolerant]. The zero value is
+// the package-level functions.
+type ParseOptions struct {
+	// MaxNestingDepth caps block / list nesting for this parse (draft -01
+	// § Mandatory Limits: every limit but MaxVarintBytes is configurable
+	// per call). Zero means [MaxNestingDepth].
+	MaxNestingDepth int
+}
+
+func (o ParseOptions) maxDepth() int {
+	if o.MaxNestingDepth > 0 {
+		return o.MaxNestingDepth
+	}
+	return MaxNestingDepth
+}
+
 // Parse parses PXF source into an AST Document with comments attached.
 func Parse(input []byte) (*Document, error) {
-	return newParser(input).parseDocument()
+	return ParseOptions{}.Parse(input)
+}
+
+// Parse is [Parse] under the options.
+func (o ParseOptions) Parse(input []byte) (*Document, error) {
+	p := newParser(input)
+	p.maxDepth = o.maxDepth()
+	return p.parseDocument()
 }
 
 // ParseTolerant parses PXF source in error-tolerant mode, for editor
@@ -249,7 +273,13 @@ func Parse(input []byte) (*Document, error) {
 // tooling (completion, hover, diagnostics), not for decoding into
 // messages — use [Parse] or [Unmarshal] once the document is valid.
 func ParseTolerant(input []byte) (*Document, []Error) {
+	return ParseOptions{}.ParseTolerant(input)
+}
+
+// ParseTolerant is [ParseTolerant] under the options.
+func (o ParseOptions) ParseTolerant(input []byte) (*Document, []Error) {
 	p := newTolerantParser(input)
+	p.maxDepth = o.maxDepth()
 	doc, err := p.parseDocument()
 	if err != nil {
 		// parseDocument never returns an error in tolerant mode;
@@ -867,8 +897,8 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 				return nil, err
 			}
 		}
-		if depth+1 > MaxNestingDepth {
-			if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)); err != nil {
+		if depth+1 > p.maxDepth {
+			if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", p.maxDepth)); err != nil {
 				return nil, err
 			}
 			// Too deep to descend; skip the whole block, keep the entry.
@@ -1003,8 +1033,8 @@ func (p *parser) parseValue(depth int) (Value, error) {
 }
 
 func (p *parser) parseList(depth int) (Value, error) {
-	if depth+1 > MaxNestingDepth {
-		if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)); err != nil {
+	if depth+1 > p.maxDepth {
+		if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", p.maxDepth)); err != nil {
 			return nil, err
 		}
 		pos := p.current.Pos
@@ -1049,8 +1079,8 @@ func (p *parser) parseList(depth int) (Value, error) {
 }
 
 func (p *parser) parseBlockVal(depth int) (Value, error) {
-	if depth+1 > MaxNestingDepth {
-		if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)); err != nil {
+	if depth+1 > p.maxDepth {
+		if err := p.soft(errorf(p.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", p.maxDepth)); err != nil {
 			return nil, err
 		}
 		pos := p.current.Pos

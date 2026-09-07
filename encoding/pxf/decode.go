@@ -38,7 +38,7 @@ func (o UnmarshalOptions) Unmarshal(data []byte, msg proto.Message) error {
 			return err
 		}
 	}
-	if err := unmarshalDirect(data, r, o.TypeResolver, o.DiscardUnknown, o.OnSecretField); err != nil {
+	if err := unmarshalDirect(data, r, o); err != nil {
 		return err
 	}
 	_, err := check.Validate(o.Validator, msg)
@@ -53,7 +53,7 @@ func (o UnmarshalOptions) UnmarshalDescriptor(data []byte, desc protoreflect.Mes
 		}
 	}
 	msg := dynamicpb.NewMessage(desc)
-	if err := unmarshalDirect(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.OnSecretField); err != nil {
+	if err := unmarshalDirect(data, msg.ProtoReflect(), o); err != nil {
 		return nil, err
 	}
 	if _, err := check.Validate(o.Validator, msg); err != nil {
@@ -73,7 +73,7 @@ func (o UnmarshalOptions) UnmarshalFullDescriptor(data []byte, desc protoreflect
 		}
 	}
 	msg := dynamicpb.NewMessage(desc)
-	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o.TypeResolver, o.DiscardUnknown, o.SkipPostDecode, o.OnSecretField)
+	result, err := unmarshalDirectFull(data, msg.ProtoReflect(), o)
 	if err != nil {
 		return nil, nil, err
 	}

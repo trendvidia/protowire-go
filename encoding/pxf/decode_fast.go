@@ -93,7 +93,9 @@ type directDecoder struct {
 	current        Token
 	resolver       TypeResolver
 	discardUnknown bool
-	depth          int                            // nesting depth, capped at MaxNestingDepth
+	depth          int                            // nesting depth, capped at maxDepth
+	maxDepth       int                            // this call's MaxNestingDepth (UnmarshalOptions.limits)
+	maxDigits      int                            // this call's MaxNumericLiteralDigits, for the document's literals
 	result         *Result                        // nil for plain Unmarshal, non-nil for UnmarshalFull
 	rootMsg        protoreflect.Message           // top-level message (for _null FieldMask writes)
 	nullMaskFd     protoreflect.FieldDescriptor   // cached _null field, may be nil
@@ -159,12 +161,13 @@ func (d *directDecoder) peekKind() TokenKind {
 	return next
 }
 
-func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown bool, onSecret func(path, value string) error) error {
+func unmarshalDirect(data []byte, msg protoreflect.Message, o UnmarshalOptions) error {
 	var d directDecoder
 	d.lex = lexer{input: data, line: 1, col: 1}
-	d.resolver = resolver
-	d.discardUnknown = discardUnknown
-	d.onSecret = onSecret
+	d.resolver = o.TypeResolver
+	d.discardUnknown = o.DiscardUnknown
+	d.onSecret = o.OnSecretField
+	d.maxDepth, d.maxDigits = o.limits()
 	d.advance()
 
 	if err := d.consumeDirectives(nil); err != nil {
@@ -174,12 +177,13 @@ func unmarshalDirect(data []byte, msg protoreflect.Message, resolver TypeResolve
 	return d.decodeFields(msg, false)
 }
 
-func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeResolver, discardUnknown, skipPostDecode bool, onSecret func(path, value string) error) (*Result, error) {
+func unmarshalDirectFull(data []byte, msg protoreflect.Message, o UnmarshalOptions) (*Result, error) {
 	var d directDecoder
 	d.lex = lexer{input: data, line: 1, col: 1}
-	d.resolver = resolver
-	d.discardUnknown = discardUnknown
-	d.onSecret = onSecret
+	d.resolver = o.TypeResolver
+	d.discardUnknown = o.DiscardUnknown
+	d.onSecret = o.OnSecretField
+	d.maxDepth, d.maxDigits = o.limits()
 	d.result = newResult()
 	d.rootMsg = msg
 	d.nullMaskFd = findNullMaskField(msg.Descriptor())
@@ -192,7 +196,7 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, resolver TypeRes
 	if err := d.decodeFields(msg, false); err != nil {
 		return nil, err
 	}
-	if !skipPostDecode {
+	if !o.SkipPostDecode {
 		if err := postDecode(msg, d.result, d.nullMaskFd, ""); err != nil {
 			return nil, err
 		}
@@ -580,8 +584,8 @@ func lineColAt(input []byte, off int) (int, int) {
 // on return so siblings see the correct depth.
 func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) error {
 	d.depth++
-	if d.depth > MaxNestingDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+	if d.depth > d.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.maxDepth)
 	}
 	defer func() { d.depth-- }()
 
@@ -853,7 +857,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
-		bi, err := parseBigInt(d.current.Value)
+		bi, err := parseBigInt(d.current.Value, d.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -864,7 +868,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		unscaled, scale, negative, err := parseDecimal(d.current.Value)
+		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -875,7 +879,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value)
+		bf, err := parseBigFloat(d.current.Value, d.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -1070,7 +1074,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
-		bi, err := parseBigInt(d.current.Value)
+		bi, err := parseBigInt(d.current.Value, d.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1080,7 +1084,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		unscaled, scale, negative, err := parseDecimal(d.current.Value)
+		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1090,7 +1094,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value)
+		bf, err := parseBigFloat(d.current.Value, d.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1166,8 +1170,8 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 // returning.
 func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd protoreflect.FieldDescriptor) error {
 	d.depth++
-	if d.depth > MaxNestingDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+	if d.depth > d.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.maxDepth)
 	}
 	defer func() { d.depth-- }()
 
@@ -1314,7 +1318,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigInt(mdesc) && d.current.Kind == INT {
-				bi, err := parseBigInt(d.current.Value)
+				bi, err := parseBigInt(d.current.Value, d.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1325,7 +1329,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				unscaled, scale, negative, err := parseDecimal(d.current.Value)
+				unscaled, scale, negative, err := parseDecimal(d.current.Value, d.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1336,7 +1340,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				bf, err := parseBigFloat(d.current.Value)
+				bf, err := parseBigFloat(d.current.Value, d.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1584,8 +1588,8 @@ func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) 
 // forms (chameleon's pre-v0.9.0 best-effort residual).
 func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path string) error {
 	d.depth++
-	if d.depth > MaxNestingDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", MaxNestingDepth)
+	if d.depth > d.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.maxDepth)
 	}
 	defer func() { d.depth-- }()
 
@@ -1990,7 +1994,7 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 	}
 
 	if isBigInt(mdesc) {
-		bi, err := parseBigInt(def)
+		bi, err := parseBigInt(def, MaxNumericLiteralDigits)
 		if err != nil {
 			return fmt.Errorf("invalid default big integer %q for field %q: %w", def, fd.Name(), err)
 		}
@@ -1999,7 +2003,7 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 		return nil
 	}
 	if isDecimal(mdesc) {
-		unscaled, scale, negative, err := parseDecimal(def)
+		unscaled, scale, negative, err := parseDecimal(def, MaxNumericLiteralDigits)
 		if err != nil {
 			return fmt.Errorf("invalid default decimal %q for field %q: %w", def, fd.Name(), err)
 		}
@@ -2008,7 +2012,7 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 		return nil
 	}
 	if isBigFloat(mdesc) {
-		bf, err := parseBigFloat(def)
+		bf, err := parseBigFloat(def, MaxNumericLiteralDigits)
 		if err != nil {
 			return fmt.Errorf("invalid default big float %q for field %q: %w", def, fd.Name(), err)
 		}
