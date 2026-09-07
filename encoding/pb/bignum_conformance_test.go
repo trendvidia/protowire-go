@@ -235,8 +235,7 @@ func TestBignumConformance_SchemaBytesAreReadableHere(t *testing.T) {
 		oracle.Set(decimalDesc.Fields().ByName("unscaled"),
 			protoreflect.ValueOfBytes(big.NewInt(25).Bytes()))
 		oracle.Set(decimalDesc.Fields().ByName("scale"), protoreflect.ValueOfInt32(-2))
-		sub, err := proto.Marshal(oracle)
-		require.NoError(t, err)
+		sub := oracleMarshal(t, oracle)
 
 		got := &conformanceStruct{Price: new(big.Rat), Coefficient: new(big.Float)}
 		require.NoError(t, pb.Unmarshal(wrap(1, sub), got))
@@ -250,8 +249,7 @@ func TestBignumConformance_SchemaBytesAreReadableHere(t *testing.T) {
 		oracle.Set(decimalDesc.Fields().ByName("unscaled"),
 			protoreflect.ValueOfBytes(big.NewInt(31415).Bytes()))
 		oracle.Set(decimalDesc.Fields().ByName("scale"), protoreflect.ValueOfInt32(4))
-		sub, err := proto.Marshal(oracle)
-		require.NoError(t, err)
+		sub := oracleMarshal(t, oracle)
 
 		got := &conformanceStruct{Price: new(big.Rat), Coefficient: new(big.Float)}
 		require.NoError(t, pb.Unmarshal(wrap(1, sub), got))
@@ -267,8 +265,7 @@ func TestBignumConformance_SchemaBytesAreReadableHere(t *testing.T) {
 			protoreflect.ValueOfBytes(mant.Bytes()))
 		oracle.Set(bigFloatDesc.Fields().ByName("exponent"), protoreflect.ValueOfInt32(-52))
 		oracle.Set(bigFloatDesc.Fields().ByName("prec"), protoreflect.ValueOfUint32(53))
-		sub, err := proto.Marshal(oracle)
-		require.NoError(t, err)
+		sub := oracleMarshal(t, oracle)
 
 		got := &conformanceStruct{Price: new(big.Rat), Coefficient: new(big.Float)}
 		require.NoError(t, pb.Unmarshal(wrap(2, sub), got))
@@ -315,8 +312,7 @@ func TestBignumConformance_ByteForByte(t *testing.T) {
 	oracle.Set(decimalDesc.Fields().ByName("unscaled"),
 		protoreflect.ValueOfBytes(big.NewInt(31415).Bytes()))
 	oracle.Set(decimalDesc.Fields().ByName("scale"), protoreflect.ValueOfInt32(4))
-	theirs, err := proto.Marshal(oracle)
-	require.NoError(t, err)
+	theirs := oracleMarshal(t, oracle)
 
 	// Field by field, not buffer by buffer: every field must encode to the
 	// same bytes, and the order they appear in is not part of the contract.

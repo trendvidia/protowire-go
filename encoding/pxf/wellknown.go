@@ -5,6 +5,7 @@ package pxf
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -314,7 +315,41 @@ func formatBigFloat(msg protoreflect.Message) string {
 
 // Big number string parsers (decode direction).
 
+// checkLiteralDigits enforces MaxNumericLiteralDigits on a literal
+// about to be handed to a big-number parser. Digits are what the limit
+// counts, so a sign, a point or an exponent marker does not — but a
+// literal short enough to be within the limit needs no counting at all,
+// and that is every literal a real document carries.
+func checkLiteralDigits(s string) error {
+	if len(s) <= MaxNumericLiteralDigits {
+		return nil
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			n++
+		}
+	}
+	if n > MaxNumericLiteralDigits {
+		return fmt.Errorf("numeric literal has %d digits; MaxNumericLiteralDigits=%d", n, MaxNumericLiteralDigits)
+	}
+	return nil
+}
+
+// clipLiteral shortens a literal for an error message. The literals that
+// reach the errors below can be thousands of digits long, and an error
+// is read, not parsed.
+func clipLiteral(s string) string {
+	if len(s) <= 24 {
+		return s
+	}
+	return s[:24] + "…"
+}
+
 func parseBigInt(s string) (*big.Int, error) {
+	if err := checkLiteralDigits(s); err != nil {
+		return nil, err
+	}
 	v, ok := new(big.Int).SetString(s, 10)
 	if !ok {
 		return nil, fmt.Errorf("invalid big integer: %s", s)
@@ -323,6 +358,9 @@ func parseBigInt(s string) (*big.Int, error) {
 }
 
 func parseDecimal(s string) (unscaled *big.Int, scale int32, negative bool, err error) {
+	if err := checkLiteralDigits(s); err != nil {
+		return nil, 0, false, err
+	}
 	raw := s
 	if len(s) > 0 && s[0] == '-' {
 		negative = true
@@ -340,10 +378,50 @@ func parseDecimal(s string) (unscaled *big.Int, scale int32, negative bool, err 
 	return unscaled, scale, negative, nil
 }
 
+// bigFloatPrec is the precision a PXF BigFloat literal is parsed at.
+const bigFloatPrec = 256
+
 func parseBigFloat(s string) (*big.Float, error) {
-	bf, _, err := new(big.Float).SetPrec(256).Parse(s, 10)
+	if err := checkLiteralDigits(s); err != nil {
+		return nil, err
+	}
+	bf, _, err := new(big.Float).SetPrec(bigFloatPrec).Parse(s, 10)
 	if err != nil {
 		return nil, fmt.Errorf("invalid big float: %s", s)
 	}
+	// big.Float.Parse substitutes ±Inf for a value above its range and
+	// ±0 for one below it, and reports neither. A finite, non-zero
+	// literal that came back as either is a value pxf.BigFloat cannot
+	// carry, which draft -01 §mandatory-limits makes an error rather
+	// than a substitution (protowire#278). The overflow used to reach
+	// setBigFloatFields, whose mant.Int returned nil for +Inf — a panic
+	// on a sixteen-byte document.
+	if bf.IsInf() {
+		return nil, fmt.Errorf("big float literal %s is above big.Float's range", clipLiteral(s))
+	}
+	if bf.Sign() == 0 && hasNonZeroMantissaDigit(s) {
+		return nil, fmt.Errorf("big float literal %s is below big.Float's range", clipLiteral(s))
+	}
+	// The wire carries exp - prec as an int32 (pxf/bignum.proto). A value
+	// near big.Float's floor parses but cannot be encoded, and the int32
+	// subtraction in setBigFloatFields wrapped silently.
+	if int64(bf.MantExp(nil))-bigFloatPrec < math.MinInt32 {
+		return nil, fmt.Errorf("big float literal %s is below the wire's exponent range", clipLiteral(s))
+	}
 	return bf, nil
+}
+
+// hasNonZeroMantissaDigit reports whether the literal's mantissa — the
+// part before any exponent marker — has a digit other than 0, so that a
+// parse result of zero can be told apart from an underflow.
+func hasNonZeroMantissaDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == 'e' || c == 'E':
+			return false
+		case c >= '1' && c <= '9':
+			return true
+		}
+	}
+	return false
 }
