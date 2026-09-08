@@ -93,6 +93,9 @@ type GroupView struct {
 // View creates a zero-allocation reader over SBE-encoded data.
 // The message template is identified from the header's template ID.
 func (c *Codec) View(data []byte) (View, error) {
+	if len(data) > c.maxMessageSize {
+		return View{}, fmt.Errorf("sbe: input of %d bytes exceeds MaxMessageSize=%d", len(data), c.maxMessageSize)
+	}
 	if len(data) < headerSize {
 		return View{}, fmt.Errorf("sbe: data too short for header")
 	}

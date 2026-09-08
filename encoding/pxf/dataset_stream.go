@@ -66,6 +66,7 @@ type DatasetReader struct {
 	dirs     []Directive
 	finished bool  // Next() has returned io.EOF
 	err      error // sticky error
+	maxRow   int   // cap on pending while a row boundary is sought (MaxMessageSize, UnmarshalOptions.limits)
 }
 
 // NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
@@ -79,7 +80,15 @@ type DatasetReader struct {
 // including the `)` of the column list) must fit in 64 KiB. This is a
 // fail-fast bound — real headers are tiny.
 func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r}
+	return UnmarshalOptions{}.NewDatasetReader(r)
+}
+
+// NewDatasetReader is [NewDatasetReader] under the options' limits: the
+// bytes held while a row boundary is sought are capped at the options'
+// MaxMessageSize, so a stream that never ends a row cannot grow the
+// buffer without bound.
+func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
+	tr := &DatasetReader{src: r, maxRow: o.limits().maxMessageSize}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
 	}
@@ -176,6 +185,9 @@ func (tr *DatasetReader) pull(n int) error {
 	read, err := tr.src.Read(buf)
 	if read > 0 {
 		tr.pending = append(tr.pending, buf[:read]...)
+		if len(tr.pending) > tr.maxRow {
+			return fmt.Errorf("dataset input holds %d bytes without a row boundary, MaxMessageSize=%d", len(tr.pending), tr.maxRow)
+		}
 	}
 	if errors.Is(err, io.EOF) {
 		tr.srcEOF = true

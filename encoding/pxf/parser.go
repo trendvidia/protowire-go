@@ -218,17 +218,19 @@ func (p *parser) peekKind() TokenKind {
 // ParseOptions configures [Parse] and [ParseTolerant]. The zero value is
 // the package-level functions.
 type ParseOptions struct {
-	// MaxNestingDepth caps block / list nesting for this parse (draft -01
-	// § Mandatory Limits: every limit but MaxVarintBytes is configurable
-	// per call). Zero means [MaxNestingDepth].
-	MaxNestingDepth int
+	// The draft's per-call limits for a parse (draft -01 § Mandatory
+	// Limits: every limit but MaxVarintBytes is configurable per call).
+	// Zero means the package constant of the same name. MaxMessageSize
+	// caps the input and is checked before the first token is read;
+	// MaxNestingDepth caps block / list nesting; MaxBytesLiteralLength
+	// the decoded length of any b"…" literal.
+	MaxMessageSize        int
+	MaxNestingDepth       int
+	MaxBytesLiteralLength int
 }
 
-func (o ParseOptions) maxDepth() int {
-	if o.MaxNestingDepth > 0 {
-		return o.MaxNestingDepth
-	}
-	return MaxNestingDepth
+func (o ParseOptions) limits() limits {
+	return UnmarshalOptions{MaxMessageSize: o.MaxMessageSize, MaxNestingDepth: o.MaxNestingDepth, MaxBytesLiteralLength: o.MaxBytesLiteralLength}.limits()
 }
 
 // Parse parses PXF source into an AST Document with comments attached.
@@ -238,8 +240,13 @@ func Parse(input []byte) (*Document, error) {
 
 // Parse is [Parse] under the options.
 func (o ParseOptions) Parse(input []byte) (*Document, error) {
+	lim := o.limits()
+	if len(input) > lim.maxMessageSize {
+		return nil, errorf(Position{Line: 1, Column: 1}, "input of %d bytes exceeds MaxMessageSize=%d", len(input), lim.maxMessageSize)
+	}
 	p := newParser(input)
-	p.maxDepth = o.maxDepth()
+	p.maxDepth = lim.maxDepth
+	p.lex.maxBytesLiteral = lim.maxBytesLiteral
 	return p.parseDocument()
 }
 
@@ -278,8 +285,13 @@ func ParseTolerant(input []byte) (*Document, []Error) {
 
 // ParseTolerant is [ParseTolerant] under the options.
 func (o ParseOptions) ParseTolerant(input []byte) (*Document, []Error) {
+	lim := o.limits()
+	if len(input) > lim.maxMessageSize {
+		return &Document{}, []Error{{Pos: Position{Line: 1, Column: 1}, Msg: fmt.Sprintf("input of %d bytes exceeds MaxMessageSize=%d", len(input), lim.maxMessageSize)}}
+	}
 	p := newTolerantParser(input)
-	p.maxDepth = o.maxDepth()
+	p.maxDepth = lim.maxDepth
+	p.lex.maxBytesLiteral = lim.maxBytesLiteral
 	doc, err := p.parseDocument()
 	if err != nil {
 		// parseDocument never returns an error in tolerant mode;

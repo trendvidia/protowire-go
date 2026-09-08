@@ -13,6 +13,8 @@ import (
 
 // DefaultMaxFrameSize caps each frame at 16 MiB by default. Streams face
 // per-connection adversary risk; callers can adjust via SetMaxFrameSize.
+// It is below MaxMessageSize, which still bounds a frame's payload through the
+// Decoder's UnmarshalOptions when a caller raises the frame cap.
 const DefaultMaxFrameSize = 16 << 20
 
 // ErrFramingCorrupt is returned when the length-prefix framing is invalid

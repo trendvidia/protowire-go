@@ -25,6 +25,11 @@ type lexer struct {
 	// it instead). Each recovery reports a positioned error via onErr.
 	tolerant bool
 	onErr    func(pos Position, msg string)
+
+	// maxBytesLiteral bounds the decoded length of a b"…" literal, checked
+	// from the literal's length while it is scanned (HARDENING.md
+	// MaxBytesLiteralLength); the decoder sets it from its per-call limits.
+	maxBytesLiteral int
 }
 
 // reportErr records a recoverable lexical error in tolerant mode.
@@ -35,7 +40,7 @@ func (l *lexer) reportErr(pos Position, msg string) {
 }
 
 func newLexer(input []byte) *lexer {
-	return &lexer{input: input, line: 1, col: 1}
+	return &lexer{input: input, line: 1, col: 1, maxBytesLiteral: MaxBytesLiteralLength}
 }
 
 func (l *lexer) peek() byte {
@@ -375,6 +380,12 @@ func (l *lexer) lexBytes(pos Position) Token {
 	start := l.pos
 	for l.pos < len(l.input) {
 		ch := l.peek()
+		if l.maxBytesLiteral > 0 && (l.pos-start)/4*3 > l.maxBytesLiteral {
+			// Decoded base64 is three bytes per four characters; judged from
+			// the length so the literal is neither scanned to its end nor
+			// decoded before it is refused.
+			return Token{Kind: ILLEGAL, Value: fmt.Sprintf("bytes literal decodes to more than MaxBytesLiteralLength=%d bytes", l.maxBytesLiteral), Pos: pos}
+		}
 		if ch == '"' {
 			raw := string(l.input[start:l.pos])
 			l.advance() // closing "
