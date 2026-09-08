@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/trendvidia/protocompile"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -66,6 +68,8 @@ func main() {
 	flag.StringVar(&schema, "schema", "", "fully.qualified.MessageType")
 	flag.StringVar(&proto, "proto", "", "path to adversarial.proto")
 	flag.StringVar(&input, "input", "", "path to corpus file")
+	var limits limitFlags
+	flag.Var(&limits, "limit", "NAME=VALUE, repeatable: lower a HARDENING limit for this run — MaxMessageSize, MaxNestingDepth, MaxNumericLiteralDigits, MaxBytesLiteralLength, MaxRepeatedCount")
 	flag.Parse()
 
 	if format == "" || schema == "" || input == "" {
@@ -73,22 +77,22 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(format, schema, proto, input); err != nil {
+	if err := run(format, schema, proto, input, limits); err != nil {
 		fmt.Fprintln(os.Stderr, "reject:", err)
 		os.Exit(1)
 	}
 }
 
-func run(format, schema, protoPath, input string) error {
+func run(format, schema, protoPath, input string, lim limitFlags) error {
 	data, err := os.ReadFile(input)
 	if err != nil {
 		return fmt.Errorf("read input: %w", err)
 	}
 	switch format {
 	case "pxf":
-		return pxfDecode(data, schema, protoPath)
+		return pxfDecode(data, schema, protoPath, lim)
 	case "pb":
-		return pbDecode(data, schema)
+		return pbDecode(data, schema, lim)
 	case "envelope":
 		return errors.New("envelope decode not yet implemented in this reference")
 	case "sbe":
@@ -98,7 +102,7 @@ func run(format, schema, protoPath, input string) error {
 	}
 }
 
-func pxfDecode(data []byte, schema, protoPath string) error {
+func pxfDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 	if protoPath == "" {
 		return errors.New("--proto is required for format=pxf")
 	}
@@ -106,11 +110,17 @@ func pxfDecode(data []byte, schema, protoPath string) error {
 	if err != nil {
 		return err
 	}
-	_, err = pxf.UnmarshalDescriptor(data, desc)
+	_, err = pxf.UnmarshalOptions{
+		MaxMessageSize:          lim["MaxMessageSize"],
+		MaxNestingDepth:         lim["MaxNestingDepth"],
+		MaxNumericLiteralDigits: lim["MaxNumericLiteralDigits"],
+		MaxBytesLiteralLength:   lim["MaxBytesLiteralLength"],
+		MaxRepeatedCount:        lim["MaxRepeatedCount"],
+	}.UnmarshalDescriptor(data, desc)
 	return err
 }
 
-func pbDecode(data []byte, schema string) error {
+func pbDecode(data []byte, schema string, lim limitFlags) error {
 	var msg any
 	switch schema {
 	case "adversarial.v1.Tree":
@@ -124,7 +134,12 @@ func pbDecode(data []byte, schema string) error {
 	default:
 		return fmt.Errorf("unknown schema for pb: %s", schema)
 	}
-	return pwpb.Unmarshal(data, msg)
+	return pwpb.UnmarshalOptions{
+		MaxMessageSize:          lim["MaxMessageSize"],
+		MaxNestingDepth:         lim["MaxNestingDepth"],
+		MaxNumericLiteralDigits: lim["MaxNumericLiteralDigits"],
+		MaxRepeatedCount:        lim["MaxRepeatedCount"],
+	}.Unmarshal(data, msg)
 }
 
 func loadDescriptor(protoPath, schema string) (protoreflect.MessageDescriptor, error) {
@@ -169,4 +184,35 @@ func loadDescriptor(protoPath, schema string) (protoreflect.MessageDescriptor, e
 func dirExists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.IsDir()
+}
+
+// limitFlags collects --limit NAME=VALUE flags: a HARDENING limit lowered
+// for this run, so the conformance corpus can prove a limit with a small
+// fixture (protowire#299) rather than a 64 MiB one. Zero means the
+// package default; every name the draft's § Mandatory Limits lists but
+// MaxVarintBytes is accepted, and MaxBytesLiteralLength only reaches the
+// PXF decoder.
+type limitFlags map[string]int
+
+func (l limitFlags) String() string { return fmt.Sprint(map[string]int(l)) }
+
+func (l *limitFlags) Set(s string) error {
+	name, value, ok := strings.Cut(s, "=")
+	if !ok {
+		return fmt.Errorf("--limit wants NAME=VALUE, got %q", s)
+	}
+	switch name {
+	case "MaxMessageSize", "MaxNestingDepth", "MaxNumericLiteralDigits", "MaxBytesLiteralLength", "MaxRepeatedCount":
+	default:
+		return fmt.Errorf("--limit: unknown limit %q", name)
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return fmt.Errorf("--limit %s: want a positive integer, got %q", name, value)
+	}
+	if *l == nil {
+		*l = limitFlags{}
+	}
+	(*l)[name] = n
+	return nil
 }
