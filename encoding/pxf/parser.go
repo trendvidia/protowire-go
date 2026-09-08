@@ -899,7 +899,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 			return nil, err
 		}
 		trailing := p.takeTrailingComment(val.end())
-		return &MapEntry{Pos: pos, End: val.end(), Key: key, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
+		return &MapEntry{Pos: pos, End: val.end(), Key: key, KeyQuoted: keyKind == STRING, Value: val, LeadingComments: leading, TrailingComment: trailing}, nil
 
 	case LBRACE:
 		// `{ ... }` denotes a submessage field; the name is an identifier

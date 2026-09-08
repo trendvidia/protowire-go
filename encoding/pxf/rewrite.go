@@ -774,7 +774,7 @@ func writeEntryInline(buf *bytes.Buffer, e Entry) {
 		buf.WriteString(" = ")
 		f.formatValue(n.Value, 0)
 	case *MapEntry:
-		if needsQuoting(n.Key) {
+		if mapKeyQuoted(n) {
 			fmt.Fprintf(buf, "%q", n.Key)
 		} else {
 			buf.WriteString(n.Key)

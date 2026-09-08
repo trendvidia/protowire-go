@@ -186,9 +186,21 @@ func (a *Assignment) end() Position { return a.End }
 
 // MapEntry represents "key: value" (entry in map context).
 type MapEntry struct {
-	Pos             Position
-	End             Position // just past the value's last byte
-	Key             string
+	Pos Position
+	End Position // just past the value's last byte
+	Key string
+	// KeyQuoted records that Key was written as a string literal
+	// (`"true": v` rather than `true: v`). Key always holds the unquoted
+	// (denoted) text; the flag is what tells the string key "123" from
+	// the integer key 123 and the string "true" from the bool true — a
+	// bare spelling denotes a value of the map's key type, a quoted one a
+	// string literal parsed as that type (draft -01 § Entries and Keys).
+	// [FormatDocument] keeps a bare key bare and unquotes a quoted key
+	// only when the bare spelling denotes the same key. A MapEntry built
+	// in code sets it for a key meant as a string that is not
+	// identifier-safe; left false, such a key is written bare when it
+	// lexes as one bare map-key token and quoted otherwise.
+	KeyQuoted       bool
 	Value           Value
 	LeadingComments []Comment
 	TrailingComment string
