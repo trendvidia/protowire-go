@@ -11,6 +11,27 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`pxf.Marshal` refuses a big-number literal its own decoder would
+  refuse** ([#119](https://github.com/trendvidia/protowire-go/issues/119)).
+  HARDENING.md § Arbitrary-precision magnitudes bounds a marshaller's
+  literal by `MaxNumericLiteralDigits` like any other, and the `pb`
+  marshaller has refused a `Decimal.scale` past the same constant since
+  [#95]; the PXF encoder rendered a `pxf.BigInt`, `pxf.Decimal` or
+  `pxf.BigFloat` to as many digits as the message held, and every such
+  document was refused on the way back in. A literal over 4096 digits
+  is now a `Marshal` error naming the type and the count. A `BigFloat`'s
+  digit count is bounded from its `prec` before rendering, so a wire
+  precision of 2^32−1 bits is refused rather than rendered to 1.3e9
+  digits; the cost of a huge `exponent` is still protowire#281's open
+  limit. No message this package decoded reaches the bound — the
+  decoder parses at most 4096 digits and every `BigFloat` at 256 bits —
+  so the change reaches only bytes from another producer. One value at
+  each end of the wire's scale bound has no readable literal (unscaled
+  5 at scale ±4096 renders to 4097 digits); this is pinned and is
+  [protowire#310](https://github.com/trendvidia/protowire/issues/310).
+
 ### Fixed
 
 - **`pxf.Marshal` renders a negative `Decimal.scale` as trailing zeros**
@@ -47,6 +68,7 @@ bytes written by earlier releases; the persisted-data check made for it
 found none in the wild.
 
 [#105]: https://github.com/trendvidia/protowire-go/issues/105
+[#95]: https://github.com/trendvidia/protowire-go/issues/95
 [#92]: https://github.com/trendvidia/protowire-go/issues/92
 [#112]: https://github.com/trendvidia/protowire-go/issues/112
 [#101]: https://github.com/trendvidia/protowire-go/issues/101

@@ -265,9 +265,29 @@ func readBigFloat(msg protoreflect.Message) *big.Float {
 	return bf
 }
 
-// formatBigInt formats a BigInt message as a decimal string.
-func formatBigInt(msg protoreflect.Message) string {
-	return readBigInt(msg).Text(10)
+// formatBigInt renders a BigInt message as the integer literal parseBigInt
+// takes. The work is proportional to abs's length, so the literal is
+// bounded after rendering, not before.
+func formatBigInt(msg protoreflect.Message) (string, error) {
+	return boundLiteral("pxf.BigInt", readBigInt(msg).Text(10))
+}
+
+// boundLiteral is the marshaller's half of MaxNumericLiteralDigits: a
+// literal this package's own decoder would refuse is an error here
+// rather than a document nobody can read (#119). HARDENING.md
+// § Arbitrary-precision magnitudes bounds a marshaller's literal "like
+// any other", and the pb marshaller refuses a Decimal.scale past the
+// same constant for the same reason (#95). A sign, a point or an
+// exponent marker is not a digit, as in checkLiteralDigits; a literal
+// short enough to be within the limit is not counted at all.
+func boundLiteral(kind, s string) (string, error) {
+	if len(s) <= MaxNumericLiteralDigits {
+		return s, nil
+	}
+	if n := countDigits(s); n > MaxNumericLiteralDigits {
+		return "", fmt.Errorf("%s renders to %d digits; MaxNumericLiteralDigits=%d", kind, n, MaxNumericLiteralDigits)
+	}
+	return s, nil
 }
 
 // readDecimalStr renders a Decimal message as the positional literal
@@ -312,7 +332,7 @@ func readDecimalStr(msg protoreflect.Message) (string, error) {
 	}
 	if scale == 0 {
 		buf.WriteString(digits)
-		return buf.String(), nil
+		return boundLiteral("pxf.Decimal", buf.String())
 	}
 	// Pad with leading zeros if needed (e.g. unscaled=5, scale=2 → "0.05")
 	if pad := int(scale) - len(digits) + 1; pad > 0 {
@@ -323,20 +343,35 @@ func readDecimalStr(msg protoreflect.Message) (string, error) {
 	buf.WriteString(intPart)
 	buf.WriteByte('.')
 	buf.WriteString(fracPart)
-	return buf.String(), nil
+	// The scale bound above keeps the work proportional to the input;
+	// this keeps the literal readable. The two disagree by one at the
+	// boundary: unscaled 5, scale 4096 is accepted on the pb wire and
+	// renders as 0.000…5, whose leading zero is the 4097th digit
+	// (protowire#310).
+	return boundLiteral("pxf.Decimal", buf.String())
 }
 
-// formatBigFloat formats a BigFloat message as a decimal string.
-func formatBigFloat(msg protoreflect.Message) string {
+// formatBigFloat renders a BigFloat message as the literal parseBigFloat
+// takes, in exponent form at the precision the message declares.
+func formatBigFloat(msg protoreflect.Message) (string, error) {
 	bf := readBigFloat(msg)
 	prec := bf.Prec()
 	if prec == 0 {
-		return "0"
+		return "0", nil
 	}
 	// Use enough decimal digits to represent the precision.
 	// log10(2) ≈ 0.301, so prec bits ≈ prec*0.301 decimal digits.
 	decDigits := int(float64(prec)*0.30103) + 1
-	return bf.Text('g', decDigits)
+	// prec is four bytes the message's producer chose, and Text works
+	// for every digit it is asked for, so the digit count is bounded
+	// before rendering: past MaxNumericLiteralDigits the literal could
+	// not be read anyway. This bounds the mantissa's cost, not the
+	// exponent's — Text is proportional to |exponent| however short the
+	// printed form, which is protowire#281's open limit.
+	if decDigits > MaxNumericLiteralDigits {
+		return "", fmt.Errorf("pxf.BigFloat prec %d bits renders to %d digits; MaxNumericLiteralDigits=%d", prec, decDigits, MaxNumericLiteralDigits)
+	}
+	return boundLiteral("pxf.BigFloat", bf.Text('g', decDigits))
 }
 
 // Big number string parsers (decode direction).
@@ -350,16 +385,22 @@ func checkLiteralDigits(s string, maxDigits int) error {
 	if len(s) <= maxDigits {
 		return nil
 	}
+	if n := countDigits(s); n > maxDigits {
+		return fmt.Errorf("numeric literal has %d digits; MaxNumericLiteralDigits=%d", n, maxDigits)
+	}
+	return nil
+}
+
+// countDigits is what MaxNumericLiteralDigits counts: the decimal digits
+// of a literal, whichever side of the point or the exponent marker.
+func countDigits(s string) int {
 	n := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] >= '0' && s[i] <= '9' {
 			n++
 		}
 	}
-	if n > maxDigits {
-		return fmt.Errorf("numeric literal has %d digits; MaxNumericLiteralDigits=%d", n, maxDigits)
-	}
-	return nil
+	return n
 }
 
 // clipLiteral shortens a literal for an error message. The literals that
