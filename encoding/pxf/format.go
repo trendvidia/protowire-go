@@ -98,7 +98,7 @@ func (f *formatter) formatEntries(entries []Entry, level int) {
 		case *MapEntry:
 			f.writeComments(e.LeadingComments, level)
 			f.writeIndent(level)
-			if needsQuoting(e.Key) {
+			if mapKeyQuoted(e) {
 				fmt.Fprintf(f.buf, "%q", e.Key)
 			} else {
 				f.buf.WriteString(e.Key)
@@ -178,20 +178,39 @@ func (f *formatter) formatValue(val Value, level int) {
 	}
 }
 
-func needsQuoting(s string) bool {
-	if s == "" {
-		return true
+// needsQuoting reports whether s must be quoted to be read back as the
+// string s: it is not identifier-safe (see [isValidIdent]). Bare, the
+// value keywords are a bool key or no key at all and a leading digit
+// makes an integer key, so the formatter and the marshaller share one
+// test and agree on every key both can produce (draft -01 § Entries and
+// Keys; protowire#306).
+func needsQuoting(s string) bool { return !isValidIdent(s) }
+
+// mapKeyQuoted decides the spelling of a map key on the way out. A key
+// the document wrote quoted keeps its quotes unless it is identifier-safe;
+// a key the document wrote bare stays bare, because the bare spellings
+// true, 0 and 123 denote a bool or an integer key and quoting them would
+// change what they denote (draft -01 § Entries and Keys, "Canonical
+// spelling of map keys"; protowire#306, #123). A [MapEntry] built in code
+// carries no document spelling: it is written bare when its Key lexes as
+// one bare map-key token and quoted otherwise, so "" or "my key" never
+// produce a document that does not parse.
+func mapKeyQuoted(e *MapEntry) bool {
+	if e.KeyQuoted {
+		return needsQuoting(e.Key)
 	}
-	for i, r := range s {
-		if i == 0 {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
-				return true
-			}
-		} else {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
-				return true
-			}
-		}
+	return !lexesAsBareMapKey(e.Key)
+}
+
+// lexesAsBareMapKey reports whether s reads back as exactly one bare
+// map-key token — an identifier, an integer or a bool (map-key =
+// identifier / string / integer / bool) — spelled as s. null is not one.
+func lexesAsBareMapKey(s string) bool {
+	l := newLexer([]byte(s))
+	t := l.Next()
+	switch t.Kind {
+	case IDENT, INT, BOOL:
+		return t.Value == s && l.Next().Kind == EOF
 	}
 	return false
 }

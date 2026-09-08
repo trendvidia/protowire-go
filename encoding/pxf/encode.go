@@ -690,6 +690,15 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	return true, nil
 }
 
+// isValidIdent is the identifier-safe test of draft -01 § Entries and
+// Keys: s can be written bare and read back as the string s. It matches
+// [A-Za-z_][A-Za-z0-9_]* and is not one of the value keywords null, true
+// and false, which bare are no key at all or a bool key. Marshal writes a
+// string map key bare exactly when this holds, and FormatDocument
+// unquotes a quoted one under the same test, so the two agree on every
+// key both can produce (protowire#306). The alphabet is narrower than
+// the grammar's ident-part, which also admits '.'; that divergence, in
+// every port, is protowire#313.
 func isValidIdent(s string) bool {
 	if s == "" || s == "true" || s == "false" || s == "null" {
 		return false

@@ -507,3 +507,34 @@ func TestAppendEntryErrors(t *testing.T) {
 		t.Error("hand-built block with no span should fail")
 	}
 }
+
+// TestAppendEntryMapKeySpelling pins the key spelling the rewriter gives
+// a code-built MapEntry — the decision FormatDocument makes (#123): bare
+// when the key lexes as a bare map key, quoted otherwise, and quoted when
+// KeyQuoted says the integer-shaped key is the string "123".
+func TestAppendEntryMapKeySpelling(t *testing.T) {
+	src := "labels { \"team\": \"core\" }\n"
+	r, err := pxf.NewRewriter([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := r.Document().Entries[0].(*pxf.Block)
+	for _, e := range []*pxf.MapEntry{
+		{Key: "404", Value: &pxf.StringVal{Value: "int"}},
+		{Key: "123", KeyQuoted: true, Value: &pxf.StringVal{Value: "str"}},
+		{Key: "my key", Value: &pxf.StringVal{Value: "q"}},
+		{Key: "team", KeyQuoted: true, Value: &pxf.StringVal{Value: "again"}},
+	} {
+		if err := r.AppendEntry(block, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := r.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "labels { \"team\": \"core\" 404: \"int\" \"123\": \"str\" \"my key\": \"q\" team: \"again\" }\n"
+	if string(out) != want {
+		t.Fatalf("got:\n%q\nwant:\n%q", out, want)
+	}
+}

@@ -34,6 +34,30 @@ format changes.
 
 ### Fixed
 
+- **`FormatDocument` keeps the spelling of a map key where changing it
+  would change what the key denotes**
+  ([#123](https://github.com/trendvidia/protowire-go/issues/123); draft
+  `-01` § Entries and Keys, "Canonical spelling of map keys",
+  [protowire#306](https://github.com/trendvidia/protowire/issues/306)).
+  Since [#109] a bare `true` / `false` is a bool key and a bare `123` an
+  integer key, so on a `map<string, V>` `"true": "v"` and `true: "v"` are
+  different documents — and the formatter wrote the second for the
+  first, because `needsQuoting` unquoted any identifier-shaped key. A
+  document that bound became one that did not; `"null"` → `null`, no key
+  at all, likewise. `MapEntry` now records `KeyQuoted`, set by the
+  parser, and the formatter and the rewriter's inline rendering write a
+  bare key bare and unquote a quoted key only when it is identifier-safe
+  and not a value keyword — the test `Marshal` has always applied, so
+  `FormatDocument` and `Marshal` agree on every key both can produce.
+  One output moves: a bare integer key was quoted on the way through
+  (`404:` → `"404":`) and stays bare now, as `Marshal` has always
+  written it. A `MapEntry` built in code is written quoted whenever its
+  key does not lex as a bare key, so `"my key"` and `""` render as they
+  did; set `KeyQuoted` on a code-built key meant as the string `"123"`
+  or `"true"`. The spec corpus's `fmt-keyword-keys` and `fmt-bare-keys`
+  pairs are vendored and pinned as fixed points. The identifier alphabet
+  both tests share is narrower than the grammar's, which admits `.`;
+  that is [protowire#313](https://github.com/trendvidia/protowire/issues/313).
 - **`pxf.Marshal` renders a negative `Decimal.scale` as trailing zeros**
   ([#118](https://github.com/trendvidia/protowire-go/issues/118)).
   `pxf.Decimal` is *unscaled × 10^(−scale)*, and the `pb` decoder and the
