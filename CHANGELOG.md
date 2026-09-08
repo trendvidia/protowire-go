@@ -11,6 +11,34 @@ format changes.
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-09-07
+
+This release moves the `pb` bytes for two shapes, once, so the family
+converges on protobuf's own layout — a map entry always carries both its
+key and its value ([#105]), and `Decimal.scale` / `BigFloat.exponent` are
+the plain varints `bignum.proto` declares ([#92]) — and enforces the three
+mandatory limits no port enforced ([#112]): input over 64 MiB is refused
+before a byte is read, which narrows accepted input. The spec repo's
+`STABILITY.md` v1.13 section records both decisions, the bytes under
+promise 2 and the narrowing under promise 1. Every limit is configurable
+per call ([#101]), the recursion counter starts at the root as the text
+says ([#111]), a bare `true` / `false` is a bool map key ([#109]), a
+pre-v1.12 descriptor is diagnosed as stale ([#98]), and the `pb` codec is
+tested against protobuf-go rather than itself ([#99]), which is how the
+varint defect was found. The compiler pin moves to protocompile v0.31.0.
+The varint change is not lossless for `pxf.Decimal` / `pxf.BigFloat`
+bytes written by earlier releases; the persisted-data check made for it
+found none in the wild.
+
+[#105]: https://github.com/trendvidia/protowire-go/issues/105
+[#92]: https://github.com/trendvidia/protowire-go/issues/92
+[#112]: https://github.com/trendvidia/protowire-go/issues/112
+[#101]: https://github.com/trendvidia/protowire-go/issues/101
+[#111]: https://github.com/trendvidia/protowire-go/issues/111
+[#109]: https://github.com/trendvidia/protowire-go/issues/109
+[#98]: https://github.com/trendvidia/protowire-go/issues/98
+[#99]: https://github.com/trendvidia/protowire-go/issues/99
+
 ### Changed
 
 - **The recursion counter starts at the root, so a document exactly
@@ -2146,6 +2174,7 @@ Initial public release. Versioned to match sibling components in the
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
 [Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...HEAD
+[1.6.0]: https://github.com/trendvidia/protowire-go/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/trendvidia/protowire-go/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...v1.5.0
 [1.4.1]: https://github.com/trendvidia/protowire-go/compare/v1.4.0...v1.4.1
