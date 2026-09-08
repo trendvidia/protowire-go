@@ -88,7 +88,21 @@ type Codec struct {
 	byName    map[protoreflect.FullName]*messageTemplate
 	byID      map[uint16]*messageTemplate
 	validator check.Validator
+
+	maxMessageSize int
+	maxRepeated    int
 }
+
+// MaxMessageSize caps the total input to one decode call, per
+// protowire/docs/HARDENING.md § Mandatory limits, checked before the header
+// is read. The stream decoder's frame cap (DefaultMaxFrameSize, 16 MiB) is
+// lower and applies first.
+const MaxMessageSize = 64 << 20
+
+// MaxRepeatedCount caps a repeating group's numInGroup, per HARDENING.md,
+// checked before any entry is allocated. The wire field is a uint16, so the
+// default cannot trip on one group; the check holds when a caller lowers it.
+const MaxRepeatedCount = MaxMessageSize
 
 // CodecOptions configures Codec construction. The zero value is
 // equivalent to the package-level [NewCodec].
@@ -101,6 +115,12 @@ type CodecOptions struct {
 	// materializing a message. The validator is fixed at construction
 	// so the Codec stays safe for concurrent use.
 	Validator check.Validator
+
+	// The draft's per-call limits (draft -01 § Mandatory Limits), fixed at
+	// construction like the Validator so the Codec stays safe for concurrent
+	// use. Zero means the package constant of the same name.
+	MaxMessageSize   int
+	MaxRepeatedCount int
 }
 
 // NewCodec creates an SBE codec from proto file descriptors.
@@ -114,9 +134,17 @@ func NewCodec(files ...protoreflect.FileDescriptor) (*Codec, error) {
 // given options.
 func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, error) {
 	c := &Codec{
-		byName:    make(map[protoreflect.FullName]*messageTemplate),
-		byID:      make(map[uint16]*messageTemplate),
-		validator: o.Validator,
+		byName:         make(map[protoreflect.FullName]*messageTemplate),
+		byID:           make(map[uint16]*messageTemplate),
+		validator:      o.Validator,
+		maxMessageSize: MaxMessageSize,
+		maxRepeated:    MaxRepeatedCount,
+	}
+	if o.MaxMessageSize > 0 {
+		c.maxMessageSize = o.MaxMessageSize
+	}
+	if o.MaxRepeatedCount > 0 {
+		c.maxRepeated = o.MaxRepeatedCount
 	}
 	for _, fd := range files {
 		schemaID, ok := getFileUint32Option(fd, extSchemaID)
@@ -176,12 +204,15 @@ func (c *Codec) Marshal(msg proto.Message) ([]byte, error) {
 
 // Unmarshal decodes SBE binary into msg.
 func (c *Codec) Unmarshal(data []byte, msg proto.Message) error {
+	if len(data) > c.maxMessageSize {
+		return fmt.Errorf("sbe: input of %d bytes exceeds MaxMessageSize=%d", len(data), c.maxMessageSize)
+	}
 	name := msg.ProtoReflect().Descriptor().FullName()
 	tmpl, ok := c.byName[name]
 	if !ok {
 		return fmt.Errorf("sbe: no template registered for %s", name)
 	}
-	if err := unmarshalMessage(data, msg.ProtoReflect(), tmpl); err != nil {
+	if err := unmarshalMessage(data, msg.ProtoReflect(), tmpl, c.maxRepeated); err != nil {
 		return err
 	}
 	_, err := check.Validate(c.validator, msg)
@@ -190,12 +221,15 @@ func (c *Codec) Unmarshal(data []byte, msg proto.Message) error {
 
 // UnmarshalDescriptor decodes SBE binary into a new dynamicpb.Message.
 func (c *Codec) UnmarshalDescriptor(data []byte, desc protoreflect.MessageDescriptor) (*dynamicpb.Message, error) {
+	if len(data) > c.maxMessageSize {
+		return nil, fmt.Errorf("sbe: input of %d bytes exceeds MaxMessageSize=%d", len(data), c.maxMessageSize)
+	}
 	tmpl, ok := c.byName[desc.FullName()]
 	if !ok {
 		return nil, fmt.Errorf("sbe: no template registered for %s", desc.FullName())
 	}
 	msg := dynamicpb.NewMessage(desc)
-	if err := unmarshalMessage(data, msg, tmpl); err != nil {
+	if err := unmarshalMessage(data, msg, tmpl, c.maxRepeated); err != nil {
 		return nil, err
 	}
 	if _, err := check.Validate(c.validator, msg); err != nil {

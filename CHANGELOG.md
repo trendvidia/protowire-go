@@ -661,6 +661,32 @@ format changes.
 
 ### Security
 
+- **`MaxMessageSize`, `MaxBytesLiteralLength` and `MaxRepeatedCount` are
+  enforced** ([#112](https://github.com/trendvidia/protowire-go/issues/112)).
+  HARDENING.md § Mandatory limits makes all three mandatory; this package
+  enforced neither, so a 65 MiB PXF document and a 65 MiB PB message
+  both decoded — and, measured with the family's security harness on
+  2026-09-07, so did every other port (trendvidia/protowire#299). Peak
+  memory was a multiple of whatever the peer sent. Now `pb.Unmarshal`,
+  every `pxf.Unmarshal*`, `pxf.Parse*`, `sbe.Codec.Unmarshal*` and
+  `sbe.Codec.View` refuse input past 64 MiB before reading a byte of it,
+  and the dataset stream reader caps the bytes it holds while looking
+  for a row boundary; a `b"…"` literal is refused from its length
+  before it is decoded past `MaxBytesLiteralLength`; a repeated or map
+  field past `MaxRepeatedCount` elements, and an SBE group whose
+  `numInGroup` exceeds it, are refused before the element is added. Each
+  limit is a field on `pb.UnmarshalOptions`, `pxf.UnmarshalOptions`,
+  `pxf.ParseOptions` and `sbe.CodecOptions` in the #101 shape, zero
+  meaning the constant, and `pxf.UnmarshalOptions.NewDatasetReader`
+  carries them to the stream reader. The stream decoders' 16 MiB frame
+  caps are unchanged and lower. **This narrows accepted input** — a
+  document over 64 MiB decoded before and is rejected now — which
+  STABILITY.md promise 1 calls a break at a minor; the spec repo's
+  v1.13 section records why it is taken (every rejected input was
+  already non-conformant, and the alternative is memory exhaustion).
+  `scripts/check_decode` gains `--limit NAME=VALUE` so the conformance
+  corpus can prove each limit with a small fixture.
+
 - **`encoding/pb` bounds `Decimal.scale` at `MaxNumericLiteralDigits`
   (4096) before materialising `10^scale`**
   ([#95](https://github.com/trendvidia/protowire-go/issues/95),

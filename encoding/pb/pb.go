@@ -80,16 +80,37 @@ const MaxNestingDepth = 100
 // so it needs no bound here; see unmarshalBigFloatMsg.
 const MaxNumericLiteralDigits = 4096
 
-// limits is the per-call form of the two constants above, as
+// MaxMessageSize caps the total input to one decode call, per
+// protowire/docs/HARDENING.md § Mandatory limits: peak memory is a
+// multiple of the input, so the input is what bounds it. Checked before
+// anything is read. The stream decoder's frame cap (DefaultMaxFrameSize,
+// 16 MiB) is lower and applies first; this limit still bounds a frame's
+// payload when a caller raises the frame cap.
+const MaxMessageSize = 64 << 20
+
+// MaxRepeatedCount caps the element count of any repeated or map field,
+// per HARDENING.md. Elements arrive one record each here, so the count is
+// bounded by MaxMessageSize transitively; the check keeps the bound when
+// a caller raises MaxMessageSize alone.
+const MaxRepeatedCount = MaxMessageSize
+
+// limits is the per-call form of the constants above, as
 // [UnmarshalOptions] resolves them for one decode: draft -01 § Mandatory
 // Limits makes every limit but MaxVarintBytes "configurable per call by
 // the calling application", with the constants as the defaults.
 type limits struct {
-	maxDepth  int
-	maxDigits int
+	maxDepth       int
+	maxDigits      int
+	maxMessageSize int
+	maxRepeated    int
 }
 
-var defaultLimits = limits{maxDepth: MaxNestingDepth, maxDigits: MaxNumericLiteralDigits}
+var defaultLimits = limits{
+	maxDepth:       MaxNestingDepth,
+	maxDigits:      MaxNumericLiteralDigits,
+	maxMessageSize: MaxMessageSize,
+	maxRepeated:    MaxRepeatedCount,
+}
 
 // Marshal encodes a struct into protobuf binary format.
 // v must be a pointer to a struct with protowire:"N" tags.
@@ -111,6 +132,9 @@ func Unmarshal(data []byte, v any) error {
 }
 
 func unmarshal(data []byte, v any, lim limits) error {
+	if len(data) > lim.maxMessageSize {
+		return fmt.Errorf("input of %d bytes exceeds MaxMessageSize=%d", len(data), lim.maxMessageSize)
+	}
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("pb.Unmarshal: expected pointer to struct, got %s", rv.Type())
@@ -477,6 +501,9 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 					return 0, err
 				}
 				payload = payload[consumed:]
+				if fv.Len() >= lim.maxRepeated {
+					return 0, fmt.Errorf("repeated field exceeds MaxRepeatedCount=%d", lim.maxRepeated)
+				}
 				fv.Set(reflect.Append(fv, elem))
 			}
 			return n, nil
@@ -489,6 +516,9 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 		consumed, err := unmarshalField(data, num, typ, elem, zigzag, depth, lim)
 		if err != nil {
 			return 0, err
+		}
+		if fv.Len() >= lim.maxRepeated {
+			return 0, fmt.Errorf("repeated field exceeds MaxRepeatedCount=%d", lim.maxRepeated)
 		}
 		fv.Set(reflect.Append(fv, elem))
 		return consumed, nil
@@ -622,6 +652,9 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 				}
 				entry = entry[cn:]
 			}
+		}
+		if fv.Len() >= lim.maxRepeated && !fv.MapIndex(key).IsValid() {
+			return 0, fmt.Errorf("map field exceeds MaxRepeatedCount=%d", lim.maxRepeated)
 		}
 		fv.SetMapIndex(key, val)
 		return n, nil

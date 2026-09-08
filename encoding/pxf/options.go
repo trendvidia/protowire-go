@@ -111,16 +111,24 @@ type UnmarshalOptions struct {
 	// protovalidate adapter, or the RFC-001 surface via protocheck).
 	Validator check.Validator
 
-	// MaxNestingDepth caps block / list nesting for this call, and
-	// MaxNumericLiteralDigits the digit count of any numeric literal in
-	// the document (draft -01 § Mandatory Limits: every limit but
-	// MaxVarintBytes is "configurable per call by the calling
+	// The draft's per-call limits (draft -01 § Mandatory Limits: every
+	// limit but MaxVarintBytes is "configurable per call by the calling
 	// application"). Zero means the package constant of the same name,
 	// so the zero value of UnmarshalOptions is unchanged. Schema input —
 	// a (pxf.default) literal, a carrier default — stays under the
 	// constants: it is the schema author's, not the document's.
+	//
+	// MaxMessageSize caps the input to this call and is checked before
+	// the first token is read; MaxNestingDepth caps block / list
+	// nesting; MaxNumericLiteralDigits the digit count of any numeric
+	// literal; MaxBytesLiteralLength the decoded length of any b"…"
+	// literal, checked from its length before decoding;
+	// MaxRepeatedCount the element count of any repeated or map field.
+	MaxMessageSize          int
 	MaxNestingDepth         int
 	MaxNumericLiteralDigits int
+	MaxBytesLiteralLength   int
+	MaxRepeatedCount        int
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -150,13 +158,40 @@ func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result
 
 // limits resolves the per-call limits, the package constants standing in
 // for zero.
-func (o UnmarshalOptions) limits() (maxDepth, maxDigits int) {
-	maxDepth, maxDigits = MaxNestingDepth, MaxNumericLiteralDigits
+// limits is the per-call form of the package constants, as [UnmarshalOptions]
+// and [ParseOptions] resolve them for one call.
+type limits struct {
+	maxDepth        int
+	maxDigits       int
+	maxMessageSize  int
+	maxBytesLiteral int
+	maxRepeated     int
+}
+
+var defaultLimits = limits{
+	maxDepth:        MaxNestingDepth,
+	maxDigits:       MaxNumericLiteralDigits,
+	maxMessageSize:  MaxMessageSize,
+	maxBytesLiteral: MaxBytesLiteralLength,
+	maxRepeated:     MaxRepeatedCount,
+}
+
+func (o UnmarshalOptions) limits() limits {
+	lim := defaultLimits
+	if o.MaxMessageSize > 0 {
+		lim.maxMessageSize = o.MaxMessageSize
+	}
 	if o.MaxNestingDepth > 0 {
-		maxDepth = o.MaxNestingDepth
+		lim.maxDepth = o.MaxNestingDepth
 	}
 	if o.MaxNumericLiteralDigits > 0 {
-		maxDigits = o.MaxNumericLiteralDigits
+		lim.maxDigits = o.MaxNumericLiteralDigits
 	}
-	return maxDepth, maxDigits
+	if o.MaxBytesLiteralLength > 0 {
+		lim.maxBytesLiteral = o.MaxBytesLiteralLength
+	}
+	if o.MaxRepeatedCount > 0 {
+		lim.maxRepeated = o.MaxRepeatedCount
+	}
+	return lim
 }

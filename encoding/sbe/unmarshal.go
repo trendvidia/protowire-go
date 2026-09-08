@@ -46,7 +46,7 @@ func fastAppend(list protoreflect.List, v protoreflect.Value) {
 	list.Append(v)
 }
 
-func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTemplate) error {
+func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTemplate, maxRepeated int) error {
 	if len(data) < headerSize {
 		return fmt.Errorf("sbe: data too short for header: %d bytes", len(data))
 	}
@@ -80,7 +80,7 @@ func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTempla
 	// Read repeating groups.
 	pos := end
 	for _, gt := range tmpl.groups {
-		n, err := unmarshalGroup(data[pos:], msg, gt)
+		n, err := unmarshalGroup(data[pos:], msg, gt, maxRepeated)
 		if err != nil {
 			return err
 		}
@@ -141,7 +141,7 @@ func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) {
 	}
 }
 
-func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate) (int, error) {
+func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate, maxRepeated int) (int, error) {
 	if len(data) < groupHeaderSize {
 		return 0, fmt.Errorf("sbe: data too short for group header")
 	}
@@ -164,6 +164,9 @@ func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate) (in
 	if blockLength > 0 && numInGroup > remaining/blockLength {
 		return 0, fmt.Errorf("sbe: group %s declares %d entries × %d bytes, %d bytes remaining",
 			gt.fd.Name(), numInGroup, blockLength, remaining)
+	}
+	if numInGroup > maxRepeated {
+		return 0, fmt.Errorf("sbe: group %s declares %d entries, MaxRepeatedCount=%d", gt.fd.Name(), numInGroup, maxRepeated)
 	}
 	totalSize := groupHeaderSize + numInGroup*blockLength
 

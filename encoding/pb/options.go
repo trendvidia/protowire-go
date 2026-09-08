@@ -17,25 +17,37 @@ type UnmarshalOptions struct {
 	// *check.Error, retrievable via errors.As.
 	Validator check.Validator
 
-	// MaxNestingDepth caps submessage / map-entry recursion for this
-	// call, and MaxNumericLiteralDigits the magnitude of a pxf.Decimal's
-	// scale (draft -01 § Mandatory Limits: every limit but
-	// MaxVarintBytes is "configurable per call by the calling
+	// The draft's per-call limits (draft -01 § Mandatory Limits: every
+	// limit but MaxVarintBytes is "configurable per call by the calling
 	// application"). Zero means the package constant of the same name,
 	// so the zero value of UnmarshalOptions is unchanged.
+	//
+	// MaxMessageSize caps the input to this call and is checked before
+	// anything is read; MaxNestingDepth caps submessage / map-entry
+	// recursion; MaxNumericLiteralDigits bounds the magnitude of a
+	// pxf.Decimal's scale; MaxRepeatedCount caps the element count of
+	// any repeated or map field.
+	MaxMessageSize          int
 	MaxNestingDepth         int
 	MaxNumericLiteralDigits int
+	MaxRepeatedCount        int
 }
 
 // limits resolves the per-call limits, the package constants standing in
 // for zero.
 func (o UnmarshalOptions) limits() limits {
 	lim := defaultLimits
+	if o.MaxMessageSize > 0 {
+		lim.maxMessageSize = o.MaxMessageSize
+	}
 	if o.MaxNestingDepth > 0 {
 		lim.maxDepth = o.MaxNestingDepth
 	}
 	if o.MaxNumericLiteralDigits > 0 {
 		lim.maxDigits = o.MaxNumericLiteralDigits
+	}
+	if o.MaxRepeatedCount > 0 {
+		lim.maxRepeated = o.MaxRepeatedCount
 	}
 	return lim
 }

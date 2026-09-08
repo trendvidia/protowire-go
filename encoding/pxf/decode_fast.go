@@ -36,6 +36,25 @@ const MaxNestingDepth = 100
 // the @default carrier (carrier.go).
 const MaxNumericLiteralDigits = 4096
 
+// MaxMessageSize caps the total input to one decode or parse call, per
+// protowire/docs/HARDENING.md § Mandatory limits: peak memory is a
+// multiple of the input, so the input is what bounds it. Checked before
+// the first token is read; the dataset stream reader applies it to the
+// bytes it holds while looking for a row boundary.
+const MaxMessageSize = 64 << 20
+
+// MaxBytesLiteralLength caps the decoded length of one b"…" literal, per
+// HARDENING.md. It is bounded by MaxMessageSize transitively; the lexer
+// checks it from the literal's length before decoding, so the check
+// holds when a caller raises MaxMessageSize alone.
+const MaxBytesLiteralLength = MaxMessageSize
+
+// MaxRepeatedCount caps the element count of any repeated or map field,
+// per HARDENING.md. Elements are at least one byte of input each, so the
+// count is bounded by MaxMessageSize transitively; the check holds when a
+// caller raises MaxMessageSize alone.
+const MaxRepeatedCount = MaxMessageSize
+
 // fastSet writes v into msg's fd. When msg's underlying implementation
 // exposes SetUnsafe (the trendvidia/protobuf-go fork's addition on
 // *dynamicpb.Message) we can skip the runtime typecheck because the
@@ -94,8 +113,7 @@ type directDecoder struct {
 	resolver       TypeResolver
 	discardUnknown bool
 	depth          int                            // nesting depth, capped at maxDepth
-	maxDepth       int                            // this call's MaxNestingDepth (UnmarshalOptions.limits)
-	maxDigits      int                            // this call's MaxNumericLiteralDigits, for the document's literals
+	lim            limits                         // this call's limits (UnmarshalOptions.limits); schema literals stay under the constants
 	result         *Result                        // nil for plain Unmarshal, non-nil for UnmarshalFull
 	rootMsg        protoreflect.Message           // top-level message (for _null FieldMask writes)
 	nullMaskFd     protoreflect.FieldDescriptor   // cached _null field, may be nil
@@ -163,11 +181,14 @@ func (d *directDecoder) peekKind() TokenKind {
 
 func unmarshalDirect(data []byte, msg protoreflect.Message, o UnmarshalOptions) error {
 	var d directDecoder
-	d.lex = lexer{input: data, line: 1, col: 1}
+	d.lim = o.limits()
+	if len(data) > d.lim.maxMessageSize {
+		return errorf(Position{Line: 1, Column: 1}, "input of %d bytes exceeds MaxMessageSize=%d", len(data), d.lim.maxMessageSize)
+	}
+	d.lex = lexer{input: data, line: 1, col: 1, maxBytesLiteral: d.lim.maxBytesLiteral}
 	d.resolver = o.TypeResolver
 	d.discardUnknown = o.DiscardUnknown
 	d.onSecret = o.OnSecretField
-	d.maxDepth, d.maxDigits = o.limits()
 	d.advance()
 
 	if err := d.consumeDirectives(nil); err != nil {
@@ -179,11 +200,14 @@ func unmarshalDirect(data []byte, msg protoreflect.Message, o UnmarshalOptions) 
 
 func unmarshalDirectFull(data []byte, msg protoreflect.Message, o UnmarshalOptions) (*Result, error) {
 	var d directDecoder
-	d.lex = lexer{input: data, line: 1, col: 1}
+	d.lim = o.limits()
+	if len(data) > d.lim.maxMessageSize {
+		return nil, errorf(Position{Line: 1, Column: 1}, "input of %d bytes exceeds MaxMessageSize=%d", len(data), d.lim.maxMessageSize)
+	}
+	d.lex = lexer{input: data, line: 1, col: 1, maxBytesLiteral: d.lim.maxBytesLiteral}
 	d.resolver = o.TypeResolver
 	d.discardUnknown = o.DiscardUnknown
 	d.onSecret = o.OnSecretField
-	d.maxDepth, d.maxDigits = o.limits()
 	d.result = newResult()
 	d.rootMsg = msg
 	d.nullMaskFd = findNullMaskField(msg.Descriptor())
@@ -584,8 +608,8 @@ func lineColAt(input []byte, off int) (int, int) {
 // on return so siblings see the correct depth.
 func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) error {
 	d.depth++
-	if d.depth > d.maxDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.maxDepth)
+	if d.depth > d.lim.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
 	}
 	defer func() { d.depth-- }()
 
@@ -857,7 +881,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
-		bi, err := parseBigInt(d.current.Value, d.maxDigits)
+		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -868,7 +892,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.maxDigits)
+		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -879,7 +903,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.maxDigits)
+		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -996,6 +1020,9 @@ func (d *directDecoder) decodeListInline(msg protoreflect.Message, fd protorefle
 	keyFd := KeyField(fd) // non-nil: anonymous form of a keyed repeated field (draft -01 §3.13)
 
 	for d.current.Kind != RBRACKET && d.current.Kind != EOF {
+		if list.Len() >= d.lim.maxRepeated {
+			return errorf(d.current.Pos, "repeated field %q exceeds MaxRepeatedCount=%d", fd.Name(), d.lim.maxRepeated)
+		}
 		if d.current.Kind == NULL {
 			return errorf(d.current.Pos, "null is not allowed in repeated field %q", fd.Name())
 		}
@@ -1074,7 +1101,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
-		bi, err := parseBigInt(d.current.Value, d.maxDigits)
+		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1084,7 +1111,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.maxDigits)
+		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1094,7 +1121,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.maxDigits)
+		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1170,8 +1197,8 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 // returning.
 func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd protoreflect.FieldDescriptor) error {
 	d.depth++
-	if d.depth > d.maxDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.maxDepth)
+	if d.depth > d.lim.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
 	}
 	defer func() { d.depth-- }()
 
@@ -1225,6 +1252,9 @@ func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd
 				name, fd.Name(), d.current.Kind)
 		}
 
+		if list.Len() >= d.lim.maxRepeated {
+			return errorf(d.current.Pos, "repeated field %q exceeds MaxRepeatedCount=%d", fd.Name(), d.lim.maxRepeated)
+		}
 		sub := list.NewElement().Message()
 		fastSet(sub, keyFd, protoreflect.ValueOfString(name))
 		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name(), entryName: name, named: true}
@@ -1246,6 +1276,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 
 	for d.current.Kind != RBRACE && d.current.Kind != EOF {
 		pos := d.current.Pos
+		if m.Len() >= d.lim.maxRepeated {
+			return errorf(pos, "map field %q exceeds MaxRepeatedCount=%d", fd.Name(), d.lim.maxRepeated)
+		}
 		// map-key = identifier / string / integer / bool (draft -01
 		// §abnf-grammar; the keyword spelling landed in protowire#284).
 		keyKind := d.current.Kind
@@ -1320,7 +1353,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigInt(mdesc) && d.current.Kind == INT {
-				bi, err := parseBigInt(d.current.Value, d.maxDigits)
+				bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1331,7 +1364,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				unscaled, scale, negative, err := parseDecimal(d.current.Value, d.maxDigits)
+				unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1342,7 +1375,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				bf, err := parseBigFloat(d.current.Value, d.maxDigits)
+				bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1590,8 +1623,8 @@ func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) 
 // forms (chameleon's pre-v0.9.0 best-effort residual).
 func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path string) error {
 	d.depth++
-	if d.depth > d.maxDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.maxDepth)
+	if d.depth > d.lim.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
 	}
 	defer func() { d.depth-- }()
 
