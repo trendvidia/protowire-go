@@ -201,8 +201,12 @@ func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protor
 		return nil
 	}
 	if isDecimal(mdesc) {
+		s, err := readDecimalStr(sub)
+		if err != nil {
+			return err
+		}
 		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(readDecimalStr(sub))
+		e.buf.WriteString(s)
 		e.buf.WriteByte('\n')
 		return nil
 	}
@@ -293,8 +297,12 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 				e.writeIndent(level + 1)
 				e.buf.WriteString(formatBigInt(sub))
 			} else if isDecimal(mdesc) {
+				s, err := readDecimalStr(sub)
+				if err != nil {
+					return err
+				}
 				e.writeIndent(level + 1)
-				e.buf.WriteString(readDecimalStr(sub))
+				e.buf.WriteString(s)
 			} else if isBigFloat(mdesc) {
 				e.writeIndent(level + 1)
 				e.buf.WriteString(formatBigFloat(sub))
@@ -456,10 +464,14 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 				continue
 			}
 			if isDecimal(mdesc) {
+				s, err := readDecimalStr(sub)
+				if err != nil {
+					return err
+				}
 				e.writeIndent(level + 1)
 				e.buf.WriteString(kv.keyStr)
 				e.buf.WriteString(": ")
-				e.buf.WriteString(readDecimalStr(sub))
+				e.buf.WriteString(s)
 				e.buf.WriteByte('\n')
 				continue
 			}
