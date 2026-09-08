@@ -16,6 +16,8 @@
 // included — presence lives in the list, not the element — and a nil
 // pointer element is encoded as its pointee's zero record so the list
 // length is preserved (it decodes to an allocated zero-value pointer).
+// A map entry always carries both its key and its value, zero-valued or
+// not, as protobuf's own encoders write it.
 // Signed-integer fields default to proto3 int32 / int64 wire format
 // (plain varint, with negative values sign-extended to a 10-byte uint64).
 // The `zigzag` tag option selects proto3 sint32 / sint64 instead, which
@@ -179,10 +181,11 @@ func marshalStruct(rv reflect.Value) ([]byte, error) {
 }
 
 // marshalField appends one field's encoding. element reports whether fv
-// is an element of a repeated field rather than a singular field: the
-// proto3 zero-skip applies only to singular fields, so elements are
-// always emitted — packed-style presence lives in the list, not the
-// value, and dropping zeros would corrupt element counts.
+// is an element of a repeated field, or the key or value of a map entry,
+// rather than a singular field: the proto3 zero-skip applies only to
+// singular fields, so elements are always emitted — presence lives in
+// the list or the entry, not the value, and dropping zeros would corrupt
+// element counts or write a map entry no protobuf encoder writes.
 func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool, element bool) ([]byte, error) {
 	// Handle pointer: dereference; a nil singular field is absent, but a
 	// nil element emits its pointee's zero record so the list length
@@ -325,9 +328,12 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 
 	case reflect.Map:
 		// proto3 maps: each entry is a length-prefixed MapEntry message
-		// with key at field 1 and value at field 2. Map keys/values inherit
-		// the parent field's zigzag flag (uncommon — map keys are usually
-		// strings or unsigned ints).
+		// with key at field 1 and value at field 2. Both fields are always
+		// written, zero-valued or not — presence lives in the entry, not in
+		// its fields — which is the layout protobuf-go, protoc and C++
+		// protobuf write (#105; STABILITY.md v1.13 in the spec repo). Map
+		// keys/values inherit the parent field's zigzag flag (uncommon —
+		// map keys are usually strings or unsigned ints).
 		if fv.Len() == 0 {
 			return b, nil
 		}
@@ -335,11 +341,11 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 		for iter.Next() {
 			var entry []byte
 			var err error
-			entry, err = marshalField(entry, 1, iter.Key(), zigzag, false)
+			entry, err = marshalField(entry, 1, iter.Key(), zigzag, true)
 			if err != nil {
 				return nil, fmt.Errorf("map key: %w", err)
 			}
-			entry, err = marshalField(entry, 2, iter.Value(), zigzag, false)
+			entry, err = marshalField(entry, 2, iter.Value(), zigzag, true)
 			if err != nil {
 				return nil, fmt.Errorf("map value: %w", err)
 			}

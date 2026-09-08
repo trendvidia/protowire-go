@@ -13,6 +13,25 @@ format changes.
 
 ### Changed
 
+- **A `pb` map entry always carries its key and its value, zero-valued or
+  not** ([#105](https://github.com/trendvidia/protowire-go/issues/105)).
+  The entry was written like any message, with proto3 zero-skipping
+  inside it, so `"zero" → 0` went out without its value and `"" → -1`
+  without its key; protobuf-go, protoc and C++ protobuf write both fields
+  always. Measured across the family on 2026-09-07 (the matrix is on the
+  issue), four ports omitted, two wrote both and one did each, and every
+  reader accepted all three, so the split was lossless and invisible.
+  Decided as option 1 there: this package writes protobuf's layout, so
+  the family converges on one with an external oracle. **This changes
+  `pb` bytes, which STABILITY.md promise 2 freezes**, in the same release
+  as #96's plain-varint `Decimal.scale` / `BigFloat.exponent`, so the
+  bytes move once; the spec repo's v1.13 section (protowire#295) records
+  why. Reading is unchanged: an entry lacking a field still decodes it
+  as zero, so payloads written before this release read as before.
+  `scripts/dump_envelope` gains `--vector NAME` for the gate's
+  golden-checked wire vectors; `zero-map-entry` prints
+  `22062a040a001200`, the bytes protoc writes for the same envelope.
+
 - **`github.com/trendvidia/protocompile` v0.25.0 → v0.31.0**, which makes
   `@default(1.5)` mean 1.5, `@default(1e100)` mean 1e100, and
   `@default(1e19)` mean 1e19 — on a bare `double`, on a
