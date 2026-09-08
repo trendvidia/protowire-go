@@ -13,6 +13,18 @@ format changes.
 
 ### Changed
 
+- **The recursion counter starts at the root, so a document exactly
+  `MaxNestingDepth` deep decodes** ([#111](https://github.com/trendvidia/protowire-go/issues/111)).
+  HARDENING.md § Recursion counts descents from a root at depth 0 — the
+  AST parser behind `fmt` and `validate` did — but the PXF decoder and
+  the `pb` decoder counted the root as depth 1, so the hundredth nested
+  block or submessage was refused by decode and accepted by validate,
+  and a `[` did not count in the decoder at all where the parser counted
+  it. Both decoders now count every block, list, submessage and map
+  entry from a root at 0, the same as the parser and the text; the spec
+  corpus pins both sides of the edge (protowire#301). A document that
+  decoded before still decodes; one at exactly the bound decodes now.
+
 - **A `pb` map entry always carries its key and its value, zero-valued or
   not** ([#105](https://github.com/trendvidia/protowire-go/issues/105)).
   The entry was written like any message, with proto3 zero-skipping

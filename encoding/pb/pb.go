@@ -139,7 +139,7 @@ func unmarshal(data []byte, v any, lim limits) error {
 	if rv.Kind() != reflect.Ptr || rv.Elem().Kind() != reflect.Struct {
 		return fmt.Errorf("pb.Unmarshal: expected pointer to struct, got %s", rv.Type())
 	}
-	return unmarshalStruct(data, rv.Elem(), 1, lim)
+	return unmarshalStruct(data, rv.Elem(), 0, lim)
 }
 
 // fieldInfo caches parsed struct tag info for a field.
@@ -431,7 +431,8 @@ func appendPacked(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 }
 
 // unmarshalStruct decodes data into rv. depth is the current submessage
-// depth (top-level call = 1); it is threaded through nested stream
+// depth — the root is 0, per HARDENING.md § Recursion, so a message exactly
+// MaxNestingDepth submessages deep is accepted (#111); it is threaded through nested stream
 // construction so a fresh inner buffer cannot reset the recursion counter.
 func unmarshalStruct(data []byte, rv reflect.Value, depth int, lim limits) error {
 	if depth > lim.maxDepth {
