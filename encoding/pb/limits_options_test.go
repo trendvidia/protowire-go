@@ -38,9 +38,10 @@ func TestUnmarshalOptionsLimits(t *testing.T) {
 		var out nestHolder
 		require.NoError(t, Unmarshal(data, &out), "default")
 		require.NoError(t, UnmarshalOptions{}.Unmarshal(data, &out), "zero options are the default")
-		require.NoError(t, UnmarshalOptions{MaxNestingDepth: 3}.Unmarshal(data, &out), "at the bound")
-		err = UnmarshalOptions{MaxNestingDepth: 2}.Unmarshal(data, &out)
-		require.ErrorContains(t, err, "MaxNestingDepth=2")
+		// nestTo(3) is the root and two descents; the root is depth 0.
+		require.NoError(t, UnmarshalOptions{MaxNestingDepth: 2}.Unmarshal(data, &out), "at the bound")
+		err = UnmarshalOptions{MaxNestingDepth: 1}.Unmarshal(data, &out)
+		require.ErrorContains(t, err, "MaxNestingDepth=1")
 		require.False(t, strings.Contains(err.Error(), "MaxNestingDepth=100"),
 			"the error names the effective limit, not the constant: %s", err)
 	})
@@ -63,25 +64,25 @@ func TestUnmarshalOptionsLimits(t *testing.T) {
 		var out nestHolder
 		require.NoError(t, NewDecoder(bytes.NewReader(framed)).Decode(&out), "default")
 		require.NoError(t, UnmarshalOptions{}.NewDecoder(bytes.NewReader(framed)).Decode(&out), "zero options")
-		err := UnmarshalOptions{MaxNestingDepth: 2}.NewDecoder(bytes.NewReader(framed)).Decode(&out)
-		require.ErrorContains(t, err, "MaxNestingDepth=2")
+		err := UnmarshalOptions{MaxNestingDepth: 1}.NewDecoder(bytes.NewReader(framed)).Decode(&out)
+		require.ErrorContains(t, err, "MaxNestingDepth=1")
 	})
 }
 
-// TestNestingDepthBoundary pins where pb's counter sits (#111): the root
-// struct is depth 1, as protobuf-go and prost count their recursion
-// limits, so MaxNestingDepth structs deep including the root is the last
-// accepted shape.
+// TestNestingDepthBoundary pins where pb's counter starts (#111): the root
+// is depth 0 and every submessage is one descent (HARDENING.md
+// § Recursion), so MaxNestingDepth submessages under the root — the
+// corpus's deep-submessage-100 — is the last accepted shape.
 func TestNestingDepthBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		depth int
 		ok    bool
-	}{{MaxNestingDepth, true}, {MaxNestingDepth + 1, false}} {
+	}{{MaxNestingDepth + 1, true}, {MaxNestingDepth + 2, false}} {
 		data, err := Marshal(nestTo(tc.depth))
 		require.NoError(t, err)
 		err = Unmarshal(data, &nestHolder{})
 		if tc.ok {
-			require.NoError(t, err, "%d structs deep, root included", tc.depth)
+			require.NoError(t, err, "%d structs deep, root included: %d descents", tc.depth, tc.depth-1)
 		} else {
 			require.ErrorContains(t, err, "MaxNestingDepth=100", "%d structs deep", tc.depth)
 		}

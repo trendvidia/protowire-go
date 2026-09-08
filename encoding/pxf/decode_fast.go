@@ -607,11 +607,17 @@ func lineColAt(input []byte, off int) (int, int) {
 // nested submessage depth 2, and so on. The depth counter is decremented
 // on return so siblings see the correct depth.
 func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) error {
-	d.depth++
-	if d.depth > d.lim.maxDepth {
-		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
+	// A block is one descent; the root message (inBlock == false) is depth
+	// 0, so a document exactly MaxNestingDepth deep is accepted and one
+	// deeper is not (HARDENING.md § Recursion; #111). The AST parser counts
+	// the same way, so fmt, validate and decode agree at the edge.
+	if inBlock {
+		d.depth++
+		if d.depth > d.lim.maxDepth {
+			return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
+		}
+		defer func() { d.depth-- }()
 	}
-	defer func() { d.depth-- }()
 
 	desc := msg.Descriptor()
 	fields := desc.Fields()
@@ -1015,6 +1021,14 @@ func (d *directDecoder) decodeListInline(msg protoreflect.Message, fd protorefle
 		return errorf(d.current.Pos, "expected '[' for repeated field %q", fd.Name())
 	}
 	d.advance()
+
+	// A list is a descent like a block: HARDENING.md § Recursion counts
+	// `[` and `{` alike, and so does the AST parser (#111).
+	d.depth++
+	if d.depth > d.lim.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
+	}
+	defer func() { d.depth-- }()
 
 	list := msg.Mutable(fd).List()
 	keyFd := KeyField(fd) // non-nil: anonymous form of a keyed repeated field (draft -01 §3.13)
