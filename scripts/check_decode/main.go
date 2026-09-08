@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -65,6 +66,15 @@ type BigIntHolder struct {
 
 type ListHolder struct {
 	Values []int32 `protowire:"1"`
+}
+
+// BigNumHolder mirrors adversarial.v1.BigNumHolder (protowire#279): the
+// arbitrary-precision carriers, so the corpus can prove the digit cap on a
+// field that only the cap can reject, and the Decimal.scale bound.
+type BigNumHolder struct {
+	BigInt   *big.Int   `protowire:"1"`
+	Decimal  *big.Rat   `protowire:"2"`
+	BigFloat *big.Float `protowire:"3"`
 }
 
 func main() {
@@ -138,6 +148,8 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 		msg = &BigIntHolder{}
 	case "adversarial.v1.ListHolder":
 		msg = &ListHolder{}
+	case "adversarial.v1.BigNumHolder":
+		msg = &BigNumHolder{}
 	default:
 		return fmt.Errorf("unknown schema for pb: %s", schema)
 	}
