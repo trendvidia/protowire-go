@@ -5,7 +5,7 @@
 // scripts/cross_envelope_check.sh. Every port carries the same program and
 // the script compares their output byte for byte.
 //
-// Three modes:
+// Four modes:
 //
 //	dump_envelope
 //	    Constructs the canonical Envelope in code and prints its pb bytes as
@@ -21,11 +21,18 @@
 //	    promise 3, protowire#244): a port looking for the wrong number
 //	    decodes to different bytes, or accepts a document it must reject.
 //
+//	dump_envelope --vector NAME
+//	    Prints the pb bytes of a named wire vector from the spec repo's
+//	    testdata/envelope/ (STABILITY.md promise 2, protowire#295). The
+//	    script compares them with a checked-in golden rather than with the
+//	    other ports, so a layout every port shares wrongly still fails.
+//
 // Exit status: 0 with hex on stdout; 1 with "reject: <reason>" on stderr
 // when the schema rejects DOC (a missing (pxf.required) field, a syntax
 // error, a value the field cannot hold); 2 for anything that is the
 // harness's fault rather than the document's (bad arguments, unreadable
 // files, an FDS that does not build, a message name that is not in it).
+// Exit 3 with "not-implemented: <name>" for a vector this port has not built.
 package main
 
 import (
@@ -50,8 +57,12 @@ func main() {
 		dumpEnvelope()
 		return
 	}
+	if len(args) == 2 && args[0] == "--vector" {
+		dumpVector(args[1])
+		return
+	}
 	if len(args) != 4 || (args[0] != "--pb" && args[0] != "--sbe") {
-		fmt.Fprintln(os.Stderr, "usage: dump_envelope [--pb|--sbe FDS MESSAGE DOC]")
+		fmt.Fprintln(os.Stderr, "usage: dump_envelope [--pb|--sbe FDS MESSAGE DOC | --vector NAME]")
 		os.Exit(2)
 	}
 	dumpFixture(args[0], args[1], args[2], args[3])
@@ -65,6 +76,24 @@ func dumpEnvelope() {
 		WithField("amount", "MIN_VALUE", "below minimum", "10.00").
 		WithMeta("request_id", "req-123")
 
+	data, err := pb.Marshal(env)
+	if err != nil {
+		fatal(2, err)
+	}
+	fmt.Println(hex.EncodeToString(data))
+}
+
+// dumpVector prints a wire vector the gate checks against a golden. The
+// named vectors are the spec repo's testdata/envelope/NAME.textproto.
+func dumpVector(name string) {
+	var env *envelope.Envelope
+	switch name {
+	case "zero-map-entry":
+		env = &envelope.Envelope{Error: &envelope.AppError{Metadata: map[string]string{"": ""}}}
+	default:
+		fmt.Fprintf(os.Stderr, "not-implemented: %s\n", name)
+		os.Exit(3)
+	}
 	data, err := pb.Marshal(env)
 	if err != nil {
 		fatal(2, err)

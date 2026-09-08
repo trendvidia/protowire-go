@@ -4,6 +4,7 @@
 package envelope
 
 import (
+	"encoding/hex"
 	"reflect"
 	"testing"
 
@@ -126,5 +127,21 @@ func TestBinaryRoundTrip_AppErrorBuilders(t *testing.T) {
 
 	if !reflect.DeepEqual(orig, got) {
 		t.Errorf("Err builder round-trip mismatch:\n  orig: %+v\n  got:  %+v", orig, got)
+	}
+}
+
+// TestZeroMapEntryVector pins the family's wire vector for #105 (the spec
+// repo's testdata/envelope/zero-map-entry): a map entry carries both its
+// key and its value, zero-valued or not. The golden was produced by
+// protoc --encode and by protobuf-go, byte for byte the same, and
+// scripts/dump_envelope --vector zero-map-entry prints it for the gate.
+func TestZeroMapEntryVector(t *testing.T) {
+	data, err := pb.Marshal(&Envelope{Error: &AppError{Metadata: map[string]string{"": ""}}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	const golden = "22062a040a001200"
+	if got := hex.EncodeToString(data); got != golden {
+		t.Fatalf("zero-map-entry vector: got %s, want %s", got, golden)
 	}
 }

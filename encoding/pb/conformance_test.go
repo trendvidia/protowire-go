@@ -249,7 +249,7 @@ func conformanceCases() []conformanceCase {
 		},
 		{
 			// Entries with a zero key or value are pinned separately: see
-			// TestConformance_MapEntriesOmitZeroValues.
+			// TestConformance_MapEntriesCarryZeroValues.
 			name: "maps",
 			ours: &confAll{M: map[string]int64{"one": 1, "minus": -1}, MM: map[int32]*confInner{2: {Name: "two"}, -1: {N: 3}}},
 			text: `m { key: "one" value: 1 } m { key: "minus" value: -1 }
@@ -335,35 +335,36 @@ func TestConformance_TwoOneofMembersSet(t *testing.T) {
 	assert.Equal(t, protoreflect.Name("c"), which.Name(), "the later field on the wire wins")
 }
 
-// TestConformance_MapEntriesOmitZeroValues pins a documented divergence
-// (#105): this package writes a map entry the way it writes any
-// message, omitting a zero-valued key or value, where protobuf-go and
-// C++ always serialise both. Every reader tried accepts either form, so
-// the divergence is byte-level and lossless — but the bytes pb.Marshal
-// produces are STABILITY.md promise 2's contract, so changing them is a
-// wire decision, not a test fix. The equality assertion below is the one
-// to flip when it is decided.
-func TestConformance_MapEntriesOmitZeroValues(t *testing.T) {
+// TestConformance_MapEntriesCarryZeroValues pins #105: a map entry always
+// carries both its key and its value, zero-valued or not — the layout
+// protobuf-go, protoc and C++ protobuf write. Until this change the
+// package applied proto3 zero-skipping inside the entry ("zero" → 0 was
+// written without its value, "" → -1 without its key); every reader
+// accepted either form, so the divergence was lossless and invisible.
+// STABILITY.md's v1.13 section in the spec repo records why promise 2's
+// bytes moved for this shape.
+func TestConformance_MapEntriesCarryZeroValues(t *testing.T) {
 	md := conformanceDesc(t)
 	want := oracleMessage(t, md, `m { key: "zero" value: 0 } m { key: "" value: -1 } mm { key: 0 value {} }`)
 	ours, err := pb.Marshal(&confAll{M: map[string]int64{"zero": 0, "": -1}, MM: map[int32]*confInner{0: {}}})
 	require.NoError(t, err)
 
-	// Lossless: the oracle reads our bytes as the same message, and we
-	// read the oracle's (explicit zeros) as the same struct.
-	got := dynamicpb.NewMessage(md)
-	require.NoError(t, proto.Unmarshal(ours, got))
-	assert.True(t, proto.Equal(want, got), "oracle read our bytes as:\n%v", prototext.Format(got))
+	// Byte-level: identical to the oracle, entry by entry.
+	theirs := recordsByField(t, oracleMarshal(t, want), conformanceMapFields...)
+	mine := recordsByField(t, ours, conformanceMapFields...)
+	assert.Equal(t, theirs, mine)
+	assert.Contains(t, mine[18], string([]byte{0x92, 0x01, 0x08, 0x0a, 0x04, 'z', 'e', 'r', 'o', 0x10, 0x00}), `"zero" → 0 carries its value`)
+	assert.Contains(t, mine[18], string([]byte{0x92, 0x01, 0x0d, 0x0a, 0x00, 0x10, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01}), `"" → -1 carries its key`)
+	assert.Contains(t, mine[19], string([]byte{0x9a, 0x01, 0x04, 0x08, 0x00, 0x12, 0x00}), `0 → {} carries both`)
+
+	// Both forms still read: the oracle's explicit zeros, and the
+	// omission a payload written before this change may carry.
 	var back confAll
 	require.NoError(t, pb.Unmarshal(oracleMarshal(t, want), &back))
 	assert.Equal(t, map[string]int64{"zero": 0, "": -1}, back.M)
 	assert.Equal(t, map[int32]*confInner{0: {}}, back.MM)
-
-	// Byte-level: the two encoders differ by exactly the omitted zero
-	// fields. Pinned as what this package writes today.
-	theirs := recordsByField(t, oracleMarshal(t, want), conformanceMapFields...)
-	mine := recordsByField(t, ours, conformanceMapFields...)
-	assert.NotEqual(t, theirs, mine, "if these are equal, #105 has been decided for protobuf-go's layout: flip this test to Equal")
-	assert.Contains(t, mine[18], string([]byte{0x92, 0x01, 0x06, 0x0a, 0x04, 'z', 'e', 'r', 'o'}), "entry \"zero\" → 0 is written without its value field")
-	assert.Contains(t, theirs[18], string([]byte{0x92, 0x01, 0x08, 0x0a, 0x04, 'z', 'e', 'r', 'o', 0x10, 0x00}), "protobuf-go writes the zero value")
+	var old confAll
+	require.NoError(t, pb.Unmarshal([]byte{0x92, 0x01, 0x06, 0x0a, 0x04, 'z', 'e', 'r', 'o', 0x9a, 0x01, 0x02, 0x12, 0x00}, &old))
+	assert.Equal(t, map[string]int64{"zero": 0}, old.M)
+	assert.Equal(t, map[int32]*confInner{0: {}}, old.MM)
 }
