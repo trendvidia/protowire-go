@@ -11,6 +11,22 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`pxf.Marshal` renders a negative `Decimal.scale` as trailing zeros**
+  ([#118](https://github.com/trendvidia/protowire-go/issues/118)).
+  `pxf.Decimal` is *unscaled × 10^(−scale)*, and the `pb` decoder and the
+  `@default` carrier reader have read a negative scale as trailing zeros
+  since [#92], but the PXF encoder wrote the digits alone: unscaled 5,
+  scale −2 marshalled as `5` where the `pb` side read 500. It now renders
+  `500`, on both signs. The encoder also bounds `|scale|` by
+  `MaxNumericLiteralDigits` before materialising `10^|scale|`, the same
+  bound the two readers apply (HARDENING.md § Arbitrary-precision
+  magnitudes): `Marshal` returns an error for a scale past it, where it
+  previously padded for as long as the scale said. `encoding/pxf` never
+  writes such a scale itself, so both changes only reach bytes from
+  another producer.
+
 ## [1.6.0] — 2026-09-07
 
 This release moves the `pb` bytes for two shapes, once, so the family

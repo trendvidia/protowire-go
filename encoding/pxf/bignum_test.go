@@ -5,6 +5,7 @@ package pxf_test
 
 import (
 	"context"
+	"math"
 	"math/big"
 	"strings"
 	"testing"
@@ -12,8 +13,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/trendvidia/protocompile"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/trendvidia/protowire-go/encoding/pb"
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
 
@@ -386,4 +391,155 @@ func TestBigNumDefaults(t *testing.T) {
 	assert.Equal(t, big.NewInt(314), u)
 	assert.Equal(t, int32(2), s)
 	assert.False(t, neg)
+}
+
+// setDecimal fills a pxf.Decimal message in place: value = unscaled x
+// 10^(-scale), per pxf/bignum.proto.
+func setDecimal(sub protoreflect.Message, unscaled *big.Int, scale int32, negative bool) {
+	d := sub.Descriptor()
+	sub.Set(d.Fields().ByName("unscaled"), protoreflect.ValueOfBytes(unscaled.Bytes()))
+	sub.Set(d.Fields().ByName("scale"), protoreflect.ValueOfInt32(scale))
+	sub.Set(d.Fields().ByName("negative"), protoreflect.ValueOfBool(negative))
+}
+
+// decimalDemo is a BigNumDemo whose decimal_field is the given Decimal.
+func decimalDemo(t *testing.T, desc protoreflect.MessageDescriptor, unscaled *big.Int, scale int32, negative bool) *dynamicpb.Message {
+	t.Helper()
+	msg := dynamicpb.NewMessage(desc)
+	fd := desc.Fields().ByName("decimal_field")
+	setDecimal(msg.Mutable(fd).Message(), unscaled, scale, negative)
+	return msg
+}
+
+// pbReadsDecimal is what encoding/pb makes of the same Decimal: the
+// message is marshalled by protobuf-go (the schema's own reading of
+// bignum.proto) into field 1 of a struct with a *big.Rat there.
+func pbReadsDecimal(t *testing.T, sub protoreflect.Message) *big.Rat {
+	t.Helper()
+	bytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(sub.Interface())
+	require.NoError(t, err)
+	var wire []byte
+	wire = protowire.AppendTag(wire, 1, protowire.BytesType)
+	wire = protowire.AppendBytes(wire, bytes)
+	var got struct {
+		Price *big.Rat `protowire:"1"`
+	}
+	got.Price = new(big.Rat)
+	require.NoError(t, pb.Unmarshal(wire, &got))
+	return got.Price
+}
+
+// TestDecimalNegativeScale: value = unscaled x 10^(-scale), so a negative
+// scale means trailing zeros — unscaled 5, scale -2 is 500 — which is
+// how encoding/pb's decoder and the @default carrier reader have read it
+// since #92. The encoder wrote the digits alone, so 500 marshalled as
+// `5` and read back as unscaled 5, scale 0 (#118).
+//
+// encoding/pxf never writes a negative scale itself (parseDecimal yields
+// a fraction's digit count), so the messages here are built directly,
+// the way bytes from another producer arrive.
+func TestDecimalNegativeScale(t *testing.T) {
+	desc := bigNumDesc(t, "BigNumDemo")
+
+	cases := []struct {
+		name     string
+		unscaled *big.Int
+		scale    int32
+		negative bool
+		want     string
+	}{
+		{"5 x 10^2", big.NewInt(5), -2, false, "500"},
+		{"-5 x 10^2", big.NewInt(5), -2, true, "-500"},
+		{"125 x 10^1", big.NewInt(125), -1, false, "1250"},
+		{"0 x 10^2 is 0, not 000", big.NewInt(0), -2, false, "0"},
+		{"scale 0 unchanged", big.NewInt(42), 0, false, "42"},
+		{"positive scale unchanged", big.NewInt(12345), 2, false, "123.45"},
+		{"positive scale pads", big.NewInt(5), 2, false, "0.05"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := decimalDemo(t, desc, tc.unscaled, tc.scale, tc.negative)
+			out, err := pxf.Marshal(msg)
+			require.NoError(t, err)
+			assert.Equal(t, "decimal_field = "+tc.want+"\n", string(out))
+
+			// The literal reads back as the same VALUE. The scale is not
+			// preserved through text — 500 has no negative-scale spelling —
+			// so compare values, not (unscaled, scale) pairs.
+			back, err := pxf.UnmarshalDescriptor(out, desc)
+			require.NoError(t, err)
+			u, s, n := readDecimalFromMsg(back.ProtoReflect(), "decimal_field")
+			got := new(big.Rat).SetFrac(u, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(s)), nil))
+			if n {
+				got.Neg(got)
+			}
+			want, ok := new(big.Rat).SetString(tc.want)
+			require.True(t, ok)
+			assert.Zero(t, want.Cmp(got), "round trip: want %s, got %s", want, got)
+
+			// And it is the value encoding/pb reads off the same message:
+			// the pb decoder and the PXF encoder agreeing, on both signs of
+			// the scale.
+			viaPB := pbReadsDecimal(t, msg.Get(desc.Fields().ByName("decimal_field")).Message())
+			assert.Zero(t, want.Cmp(viaPB), "encoding/pb reads %s, the PXF encoder wrote %s", viaPB, tc.want)
+		})
+	}
+
+	t.Run("in a list and as a map value", func(t *testing.T) {
+		// The other two encoder paths render through the same function;
+		// this pins that they reach it.
+		msg := dynamicpb.NewMessage(desc)
+		list := msg.Mutable(desc.Fields().ByName("repeated_decimal")).List()
+		setDecimal(list.AppendMutable().Message(), big.NewInt(7), -3, false)
+		out, err := pxf.Marshal(msg)
+		require.NoError(t, err)
+		assert.Equal(t, "repeated_decimal = [\n  7000\n]\n", string(out))
+
+		maps := bigNumDesc(t, "BigNumMaps")
+		mm := dynamicpb.NewMessage(maps)
+		m := mm.Mutable(maps.Fields().ByName("rates")).Map()
+		setDecimal(m.Mutable(protoreflect.ValueOfString("k").MapKey()).Message(), big.NewInt(7), -3, true)
+		out, err = pxf.Marshal(mm)
+		require.NoError(t, err)
+		assert.Equal(t, "rates = {\n  k: -7000\n}\n", string(out))
+	})
+}
+
+// TestDecimalScaleIsBoundedOnMarshal: both arms of readDecimalStr do
+// work proportional to |scale| — the negative one materialises
+// 10^|scale| — from four bytes the message's producer chose, so the
+// bound comes before the value, as it does in the pb decoder and the
+// carrier reader (#95, HARDENING.md § Arbitrary-precision magnitudes).
+// The same limit, on both signs, with an accept row at the bound.
+func TestDecimalScaleIsBoundedOnMarshal(t *testing.T) {
+	desc := bigNumDesc(t, "BigNumDemo")
+	const max = pxf.MaxNumericLiteralDigits
+
+	t.Run("at the bound, positive", func(t *testing.T) {
+		out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), max, false))
+		require.NoError(t, err)
+		assert.Equal(t, "decimal_field = 0."+strings.Repeat("0", max-1)+"5\n", string(out))
+	})
+	t.Run("at the bound, negative", func(t *testing.T) {
+		out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), -max, false))
+		require.NoError(t, err)
+		assert.Equal(t, "decimal_field = 5"+strings.Repeat("0", max)+"\n", string(out))
+		// PINNED divergence (#119): that literal has max+1 digits, which
+		// this port's own decoder refuses under MaxNumericLiteralDigits.
+		// The scale bound keeps the encoder's work proportional to its
+		// input; whether Marshal should refuse to render a literal the
+		// decoder cannot read is #119's decision, not this test's.
+		_, err = pxf.UnmarshalDescriptor(out, desc)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "MaxNumericLiteralDigits")
+	})
+	for _, scale := range []int32{max + 1, -(max + 1), math.MaxInt32, math.MinInt32} {
+		t.Run("past the bound", func(t *testing.T) {
+			out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), scale, false))
+			require.Error(t, err, "scale %d must not render", scale)
+			assert.Nil(t, out)
+			assert.Contains(t, err.Error(), "MaxNumericLiteralDigits=4096")
+			assert.Contains(t, err.Error(), "scale "+big.NewInt(int64(scale)).String())
+		})
+	}
 }

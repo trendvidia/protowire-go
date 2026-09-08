@@ -270,34 +270,60 @@ func formatBigInt(msg protoreflect.Message) string {
 	return readBigInt(msg).Text(10)
 }
 
-// readDecimalStr formats a Decimal message as a decimal string preserving scale.
-func readDecimalStr(msg protoreflect.Message) string {
+// readDecimalStr renders a Decimal message as the positional literal
+// parseDecimal takes. value = unscaled × 10^(-scale) (pxf/bignum.proto):
+// a positive scale places the point, and a NEGATIVE scale means
+// trailing zeros — unscaled 5, scale -2 is 500 — which is how the pb
+// decoder and the @default carrier reader have read it since #92; the
+// encoder wrote the digits alone and dropped the zeros (#118).
+//
+// The bound comes before the value: the negative arm materialises
+// 10^|scale| and the positive arm pads to |scale| digits, and the scale
+// is four bytes whoever wrote the message chose, so the work would be
+// proportional to a number rather than to the input's length (#95).
+// HARDENING.md bounds the magnitude of Decimal.scale by
+// MaxNumericLiteralDigits, on both signs, before anything is
+// materialised; this is the same bound as the two readers'. encoding/pxf
+// never writes a scale outside it — parseDecimal yields a fraction's
+// digit count, already under the cap and never negative — so both arms
+// exist for bytes from another producer.
+func readDecimalStr(msg protoreflect.Message) (string, error) {
 	d := msg.Descriptor()
 	unscaledBytes := msg.Get(d.Fields().ByName("unscaled")).Bytes()
-	scale := int(msg.Get(d.Fields().ByName("scale")).Int())
+	scale := msg.Get(d.Fields().ByName("scale")).Int()
 	negative := msg.Get(d.Fields().ByName("negative")).Bool()
 
+	if scale > MaxNumericLiteralDigits || scale < -MaxNumericLiteralDigits {
+		return "", fmt.Errorf("pxf.Decimal scale %d exceeds MaxNumericLiteralDigits=%d", scale, MaxNumericLiteralDigits)
+	}
 	unscaled := new(big.Int).SetBytes(unscaledBytes)
+	if scale < 0 {
+		// -scale on the int64 the reflection API hands back: negating
+		// MinInt32 as an int32 would be MinInt32 again. Unreachable past
+		// the bound above; kept correct anyway.
+		unscaled.Mul(unscaled, new(big.Int).Exp(big.NewInt(10), big.NewInt(-scale), nil))
+		scale = 0
+	}
 	digits := unscaled.Text(10)
 
 	var buf strings.Builder
 	if negative {
 		buf.WriteByte('-')
 	}
-	if scale <= 0 {
+	if scale == 0 {
 		buf.WriteString(digits)
-		return buf.String()
+		return buf.String(), nil
 	}
 	// Pad with leading zeros if needed (e.g. unscaled=5, scale=2 → "0.05")
-	for len(digits) <= scale {
-		digits = "0" + digits
+	if pad := int(scale) - len(digits) + 1; pad > 0 {
+		digits = strings.Repeat("0", pad) + digits
 	}
-	intPart := digits[:len(digits)-scale]
-	fracPart := digits[len(digits)-scale:]
+	intPart := digits[:len(digits)-int(scale)]
+	fracPart := digits[len(digits)-int(scale):]
 	buf.WriteString(intPart)
 	buf.WriteByte('.')
 	buf.WriteString(fracPart)
-	return buf.String()
+	return buf.String(), nil
 }
 
 // formatBigFloat formats a BigFloat message as a decimal string.
