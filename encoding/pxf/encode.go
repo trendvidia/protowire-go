@@ -195,8 +195,12 @@ func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protor
 		return nil
 	}
 	if isBigInt(mdesc) {
+		s, err := formatBigInt(sub)
+		if err != nil {
+			return err
+		}
 		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(formatBigInt(sub))
+		e.buf.WriteString(s)
 		e.buf.WriteByte('\n')
 		return nil
 	}
@@ -211,8 +215,12 @@ func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protor
 		return nil
 	}
 	if isBigFloat(mdesc) {
+		s, err := formatBigFloat(sub)
+		if err != nil {
+			return err
+		}
 		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(formatBigFloat(sub))
+		e.buf.WriteString(s)
 		e.buf.WriteByte('\n')
 		return nil
 	}
@@ -294,8 +302,12 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 					return err
 				}
 			} else if isBigInt(mdesc) {
+				s, err := formatBigInt(sub)
+				if err != nil {
+					return err
+				}
 				e.writeIndent(level + 1)
-				e.buf.WriteString(formatBigInt(sub))
+				e.buf.WriteString(s)
 			} else if isDecimal(mdesc) {
 				s, err := readDecimalStr(sub)
 				if err != nil {
@@ -304,8 +316,12 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 				e.writeIndent(level + 1)
 				e.buf.WriteString(s)
 			} else if isBigFloat(mdesc) {
+				s, err := formatBigFloat(sub)
+				if err != nil {
+					return err
+				}
 				e.writeIndent(level + 1)
-				e.buf.WriteString(formatBigFloat(sub))
+				e.buf.WriteString(s)
 			} else if isSecret(mdesc) && !secretHasMetadata(sub) {
 				innerFd := mdesc.Fields().ByName("value")
 				e.writeIndent(level + 1)
@@ -456,10 +472,14 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 				continue
 			}
 			if isBigInt(mdesc) {
+				s, err := formatBigInt(sub)
+				if err != nil {
+					return err
+				}
 				e.writeIndent(level + 1)
 				e.buf.WriteString(kv.keyStr)
 				e.buf.WriteString(": ")
-				e.buf.WriteString(formatBigInt(sub))
+				e.buf.WriteString(s)
 				e.buf.WriteByte('\n')
 				continue
 			}
@@ -476,10 +496,14 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 				continue
 			}
 			if isBigFloat(mdesc) {
+				s, err := formatBigFloat(sub)
+				if err != nil {
+					return err
+				}
 				e.writeIndent(level + 1)
 				e.buf.WriteString(kv.keyStr)
 				e.buf.WriteString(": ")
-				e.buf.WriteString(formatBigFloat(sub))
+				e.buf.WriteString(s)
 				e.buf.WriteByte('\n')
 				continue
 			}
