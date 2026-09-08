@@ -35,6 +35,7 @@ import (
 
 	pwpb "github.com/trendvidia/protowire-go/encoding/pb"
 	"github.com/trendvidia/protowire-go/encoding/pxf"
+	"github.com/trendvidia/protowire-go/encoding/sbe"
 )
 
 // Hand-mirrored Go types for adversarial.proto. protowire-go's pb.Unmarshal
@@ -60,6 +61,10 @@ type BytesHolder struct {
 
 type BigIntHolder struct {
 	Value int64 `protowire:"1"`
+}
+
+type ListHolder struct {
+	Values []int32 `protowire:"1"`
 }
 
 func main() {
@@ -96,7 +101,7 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 	case "envelope":
 		return errors.New("envelope decode not yet implemented in this reference")
 	case "sbe":
-		return errors.New("sbe decode not yet implemented in this reference")
+		return sbeDecode(data, schema, protoPath, lim)
 	default:
 		return fmt.Errorf("unsupported format: %s", format)
 	}
@@ -131,6 +136,8 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 		msg = &BytesHolder{}
 	case "adversarial.v1.BigIntHolder":
 		msg = &BigIntHolder{}
+	case "adversarial.v1.ListHolder":
+		msg = &ListHolder{}
 	default:
 		return fmt.Errorf("unknown schema for pb: %s", schema)
 	}
@@ -140,6 +147,28 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 		MaxNumericLiteralDigits: lim["MaxNumericLiteralDigits"],
 		MaxRepeatedCount:        lim["MaxRepeatedCount"],
 	}.Unmarshal(data, msg)
+}
+
+// sbeDecode binds the codec from the same runtime-compiled proto the PXF
+// path uses (adversarial.proto carries the sbe options), so the corpus's
+// SBE rows are decoded rather than refused for want of a codec.
+func sbeDecode(data []byte, schema, protoPath string, lim limitFlags) error {
+	if protoPath == "" {
+		return errors.New("--proto is required for format=sbe")
+	}
+	desc, err := loadDescriptor(protoPath, schema)
+	if err != nil {
+		return err
+	}
+	codec, err := sbe.CodecOptions{
+		MaxMessageSize:   lim["MaxMessageSize"],
+		MaxRepeatedCount: lim["MaxRepeatedCount"],
+	}.NewCodec(desc.ParentFile())
+	if err != nil {
+		return err
+	}
+	_, err = codec.UnmarshalDescriptor(data, desc)
+	return err
 }
 
 func loadDescriptor(protoPath, schema string) (protoreflect.MessageDescriptor, error) {
