@@ -7,7 +7,7 @@ package pxf_test
 // trendvidia/protowire#284 and #306, protowire-go#93 / #109 / #123). The
 // fixture corpus under testdata/map-keys/ is vendored verbatim from the
 // spec repository (trendvidia/protowire testdata/map-keys/, commit
-// a0dd520) and is shared by every port; keep the two in sync when the
+// <spec-commit>) and is shared by every port; keep the two in sync when the
 // spec repo adds fixtures. Its README states each document's verdict:
 // the three bool-key documents at the top MUST bind to the keys true and
 // false, every document under invalid/ MUST be rejected with an error
@@ -138,7 +138,11 @@ func mapKeySpellings(doc *pxf.Document) map[string]bool {
 // keep, quotes a string key exactly where the formatter would keep the
 // quotes and writes a bool key bare, so the two agree on every key both
 // can produce; the bool pair's `0` is one bare spelling of false, and
-// Marshal's `false` is the other.
+// Marshal's `false` is the other. fmt-dotted-keys (string-keyed;
+// protowire#313): the identifier production admits '.', so the quoted
+// "a.b" canonicalizes to bare and a bare c.d stays bare, as keyed entry
+// names already did, while ".e" and "1.5" fail ident-start and stay
+// quoted — nothing float-shaped or leading-dot becomes bare.
 func TestMapKeysFmtPairs(t *testing.T) {
 	strKey := func(s string) protoreflect.MapKey { return protoreflect.ValueOfString(s).MapKey() }
 	boolKey := func(b bool) protoreflect.MapKey { return protoreflect.ValueOfBool(b).MapKey() }
@@ -155,6 +159,9 @@ func TestMapKeysFmtPairs(t *testing.T) {
 			map[string]bool{"true": true, "false": true, "null": true, "123": true, "plain": false, "bare": false}},
 		{"fmt-bare-keys", "Flags", "by_flag", []protoreflect.MapKey{boolKey(true), boolKey(false)},
 			map[string]bool{"true": false, "false": false}},
+		{"fmt-dotted-keys", "Labels", "by_label", []protoreflect.MapKey{
+			strKey("a.b"), strKey("c.d"), strKey(".e"), strKey("1.5")},
+			map[string]bool{"a.b": false, "c.d": false, ".e": true, "1.5": true}},
 	} {
 		t.Run(tc.pair, func(t *testing.T) {
 			dir := filepath.Join("testdata", "map-keys")
@@ -206,7 +213,8 @@ func TestMapKeysFmtPairs(t *testing.T) {
 // space, null, a float) is quoted so the output still parses; KeyQuoted
 // forces the quotes on an identifier-shaped or integer-shaped key meant
 // as a string, and is dropped again where the bare spelling denotes the
-// same key.
+// same key. A dotted key is identifier-shaped (protowire#313); a
+// leading-dot key is not.
 func TestMapEntryBuiltInCodeSpelling(t *testing.T) {
 	entry := func(key string, quoted bool) pxf.Entry {
 		return &pxf.MapEntry{Key: key, KeyQuoted: quoted, Value: &pxf.StringVal{Value: "v"}}
@@ -215,6 +223,7 @@ func TestMapEntryBuiltInCodeSpelling(t *testing.T) {
 		entry("plain", false), entry("404", false), entry("-5", false), entry("true", false),
 		entry("", false), entry("my key", false), entry("null", false), entry("1.5", false),
 		entry("123", true), entry("true", true), entry("plain", true),
+		entry("a.b", false), entry("a.b", true), entry(".e", false),
 	}}}}}
 	want := "m = {\n" +
 		"  plain: \"v\"\n" +
@@ -228,6 +237,9 @@ func TestMapEntryBuiltInCodeSpelling(t *testing.T) {
 		"  \"123\": \"v\"\n" +
 		"  \"true\": \"v\"\n" +
 		"  plain: \"v\"\n" +
+		"  a.b: \"v\"\n" +
+		"  a.b: \"v\"\n" +
+		"  \".e\": \"v\"\n" +
 		"}\n"
 	got := pxf.FormatDocument(doc)
 	assert.Equal(t, want, string(got))
