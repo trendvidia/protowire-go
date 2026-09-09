@@ -11,6 +11,23 @@ format changes.
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-09-08
+
+This release makes the writers agree with the readers, and with each
+other. `FormatDocument` keeps the spelling of a map key where changing
+it would change what the key denotes ([#123]; draft `-01` § Entries and
+Keys, the Go leg of protowire#306): `"true": "v"` on a string-keyed map
+no longer comes out as the bool key `true`, and a bare `404:` no longer
+gains quotes — the one output that moves. `Marshal` renders a negative
+`Decimal.scale` as the trailing zeros the `pb` side has always read
+([#118]) and refuses a big-number literal its own decoder would refuse
+([#119]), a narrowing of `Marshal` that only reaches bytes from another
+producer. `MapEntry` gains `KeyQuoted`. No wire-format change.
+
+[#123]: https://github.com/trendvidia/protowire-go/issues/123
+[#118]: https://github.com/trendvidia/protowire-go/issues/118
+[#119]: https://github.com/trendvidia/protowire-go/issues/119
+
 ### Changed
 
 - **`pxf.Marshal` refuses a big-number literal its own decoder would
@@ -2235,7 +2252,8 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/trendvidia/protowire-go/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/trendvidia/protowire-go/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/trendvidia/protowire-go/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/trendvidia/protowire-go/compare/v1.4.1...v1.5.0
