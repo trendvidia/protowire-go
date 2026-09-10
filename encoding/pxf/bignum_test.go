@@ -537,6 +537,16 @@ func TestDecimalScaleIsBoundedOnMarshal(t *testing.T) {
 		_, err = pxf.UnmarshalDescriptor(out, desc)
 		require.NoError(t, err)
 	})
+	// protowire#310, decided as option 1: the scale cap is a work bound
+	// on the pb decoder and the digit cap a length bound on text, and
+	// neither implies the other. A Decimal at exactly the scale cap is
+	// valid on the wire and has no literal — a positive scale of n
+	// renders n+1 positional digits, the leading 0 included — and so is
+	// a Decimal whose unscaled part alone is past the cap at scale 0,
+	// which the wire bounds only by MaxMessageSize. Both are refused
+	// naming the digit count; neither is truncated, rounded or switched
+	// to another notation. The corpus row decimal-scale-4096 stays
+	// accept on the pb side.
 	for _, scale := range []int32{max, -max} {
 		t.Run("at the wire's bound, one digit past the literal's (protowire#310)", func(t *testing.T) {
 			out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), scale, false))
@@ -545,6 +555,21 @@ func TestDecimalScaleIsBoundedOnMarshal(t *testing.T) {
 			assert.Contains(t, err.Error(), "pxf.Decimal renders to 4097 digits; MaxNumericLiteralDigits=4096")
 		})
 	}
+	t.Run("unscaled past the digit cap at scale 0 (protowire#310)", func(t *testing.T) {
+		out, err := pxf.Marshal(decimalDemo(t, desc, pow10(max), 0, false))
+		require.Error(t, err)
+		assert.Nil(t, out)
+		assert.Contains(t, err.Error(), "pxf.Decimal renders to 4097 digits; MaxNumericLiteralDigits=4096")
+	})
+	t.Run("unscaled past the digit cap, scale 1 (protowire#310)", func(t *testing.T) {
+		// 10^4096 at scale 1 is 4097 digits either side of the point:
+		// the scale does not rescue an unscaled part that is already
+		// too long.
+		out, err := pxf.Marshal(decimalDemo(t, desc, pow10(max), 1, false))
+		require.Error(t, err)
+		assert.Nil(t, out)
+		assert.Contains(t, err.Error(), "pxf.Decimal renders to 4097 digits; MaxNumericLiteralDigits=4096")
+	})
 	for _, scale := range []int32{max + 1, -(max + 1), math.MaxInt32, math.MinInt32} {
 		t.Run("past the bound", func(t *testing.T) {
 			out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), scale, false))
