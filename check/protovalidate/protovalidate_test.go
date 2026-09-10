@@ -36,7 +36,7 @@ message User {
 }
 `
 
-// validateProtoSrc is buf/validate/validate.proto at protovalidate v1.2.0,
+// validateProtoSrc is buf/validate/validate.proto at protovalidate v1.2.2,
 // the version behind the buf.build/gen stub this module links. The fork
 // compiles source only; a descriptor handed through SearchResult.Desc is
 // rendered back to source first, and that renderer writes proto2 oneof

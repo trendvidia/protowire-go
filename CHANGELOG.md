@@ -11,6 +11,22 @@ format changes.
 
 ## [Unreleased]
 
+### Security
+
+- **`check/protovalidate` moves to `buf.build/go/protovalidate` v1.3.0,
+  which clears the two advisories `govulncheck` reported in its graph**
+  ([#127](https://github.com/trendvidia/protowire-go/issues/127)):
+  GO-2026-6094 in `github.com/google/cel-go` v0.29.0 (now v0.30.0, via
+  protovalidate) and GO-2026-5970 in `golang.org/x/text` (now v0.41.0,
+  pinned directly). Neither was in a called path; `govulncheck -show
+  verbose` now lists no advisory at all. protovalidate v1.4.0 was not
+  taken: it requires `go 1.26.0`, as do `x/text` v0.42.0 and `x/sync`
+  v0.23.0, and the CI matrix runs the nested module on Go 1.25 with
+  `GOTOOLCHAIN=local`. The `go` directive stays `1.25.6`. The vendored
+  `validate.proto` fixture moves to protovalidate v1.2.2, the revision
+  behind the stub v1.3.0 requires, and the pin against the linked stub
+  still holds. `go.sum` stays at 27 modules.
+
 ### Changed
 
 - **No module in this repository requires upstream
