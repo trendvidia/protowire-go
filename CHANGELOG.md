@@ -13,6 +13,18 @@ format changes.
 
 ### Changed
 
+- **`github.com/trendvidia/protocompile` moves to v0.33.1 in both
+  modules, and `check/protovalidate` resolves `buf/validate/validate.proto`
+  out of `protoregistry.GlobalFiles` again.** v0.33.1 fixes the renderer
+  bug #128 detoured around ([trendvidia/protocompile#220](https://github.com/trendvidia/protocompile/issues/220)
+  — a proto2 oneof member was written with an `optional` label), so the
+  vendored `validate.proto` fixture, its provenance note and
+  `TestVendoredValidateProtoMatchesLinkedStub` go: the test compiles
+  against the linked stub's own descriptor, as it did before #128.
+  Nothing else in the fork release reaches this repo (the other change
+  is the text of an out-of-range `pxf.BigFloat` diagnostic). `go.sum`
+  counts are unchanged: 24 main, 27 nested.
+
 - **CI tests on Go 1.26.x and 1.27.x; the deprecated `check/protovalidate`
   module now requires `go 1.26.0`**
   ([#130](https://github.com/trendvidia/protowire-go/issues/130)). The
