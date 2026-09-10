@@ -22,6 +22,25 @@ format changes.
   drops from 27 modules to 26. The adapter is unchanged; tagged
   `check/protovalidate/v1.4.1`.
 
+### Fixed
+
+- **`ApplyDefault` no longer materialises a wrapper message before
+  rejecting its literal**
+  ([#135](https://github.com/trendvidia/protowire-go/issues/135)). The
+  wrapper arm of the message-default path called `Mutable` on the
+  parent, then parsed the literal, so a `google.protobuf.BoolValue`
+  field with `[(pxf.default) = "True"]` got the #90 error and an empty
+  `BoolValue` shell: `Has(field)` was true for a default that never
+  applied. Every other arm — Timestamp, Duration, BigInt, Decimal,
+  BigFloat and the scalar kinds — already parsed first. In-tree callers
+  abort on the error, so `Unmarshal` output is unchanged; a
+  layered-config consumer that reports and continues saw the
+  presence-shaped side effect. The literal is now parsed before the
+  wrapper is allocated, and a rejected default leaves the parent exactly
+  as it was, a previously populated wrapper included. Covered for the
+  eight wrapper kinds whose literal can be rejected; `StringValue`
+  accepts every literal and is pinned as such.
+
 ## [1.8.0] — 2026-09-10
 
 This release finishes the map-key spelling work and moves the nested

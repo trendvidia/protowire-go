@@ -2032,13 +2032,16 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 	}
 
 	if innerKind, ok := wrapperTypes[mdesc.FullName()]; ok {
-		innerFd := mdesc.Fields().ByName("value")
-		sub := msg.Mutable(fd).Message()
+		// Parse before Mutable: allocating the wrapper first left an
+		// empty shell on the parent when the literal was rejected, so
+		// Has(fd) reported true for a default that never applied
+		// (#135). The other arms of this function already parse first.
 		v, err := parseScalarDefault(innerKind, def, fd)
 		if err != nil {
 			return err
 		}
-		sub.Set(innerFd, v)
+		innerFd := mdesc.Fields().ByName("value")
+		msg.Mutable(fd).Message().Set(innerFd, v)
 		return nil
 	}
 
