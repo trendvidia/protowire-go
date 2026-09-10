@@ -11,6 +11,25 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **CI tests on Go 1.26.x and 1.27.x; the deprecated `check/protovalidate`
+  module now requires `go 1.26.0`**
+  ([#130](https://github.com/trendvidia/protowire-go/issues/130)). The
+  matrix drops 1.25.x and the single-version legs (coverage,
+  govulncheck, staticcheck, fuzz, nightly) move to 1.27.x. With the
+  floor moved, the nested module takes `buf.build/go/protovalidate`
+  v1.4.0 — which moves cel-go to its new module path `cel.dev/cel-go`
+  v0.32.0 — plus `golang.org/x/text` v0.42.0 and `golang.org/x/sync`
+  v0.23.0, the three moves #127 had to leave out because each declares
+  `go 1.26.0`. **The main module's `go` directive is unchanged at
+  `1.25.6`**; consumers of `protowire-go` itself are not affected, only
+  the nested module's floor moves. The protovalidate stub moves to the
+  BSR revision v1.4.0 requires (`v1.36.12-20260825204119-…`); the
+  vendored `validate.proto` fixture stays at tag v1.2.2, whose source
+  differs from that revision in comments only, and the pin against the
+  linked stub passes. `go.sum` stays at 27 modules.
+
 ### Security
 
 - **`check/protovalidate` moves to `buf.build/go/protovalidate` v1.3.0,
