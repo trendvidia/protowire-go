@@ -11,6 +11,27 @@ format changes.
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-09-10
+
+This release finishes the map-key spelling work and moves the nested
+module's floor. A dotted string map key is written bare ([#125]; draft
+`-01` § Entries and Keys, the Go leg of protowire#313): `Marshal` and
+`FormatDocument` apply the identifier production, dots included, the
+same test keyed entry names always used — the one output that moves,
+`"a.b":` → `a.b:`. The big-number pin states protowire#310's decision
+([#126]): a Decimal past the digit cap is refused whatever its scale,
+never truncated or renotated. `check/protovalidate` leaves upstream
+`bufbuild/protocompile` for the fork ([#128]), clears its two
+`govulncheck` advisories ([#127]) and takes protovalidate v1.4.0 on a
+`go 1.26.0` floor ([#130]); the main module's `go` directive stays
+`1.25.6`. No wire-format change.
+
+[#125]: https://github.com/trendvidia/protowire-go/pull/125
+[#126]: https://github.com/trendvidia/protowire-go/pull/126
+[#127]: https://github.com/trendvidia/protowire-go/issues/127
+[#128]: https://github.com/trendvidia/protowire-go/pull/128
+[#130]: https://github.com/trendvidia/protowire-go/issues/130
+
 ### Changed
 
 - **`github.com/trendvidia/protocompile` moves to v0.33.1 in both
@@ -2348,7 +2369,8 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/trendvidia/protowire-go/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/trendvidia/protowire-go/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/trendvidia/protowire-go/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/trendvidia/protowire-go/compare/v1.5.0...v1.5.1
