@@ -1,10 +1,10 @@
 # Test fixtures
 
 `buf/validate/validate.proto` is a verbatim copy of
-[`proto/protovalidate/buf/validate/validate.proto`](https://github.com/bufbuild/protovalidate/blob/v1.2.0/proto/protovalidate/buf/validate/validate.proto)
-from `bufbuild/protovalidate` at tag `v1.2.0`, the revision behind the
+[`proto/protovalidate/buf/validate/validate.proto`](https://github.com/bufbuild/protovalidate/blob/v1.2.2/proto/protovalidate/buf/validate/validate.proto)
+from `bufbuild/protovalidate` at tag `v1.2.2`, the revision behind the
 `buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go` stub this
-module links (`v1.36.12-20260415201107-50325440f8f2.1`). It is licensed
+module links (`v1.36.12-20260709200747-435963d16310.1`). It is licensed
 under the Apache License 2.0 by Buf Technologies, Inc.; the header is
 kept as shipped.
 
