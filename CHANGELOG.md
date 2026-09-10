@@ -11,6 +11,24 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A dotted string map key is written bare** ([#125](https://github.com/trendvidia/protowire-go/pull/125);
+  draft `-01` § Entries and Keys, the Go leg of
+  [protowire#313](https://github.com/trendvidia/protowire/issues/313)).
+  The identifier-safe test `Marshal` and `FormatDocument` apply to a
+  string map key stopped at `[A-Za-z0-9_]`, while the grammar's
+  *ident-part* — and `identSafeEntryName`, the test keyed entry names
+  use — admits `.`; so a key `a.b` was marshalled `"a.b":` and a quoted
+  `"a.b"` kept its quotes through `fmt`, where the text says bare. The
+  decoder always read `a.b:` as one identifier token, so only the
+  writers move: `isValidIdent` is `identSafeEntryName` now, one
+  identifier-safe rule for the document. `".e"` and `"1.5"` still fail
+  *ident-start* and stay quoted. The spec's third fmt pair,
+  `fmt-dotted-keys`, is vendored and pinned. A canonical-text change for
+  dotted string keys; no binding or wire change.
+
+
 ## [1.7.0] — 2026-09-08
 
 This release makes the writers agree with the readers, and with each
