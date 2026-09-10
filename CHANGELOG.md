@@ -13,6 +13,17 @@ format changes.
 
 ### Changed
 
+- **Both modules take `github.com/trendvidia/protocompile` v0.34.0**
+  (from v0.33.1). The release rejects a multi-root `Compile` whose
+  roots declare one fully-qualified symbol, or whose closure extends
+  one message with one tag twice, as protoc and upstream always did;
+  names the path in the missing-import diagnostic; and restores
+  `linker.ResolverFromFile`. Nothing here reaches any of the three: the
+  one multi-root compile in the tree is a test helper whose roots never
+  collide, no code matches the import text, and the resolver walks stay
+  on `Files.AsResolver`. No wire-format, IR or carrier change in the
+  release. `go.sum` counts unchanged: 24 main, 26 nested.
+
 - **`check/protovalidate` requires the parent module at v1.8.0 instead of
   v1.3.1.** The old requirement carried upstream
   `github.com/bufbuild/protocompile` v0.14.1 into the nested module's
