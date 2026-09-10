@@ -24,24 +24,29 @@ never truncated or renotated. `check/protovalidate` leaves upstream
 `bufbuild/protocompile` for the fork ([#128]), clears its two
 `govulncheck` advisories ([#127]) and takes protovalidate v1.4.0 on a
 `go 1.26.0` floor ([#130]); the main module's `go` directive stays
-`1.25.6`. No wire-format change.
+`1.25.6`. Both modules end the release on fork v0.33.1, which fixed the
+renderer bug the move had to route around, so the vendored
+`validate.proto` fixture that detour needed is gone again ([#133]). No
+wire-format change.
 
 [#125]: https://github.com/trendvidia/protowire-go/pull/125
 [#126]: https://github.com/trendvidia/protowire-go/pull/126
 [#127]: https://github.com/trendvidia/protowire-go/issues/127
 [#128]: https://github.com/trendvidia/protowire-go/pull/128
 [#130]: https://github.com/trendvidia/protowire-go/issues/130
+[#133]: https://github.com/trendvidia/protowire-go/pull/133
 
 ### Changed
 
 - **`github.com/trendvidia/protocompile` moves to v0.33.1 in both
   modules, and `check/protovalidate` resolves `buf/validate/validate.proto`
-  out of `protoregistry.GlobalFiles` again.** v0.33.1 fixes the renderer
-  bug #128 detoured around ([trendvidia/protocompile#220](https://github.com/trendvidia/protocompile/issues/220)
+  out of `protoregistry.GlobalFiles` again.**
+  ([#133](https://github.com/trendvidia/protowire-go/pull/133)). v0.33.1
+  fixes the renderer bug [#128] detoured around ([trendvidia/protocompile#220](https://github.com/trendvidia/protocompile/issues/220)
   — a proto2 oneof member was written with an `optional` label), so the
   vendored `validate.proto` fixture, its provenance note and
   `TestVendoredValidateProtoMatchesLinkedStub` go: the test compiles
-  against the linked stub's own descriptor, as it did before #128.
+  against the linked stub's own descriptor, as it did before [#128].
   Nothing else in the fork release reaches this repo (the other change
   is the text of an out-of-range `pxf.BigFloat` diagnostic). `go.sum`
   counts are unchanged: 24 main, 27 nested.
