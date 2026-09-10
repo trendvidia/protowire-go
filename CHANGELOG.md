@@ -11,6 +11,37 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **No module in this repository requires upstream
+  `github.com/bufbuild/protocompile` any more.** `check/protovalidate`
+  compiles its fixture with `github.com/trendvidia/protocompile` v0.33.0
+  instead of `bufbuild/protocompile` v0.14.1, and the main module moves
+  from the fork's v0.32.0 to v0.33.0 with no pin fired. The 1.6.0 notes
+  below left the nested module on upstream because the fork ignored
+  `SearchResult.Desc`; the fork honours it again since v0.26.0 by
+  rendering the descriptor back to source, but that renderer writes a
+  proto2 oneof member with an `optional` label its own parser rejects
+  ([trendvidia/protocompile#220](https://github.com/trendvidia/protocompile/issues/220)),
+  and `buf/validate/validate.proto` is proto2 with `FieldRules` a oneof.
+  The test therefore serves the file as source: `validate.proto` at
+  protovalidate v1.2.0 — the revision behind the linked `buf.build/gen`
+  stub — is vendored under `check/protovalidate/testdata` (Apache-2.0,
+  header kept), and `TestVendoredValidateProtoMatchesLinkedStub` compiles
+  it and requires the result to equal the stub's descriptor, so the copy
+  and the stub cannot drift apart silently.
+
+  Two things in the nested `go.mod` follow from the switch. Its `go`
+  directive moves `1.25.0` → `1.25.6`, the fork's floor. And its
+  protovalidate stub is pinned at the `v1.36.12-20260415201107-…`
+  spelling: the fork requires the same stub at a 2024 revision whose
+  `v1.36.12` prefix out-sorts the `v1.36.11-2026…` one this module had,
+  so minimal version selection would otherwise pick a stub without
+  `validate.Rule` and the module would not build. The nested module's
+  `go.sum` goes from 25 modules to 27; the main module's stays at 24.
+  Nothing on the library surface changes, and `internal/deps` still
+  reports every published package compiler-free.
+
 ### Fixed
 
 - **A dotted string map key is written bare** ([#125](https://github.com/trendvidia/protowire-go/pull/125);
