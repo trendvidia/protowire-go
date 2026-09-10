@@ -11,6 +11,25 @@ format changes.
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-09-10
+
+A patch release: one fix and two dependency moves, nothing that changes
+a document or a wire byte. `ApplyDefault` parses a wrapper default
+before it allocates the wrapper ([#135]), so a rejected literal on a
+`google.protobuf.BoolValue` or any other wrapper field leaves the
+parent without a presence-shaped shell — the layered-config case, where
+the caller reports the error and continues; `Unmarshal` output is
+unchanged. Both modules take `github.com/trendvidia/protocompile`
+v0.34.0 ([#137]), whose multi-root duplicate-symbol rejection reaches
+nothing here, and `check/protovalidate` requires the parent at v1.8.0
+([#134]), which takes upstream `bufbuild/protocompile` out of its graph
+for good; that module is tagged `check/protovalidate/v1.4.2` at this
+commit. No wire-format change.
+
+[#134]: https://github.com/trendvidia/protowire-go/pull/134
+[#135]: https://github.com/trendvidia/protowire-go/issues/135
+[#137]: https://github.com/trendvidia/protowire-go/pull/137
+
 ### Changed
 
 - **Both modules take `github.com/trendvidia/protocompile` v0.34.0**
@@ -31,7 +50,7 @@ format changes.
   though it reached no build. With the parent at v1.8.0 the nested
   module's graph names one protocompile, the fork, and its `go.sum`
   drops from 27 modules to 26. The adapter is unchanged; tagged
-  `check/protovalidate/v1.4.1`.
+  `check/protovalidate/v1.4.1` at that commit.
 
 ### Fixed
 
