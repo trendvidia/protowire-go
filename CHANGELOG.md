@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`check/protovalidate` requires the parent module at v1.8.1 instead of
+  v1.8.0.** Keeps the nested module's graph on the parent it ships with:
+  v1.8.1's `go.mod` names `trendvidia/protocompile` v0.34.0, the same
+  version the nested module requires directly, so the graph carries one
+  fork version and one parent version. The adapter is unchanged and
+  nothing in v1.8.1 reaches it; `go.sum` stays at 26 modules. Tagged
+  `check/protovalidate/v1.4.3` at that commit.
+
 ## [1.8.1] — 2026-09-10
 
 A patch release: one fix and two dependency moves, nothing that changes
