@@ -11,6 +11,17 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`check/protovalidate` requires the parent module at v1.8.0 instead of
+  v1.3.1.** The old requirement carried upstream
+  `github.com/bufbuild/protocompile` v0.14.1 into the nested module's
+  graph and `go.sum` — the parent's `go.mod` at v1.3.1 required it —
+  though it reached no build. With the parent at v1.8.0 the nested
+  module's graph names one protocompile, the fork, and its `go.sum`
+  drops from 27 modules to 26. The adapter is unchanged; tagged
+  `check/protovalidate/v1.4.1`.
+
 ## [1.8.0] — 2026-09-10
 
 This release finishes the map-key spelling work and moves the nested
