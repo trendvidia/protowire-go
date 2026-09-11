@@ -7,7 +7,7 @@ package pxf_test
 // trendvidia/protowire#284 and #306, protowire-go#93 / #109 / #123). The
 // fixture corpus under testdata/map-keys/ is vendored verbatim from the
 // spec repository (trendvidia/protowire testdata/map-keys/, commit
-// <spec-commit>) and is shared by every port; keep the two in sync when the
+// 4519ff3) and is shared by every port; keep the two in sync when the
 // spec repo adds fixtures. Its README states each document's verdict:
 // the three bool-key documents at the top MUST bind to the keys true and
 // false, every document under invalid/ MUST be rejected with an error
