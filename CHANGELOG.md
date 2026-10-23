@@ -11,27 +11,26 @@ format changes.
 
 ## [Unreleased]
 
-### Fixed
+## [1.9.0] — 2026-10-23
 
-- **`Scan` and `BindRow` apply `(pxf.default)` and `(pxf.required)` to
-  empty `@dataset` cells** ([#145]). An empty cell is an absent field
-  (draft §3.4.4): its default now applies, and a required field rejects
-  the row, as `Scan`'s documentation always said. Before, both were
-  ignored, because `BindRow` decoded through `Unmarshal`, which skips
-  the post-decode pass; it now uses `UnmarshalFull` for a row type with
-  either annotation or a `_null` mask, and `Unmarshal` otherwise. A
-  `null` cell satisfies required and keeps the default off, and is
-  recorded in the row type's `_null` FieldMask when it declares one. A
-  row that bound before can now fail (a required field left empty) or
-  bind differently (an empty cell where a default is declared). Such a
-  row type is also held to the bind-time schema checks, so a schema
-  `ValidateDescriptor` rejects — two spellings of one default that
-  disagree, `(pxf.required)` on a oneof member — now fails every row
-  instead of binding by picking one. A row's error names the row's
-  position instead of `1:1` (on the streaming path, the position
-  `DatasetReader.Next` gives the row).
+A minor release: `@dataset` grows from a read-only, scalar-cell table
+into one that can be written, appended to, and nested. A cell may now
+hold a list or a block (protowire#341), and `AppendDatasetHeader` /
+`AppendDatasetRow` write tables a row at a time ([#142]). The streaming
+reader fails where `Parse` fails instead of ending quietly at a broken
+row, so a crash mid-append no longer hides the rows after it ([#141]),
+and `Scan` / `BindRow` apply `(pxf.default)` and `(pxf.required)` to
+empty cells as the draft says ([#145]). Rows that bound before can bind
+differently or fail: a list or block cell is now accepted, an empty
+cell takes its declared default, and an empty required cell is an
+error. One known issue ships: a field set inside a block cell can be
+replaced by its default ([#156]). No wire-format change.
 
+[#141]: https://github.com/trendvidia/protowire-go/issues/141
+[#142]: https://github.com/trendvidia/protowire-go/issues/142
 [#145]: https://github.com/trendvidia/protowire-go/issues/145
+[#156]: https://github.com/trendvidia/protowire-go/issues/156
+
 ### Added
 
 - **`@dataset` value cells: a cell may hold a list or a block**
@@ -56,7 +55,12 @@ format changes.
   decoder already did, instead of `expected value, got invalid duration:
   5seconds`. The errors `@dataset cells cannot contain list/block values
   in v1` are gone; dotted column paths are still rejected
-  (protowire#342). `AppendDatasetRow` still refuses list, map and
+  (protowire#342). Known issue: a field set inside a block cell can
+  come back as its `(pxf.default)`, and a `(pxf.required)` field inside
+  one is not enforced, because the cell is bound in the `field = { ... }`
+  form, which `UnmarshalFull` mishandles
+  ([#156](https://github.com/trendvidia/protowire-go/issues/156)).
+  `AppendDatasetRow` still refuses list, map and
   block-valued columns; writing them is
   [#155](https://github.com/trendvidia/protowire-go/issues/155).
 
@@ -87,7 +91,16 @@ format changes.
   message and the columns, so appending to a file never rewrites
   earlier bytes.
 
-[#142]: https://github.com/trendvidia/protowire-go/issues/142
+### Changed
+
+- **`check/protovalidate` requires the parent module at v1.8.1 instead of
+  v1.8.0.** Keeps the nested module's graph on the parent it ships with:
+  v1.8.1's `go.mod` names `trendvidia/protocompile` v0.34.0, the same
+  version the nested module requires directly, so the graph carries one
+  fork version and one parent version. The adapter is unchanged and
+  nothing in v1.8.1 reaches it; `go.sum` stays at 26 modules. Tagged
+  `check/protovalidate/v1.4.3` at that commit.
+
 ### Fixed
 
 - **`DatasetReader.Next` no longer ends quietly at a malformed or
@@ -106,25 +119,30 @@ format changes.
   error. A bare `@` after the rows is an error, not the end of the
   table. A reader chained on `Tail()` reports the next table's positions
   in the whole document, not from the start of the `Tail`.
+
+- **`Scan` and `BindRow` apply `(pxf.default)` and `(pxf.required)` to
+  empty `@dataset` cells** ([#145]). An empty cell is an absent field
+  (draft §3.4.4): its default now applies, and a required field rejects
+  the row, as `Scan`'s documentation always said. Before, both were
+  ignored, because `BindRow` decoded through `Unmarshal`, which skips
+  the post-decode pass; it now uses `UnmarshalFull` for a row type with
+  either annotation or a `_null` mask, and `Unmarshal` otherwise. A
+  `null` cell satisfies required and keeps the default off, and is
+  recorded in the row type's `_null` FieldMask when it declares one. A
+  row that bound before can now fail (a required field left empty) or
+  bind differently (an empty cell where a default is declared). Such a
+  row type is also held to the bind-time schema checks, so a schema
+  `ValidateDescriptor` rejects — two spellings of one default that
+  disagree, `(pxf.required)` on a oneof member — now fails every row
+  instead of binding by picking one. A row's error names the row's
+  position instead of `1:1` (on the streaming path, the position
+  `DatasetReader.Next` gives the row).
+
 - **`UnmarshalOptions.NewDatasetReader` applies the options'
   `MaxBytesLiteralLength` and `MaxNestingDepth`.** Only
   `MaxMessageSize` reached the stream; the header and the rows were
   parsed under the package constants, so a bytes literal over the
   caller's limit was accepted where `ParseOptions.Parse` rejects it.
-
-[#141]: https://github.com/trendvidia/protowire-go/issues/141
-
-### Changed
-
-- **`check/protovalidate` requires the parent module at v1.8.1 instead of
-  v1.8.0.** Keeps the nested module's graph on the parent it ships with:
-  v1.8.1's `go.mod` names `trendvidia/protocompile` v0.34.0, the same
-  version the nested module requires directly, so the graph carries one
-  fork version and one parent version. The adapter is unchanged and
-  nothing in v1.8.1 reaches it; `go.sum` stays at 26 modules. Tagged
-  `check/protovalidate/v1.4.3` at that commit.
-
-### Fixed
 
 - **`DatasetReader` applies its options' bytes-literal and digit
   limits.** A reader built with `UnmarshalOptions.NewDatasetReader`
@@ -133,6 +151,7 @@ format changes.
   `MaxNumericLiteralDigits`, so a stream accepted a `b"…"` literal or a
   big-number cell that `UnmarshalFull` and `Unmarshal` reject under the
   same options. Both now apply the caller's limits.
+
 
 ## [1.8.1] — 2026-09-10
 
