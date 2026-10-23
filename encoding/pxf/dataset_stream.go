@@ -63,18 +63,20 @@ type DatasetReader struct {
 	typ      string
 	columns  []string
 	dirs     []Directive
-	finished bool   // Next() has returned io.EOF
-	err      error  // sticky error
-	maxRow   int    // cap on pending while a row boundary is sought (MaxMessageSize, UnmarshalOptions.limits)
-	lim      limits // the options' limits, applied to each row's parse and to Scan's bind
+	finished bool     // Next() has returned io.EOF
+	err      error    // sticky error
+	lim      limits   // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
+	base     Position // document position of pending[0], so rows and errors carry Parse's positions
 }
 
 // NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
 // etc.) and the `@dataset TYPE ( cols )` header, returning a reader
 // positioned at the first row.
 //
-// Returns [ErrNoDataset] if the input ends before any `@dataset` directive
-// is seen. Returns a wrapped parse/IO error otherwise.
+// Returns [ErrNoDataset] if the input is a well-formed document with no
+// `@dataset` directive. A malformed one, a header cut short included,
+// returns the error [Parse] returns for it; a read failure is returned
+// as is.
 //
 // The header (everything from the start of the input up through and
 // including the `)` of the column list) must fit in 64 KiB. This is a
@@ -86,13 +88,15 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // NewDatasetReader is [NewDatasetReader] under the options' limits: the
 // bytes held while a row boundary is sought are capped at the options'
 // MaxMessageSize, so a stream that never ends a row cannot grow the
-// buffer without bound. The header and each row are parsed under the
-// options' MaxNestingDepth and MaxBytesLiteralLength, and
-// [DatasetReader.Scan] binds a row under every limit but MaxMessageSize,
-// as Unmarshal would bind the body the row stands for.
+// buffer without bound, and the header and every row are parsed under
+// its MaxNestingDepth and MaxBytesLiteralLength, as [ParseOptions.Parse]
+// parses them. [DatasetReader.Scan] binds a row under every limit but
+// MaxMessageSize, as Unmarshal would bind the body the row stands for.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	lim := o.limits()
-	tr := &DatasetReader{src: r, maxRow: lim.maxMessageSize, lim: lim}
+	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}}
+	if t, ok := r.(*datasetTail); ok {
+		tr.base = t.at
+	}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
 	}
@@ -127,17 +131,30 @@ func (tr *DatasetReader) Directives() []Directive { return tr.dirs }
 // it earlier returns bytes the current reader still intends to
 // consume, which will desync the next reader. The returned io.Reader
 // is unbuffered; consumers needing bufio semantics should wrap it
-// themselves.
+// themselves. A reader built directly on it reports document positions,
+// as [Parse] does; one built on a wrapper counts from the Tail's start.
 func (tr *DatasetReader) Tail() io.Reader {
 	if len(tr.pending) == 0 {
-		return tr.src
+		return &datasetTail{Reader: tr.src, at: tr.base}
 	}
-	return io.MultiReader(bytes.NewReader(tr.pending), tr.src)
+	return &datasetTail{Reader: io.MultiReader(bytes.NewReader(tr.pending), tr.src), at: tr.base}
+}
+
+// datasetTail is the reader Tail returns. It carries the document
+// position its first byte sits at, so the next table's rows and errors
+// carry Parse's positions.
+type datasetTail struct {
+	io.Reader
+	at Position
 }
 
 // Next reads the next row. Returns [io.EOF] when the table's row
-// sequence is exhausted. After EOF (or any other error), all
-// subsequent calls return the same error.
+// sequence is exhausted: at the end of the input, or before the next
+// directive (read it via [DatasetReader.Tail]). Anything else that is
+// not a well-formed row, a row cut short at the end of the input
+// included, is an error, and it is the error [Parse] reports for the
+// same input, at the same document position. After EOF (or any other
+// error), all subsequent calls return the same error.
 //
 // The returned DatasetRow's Cells slice is freshly allocated and owned
 // by the caller; reading the next row does not invalidate it.
@@ -149,35 +166,89 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 		return DatasetRow{}, io.EOF
 	}
 	for {
-		start, end, found, err := findNextRow(tr.pending)
-		if err != nil {
-			tr.err = err
-			return DatasetRow{}, err
-		}
-		if found {
-			rowBytes := tr.pending[start : end+1]
-			p := newParser(rowBytes)
-			p.maxDepth = tr.lim.maxDepth
-			p.lex.maxBytesLiteral = tr.lim.maxBytesLiteral
-			row, _, perr := p.parseDatasetRow(len(tr.columns))
-			tr.pending = tr.pending[end+1:]
-			if perr != nil {
-				tr.err = perr
-				return DatasetRow{}, perr
+		kind, start, end := findNextRow(tr.pending)
+		switch kind {
+		case scanRow:
+			row, err := tr.parseRow(start, end+1)
+			tr.consume(end + 1)
+			if err != nil {
+				return tr.fail(err)
 			}
 			return *row, nil
+		case scanBad:
+			return tr.fail(tr.rowError(start, end+1))
+		case scanEnd:
+			tr.consume(start)
+			tr.finished = true
+			return DatasetRow{}, io.EOF
+		case scanNotRow:
+			return tr.fail(errorf(tr.posAt(start), errDatasetBesideEntries))
 		}
-		// Not found — either we need more bytes or the row sequence
-		// is over.
+		// scanNeedMore. At the end of the source, only whitespace and
+		// comments may remain; anything else is a row cut short.
 		if tr.srcEOF {
+			if start >= 0 {
+				return tr.fail(tr.rowError(start, len(tr.pending)))
+			}
+			tr.consume(len(tr.pending))
 			tr.finished = true
 			return DatasetRow{}, io.EOF
 		}
 		if perr := tr.pull(streamPullSize); perr != nil {
-			tr.err = perr
-			return DatasetRow{}, perr
+			return tr.fail(perr)
 		}
 	}
+}
+
+// fail records err as the reader's sticky error and returns it.
+func (tr *DatasetReader) fail(err error) (DatasetRow, error) {
+	tr.err = err
+	return DatasetRow{}, err
+}
+
+// posAt returns the document position of pending[i].
+func (tr *DatasetReader) posAt(i int) Position {
+	p := tr.base
+	for _, ch := range tr.pending[:i] {
+		if ch == '\n' {
+			p.Line++
+			p.Column = 1
+		} else {
+			p.Column++
+		}
+	}
+	p.Offset += i
+	return p
+}
+
+// consume drops the first n pending bytes, advancing base past them.
+func (tr *DatasetReader) consume(n int) {
+	tr.base = tr.posAt(n)
+	tr.pending = tr.pending[n:]
+}
+
+// parseRow parses pending[start:end] as one row with the parser Parse
+// uses, at its document position.
+func (tr *DatasetReader) parseRow(start, end int) (*DatasetRow, error) {
+	p := newParserAt(tr.pending[start:end], tr.posAt(start), tr.lim)
+	if p.current.Kind != LPAREN {
+		// Parse reports any token here, a lexical error included, as a
+		// top-level entry beside the dataset.
+		return nil, errorf(p.current.Pos, errDatasetBesideEntries)
+	}
+	row, _, err := p.parseDatasetRow(len(tr.columns))
+	return row, err
+}
+
+// rowError reports why the row in pending[start:end] is malformed. The
+// scan has already seen that it is (an unclosed row at the end of the
+// source, a '(' inside a row, a broken literal), so parsing it fails at
+// the same token Parse fails at.
+func (tr *DatasetReader) rowError(start, end int) error {
+	if _, err := tr.parseRow(start, end); err != nil {
+		return err
+	}
+	return errorf(tr.posAt(start), "malformed @dataset row")
 }
 
 // pull reads up to n bytes from src into pending. Sets srcEOF when
@@ -191,8 +262,8 @@ func (tr *DatasetReader) pull(n int) error {
 	read, err := tr.src.Read(buf)
 	if read > 0 {
 		tr.pending = append(tr.pending, buf[:read]...)
-		if len(tr.pending) > tr.maxRow {
-			return fmt.Errorf("dataset input holds %d bytes without a row boundary, MaxMessageSize=%d", len(tr.pending), tr.maxRow)
+		if len(tr.pending) > tr.lim.maxMessageSize {
+			return fmt.Errorf("dataset input holds %d bytes without a row boundary, MaxMessageSize=%d", len(tr.pending), tr.lim.maxMessageSize)
 		}
 	}
 	if errors.Is(err, io.EOF) {
@@ -209,6 +280,11 @@ func (tr *DatasetReader) readHeader() error {
 	for {
 		headerEnd, found, err := scanHeaderEnd(tr.pending)
 		if err != nil {
+			// The scan found a literal that can never close. Every token
+			// before it is complete, so Parse fails at or before it.
+			if _, perr := tr.parseHeader(tr.pending); perr != nil {
+				return perr
+			}
 			return err
 		}
 		if found {
@@ -217,8 +293,7 @@ func (tr *DatasetReader) readHeader() error {
 			// no rows yet, and validates everything we care about
 			// (leading-directive shape, @type / @dataset conflict,
 			// dotted columns, etc.).
-			po := ParseOptions{MaxNestingDepth: tr.lim.maxDepth, MaxBytesLiteralLength: tr.lim.maxBytesLiteral}
-			doc, perr := po.Parse(tr.pending[:headerEnd+1])
+			doc, perr := tr.parseHeader(tr.pending[:headerEnd+1])
 			if perr != nil {
 				return perr
 			}
@@ -231,10 +306,17 @@ func (tr *DatasetReader) readHeader() error {
 			tr.typ = ds.Type
 			tr.columns = ds.Columns
 			tr.dirs = doc.Directives
-			tr.pending = tr.pending[headerEnd+1:]
+			tr.consume(headerEnd + 1)
 			return nil
 		}
 		if tr.srcEOF {
+			// The input ended without a complete header. A malformed
+			// document (a header cut short, a literal that never
+			// closes) reports what Parse reports for it; only a
+			// well-formed one is a document without a dataset.
+			if _, perr := tr.parseHeader(tr.pending); perr != nil {
+				return perr
+			}
 			return ErrNoDataset
 		}
 		if len(tr.pending) >= defaultHeaderMaxBytes {
@@ -244,6 +326,12 @@ func (tr *DatasetReader) readHeader() error {
 			return err
 		}
 	}
+}
+
+// parseHeader parses input, which starts at the reader's base, as a
+// document, the way Parse does.
+func (tr *DatasetReader) parseHeader(input []byte) (*Document, error) {
+	return newParserAt(input, tr.base, tr.lim).parseDocument()
 }
 
 // scanHeaderEnd searches input for the first complete `@dataset TYPE (
@@ -349,9 +437,9 @@ func findNextChar(input []byte, startFrom int, ch byte) (int, bool, error) {
 // / comment starting at i, if i is positioned at the opener. Returns
 // i unchanged if the byte at i is not an opener. Returns -1 if the
 // construct is incomplete (caller should treat as "need more bytes").
-// Returns a non-nil error if the construct is malformed in a way that
-// can't be fixed by more bytes (e.g. unterminated single-line string
-// already containing a newline).
+// Returns a non-nil error, with the index of the offending byte, if the
+// construct is malformed in a way that can't be fixed by more bytes (a
+// bytes literal broken by a newline).
 func skipStringOrComment(input []byte, i int) (int, error) {
 	if i >= len(input) {
 		return i, nil
@@ -364,7 +452,9 @@ func skipStringOrComment(input []byte, i int) (int, error) {
 			return skipTripleString(input, i)
 		}
 		return skipSimpleString(input, i)
-	case ch == 'b' && i+1 < len(input) && input[i+1] == '"':
+	case ch == 'b' && i+1 < len(input) && input[i+1] == '"' && (i == 0 || !isIdentPart(input[i-1])):
+		// The lexer reads b" as a bytes literal only at a token start;
+		// inside an identifier (`Ab"`) the quote opens a string.
 		return skipBytesLiteral(input, i)
 	case ch == '#':
 		return skipLineComment(input, i+1), nil
@@ -388,9 +478,10 @@ func skipSimpleString(input []byte, i int) (int, error) {
 			j += 2
 		case '"':
 			return j + 1, nil
-		case '\n':
-			return 0, errors.New("pxf: unterminated string literal")
 		default:
+			// A raw LF does not end the scan: the strict lexer keeps it
+			// in the literal, and the parser, not this scan, decides
+			// whether a row is valid.
 			j++
 		}
 	}
@@ -415,7 +506,7 @@ func skipBytesLiteral(input []byte, i int) (int, error) {
 		case '"':
 			return j + 1, nil
 		case '\n':
-			return 0, errors.New("pxf: unterminated bytes literal")
+			return j, errors.New("pxf: unterminated bytes literal")
 		default:
 			j++
 		}
@@ -485,54 +576,111 @@ func findMatchingParenSafe(input []byte, openIdx int) (int, bool, error) {
 	return 0, false, nil
 }
 
+// rowScan classifies what findNextRow found at the head of the input.
+type rowScan int
+
+const (
+	// scanNeedMore: the input ends before the next row closes. start is
+	// where the unfinished construct begins, or -1 if only whitespace
+	// and comments were seen.
+	scanNeedMore rowScan = iota
+	// scanRow: input[start:end+1] is a complete `( ... )` row.
+	scanRow
+	// scanBad: the row at start can never close well (a '(' inside it,
+	// or a bytes literal broken across a line, at end). Parsing
+	// input[start:end+1] fails where Parse fails: every token in it is
+	// complete, so a cut at the buffer's end cannot change the error.
+	scanBad
+	// scanEnd: a directive starts at start; the row sequence is over.
+	scanEnd
+	// scanNotRow: start holds something that is neither a row nor a
+	// directive, which Parse rejects as a top-level entry.
+	scanNotRow
+)
+
 // findNextRow finds the next `( ... )` row in input, skipping leading
-// whitespace + comments. Returns (start, end, true, nil) if a complete
-// row was found (indices are inclusive of the `(` and `)`).
-//
-// Returns (0, 0, false, nil) when:
-//   - the input runs out mid-scan (caller should pull more bytes), OR
-//   - the next significant byte is not `(` (the row sequence is over).
-//
-// The caller distinguishes the two cases by checking whether src is
-// EOF.
-//
-// Returns (0, 0, false, err) on a malformed string / bytes / comment
-// inside the row.
-func findNextRow(input []byte) (int, int, bool, error) {
+// whitespace and comments. It is a byte-level scan, aware of strings,
+// bytes literals and comments; the row itself is parsed by the caller.
+func findNextRow(input []byte) (kind rowScan, start, end int) {
 	i := 0
-	// Skip whitespace, newlines, and comments.
 	for i < len(input) {
 		ch := input[i]
 		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
 			i++
 			continue
 		}
-		j, err := skipStringOrComment(input, i)
-		if err != nil {
-			return 0, 0, false, err
-		}
-		if j == -1 {
-			return 0, 0, false, nil // need more bytes
-		}
-		if j != i {
+		if ch == '#' || (ch == '/' && i+1 < len(input) && (input[i+1] == '/' || input[i+1] == '*')) {
+			j, _ := skipStringOrComment(input, i)
+			if j == -1 {
+				return scanNeedMore, i, 0
+			}
 			i = j
 			continue
+		}
+		if ch == '/' && i+1 == len(input) {
+			return scanNeedMore, i, 0 // could be a comment opener
 		}
 		break
 	}
 	if i >= len(input) {
-		return 0, 0, false, nil
+		return scanNeedMore, -1, 0
 	}
-	if input[i] != '(' {
-		// Not a row — end of stream.
-		return 0, 0, false, nil
+	switch input[i] {
+	case '(':
+	case '@':
+		// A directive name follows its '@' directly (lexDirective). A
+		// bare '@' is no directive; Parse rejects it as a top-level
+		// entry.
+		if i+1 == len(input) {
+			return scanNeedMore, i, 0
+		}
+		if !isIdentPart(input[i+1]) {
+			return scanNotRow, i, 0
+		}
+		return scanEnd, i, 0
+	default:
+		return scanNotRow, i, 0
 	}
-	end, ok, err := findMatchingParenSafe(input, i)
-	if err != nil {
-		return 0, 0, false, err
+	for j := i + 1; j < len(input); {
+		k, err := skipStringOrComment(input, j)
+		if err != nil {
+			return scanBad, i, k
+		}
+		if k == -1 {
+			return scanNeedMore, i, 0
+		}
+		if k != j {
+			j = k
+			continue
+		}
+		switch input[j] {
+		case ')':
+			return scanRow, i, j
+		case '(':
+			// No PXF value holds a '(' outside a string, list and block
+			// cells included, so this row is malformed however the input
+			// continues. The
+			// '(' may sit inside a malformed token, though (`0000-(0`
+			// lexes as one bad timestamp), so the error is only Parse's
+			// once that token is complete: end at the byte before the
+			// next one that ends every token.
+			// (The set is lexTimestamp's, the longest-running token.)
+			for k := j + 1; k < len(input); k++ {
+				switch input[k] {
+				case ' ', '\t', '\r', '\n', ',', ')', ']', '}', '#':
+					return scanBad, i, k - 1
+				case '/':
+					if k+1 == len(input) {
+						return scanNeedMore, i, 0
+					}
+					if input[k+1] == '/' || input[k+1] == '*' {
+						return scanBad, i, k - 1
+					}
+				}
+			}
+			return scanNeedMore, i, 0
+		}
+		j++
 	}
-	if !ok {
-		return 0, 0, false, nil
-	}
-	return i, end, true, nil
+	return scanNeedMore, i, 0
 }

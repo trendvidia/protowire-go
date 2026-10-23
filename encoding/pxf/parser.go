@@ -33,7 +33,17 @@ type parser struct {
 }
 
 func newParser(input []byte) *parser {
-	p := &parser{lex: newLexer(input), maxDepth: MaxNestingDepth}
+	return newParserAt(input, Position{Line: 1, Column: 1}, defaultLimits)
+}
+
+// newParserAt is newParser under lim, for input that starts at position
+// at of a larger document, so every position it reports is
+// document-relative.
+func newParserAt(input []byte, at Position, lim limits) *parser {
+	lex := newLexer(input)
+	lex.line, lex.col, lex.base = at.Line, at.Column, at.Offset
+	lex.maxBytesLiteral = lim.maxBytesLiteral
+	p := &parser{lex: lex, maxDepth: lim.maxDepth}
 	p.advance()
 	return p
 }
@@ -391,8 +401,7 @@ directives:
 			}
 		}
 		if p.current.Kind != EOF {
-			if err := p.soft(errorf(p.current.Pos,
-				"@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)")); err != nil {
+			if err := p.soft(errorf(p.current.Pos, errDatasetBesideEntries)); err != nil {
 				return nil, err
 			}
 		}
@@ -415,6 +424,11 @@ directives:
 	}
 	return doc, nil
 }
+
+// errDatasetBesideEntries is the error for anything after a dataset's
+// rows that is neither a row nor a directive. The streaming reader
+// reports the same text.
+const errDatasetBesideEntries = "@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)"
 
 // parseDatasetDirective reads `@dataset <type> ( col1, col2, ... ) row*`.
 // AT_DATASET is current on entry. Returns the table plus the byte offset
@@ -601,7 +615,7 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 		// stripped and (for triple-quoted) leading-LF / dedent applied.
 		pd.Shape = ProtoSource
 		pd.Body = []byte(p.current.Value)
-		endOffset := p.lex.pos
+		endOffset := p.lex.base + p.lex.pos
 		p.advance()
 		return pd, endOffset, nil
 
@@ -618,7 +632,7 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 			}
 		}
 		pd.Body = decoded
-		endOffset := p.lex.pos
+		endOffset := p.lex.base + p.lex.pos
 		p.advance()
 		return pd, endOffset, nil
 
@@ -636,7 +650,7 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 // to that token. Used by parseProtoDirective for anonymous/named
 // @proto bodies, whose interior is protobuf source rather than PXF.
 func (p *parser) captureBraceBody(label string) ([]byte, int, error) {
-	open := p.current.Pos.Offset
+	open := p.current.Pos.Offset - p.lex.base
 	close := findMatchingBrace(p.lex.input, open)
 	if close < 0 {
 		return nil, 0, errorf(p.current.Pos, "%s: unmatched '{'", label)
@@ -648,7 +662,7 @@ func (p *parser) captureBraceBody(label string) ([]byte, int, error) {
 		p.lex.advance()
 	}
 	p.advance() // prime current token past `}`
-	return body, close + 1, nil
+	return body, p.lex.base + close + 1, nil
 }
 
 // containsDot reports whether s has a '.' rune. Inlined here so we
@@ -719,7 +733,7 @@ prefixesDone:
 	// validated (string / brace / comment well-formedness); then slice
 	// the raw bytes between { and } from the input for Body.
 	if p.current.Kind == LBRACE {
-		open := p.current.Pos.Offset
+		open := p.current.Pos.Offset - p.lex.base
 		if _, err := p.parseBlockVal(0); err != nil {
 			return nil, 0, err
 		}
@@ -730,7 +744,7 @@ prefixesDone:
 			return nil, 0, errorf(d.Pos, "directive @%s: unmatched '{'", d.Name)
 		}
 		d.Body = p.lex.input[open+1 : close]
-		endOffset = close + 1
+		endOffset = p.lex.base + close + 1
 	}
 	return d, endOffset, nil
 }

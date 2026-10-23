@@ -35,7 +35,63 @@ format changes.
   decoder already did, instead of `expected value, got invalid duration:
   5seconds`. The errors `@dataset cells cannot contain list/block values
   in v1` are gone; dotted column paths are still rejected
-  (protowire#342).
+  (protowire#342). `AppendDatasetRow` still refuses list, map and
+  block-valued columns; writing them is
+  [#155](https://github.com/trendvidia/protowire-go/issues/155).
+
+- **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset`
+  tables** ([#142]). Callers producing datasets, such as an append-only
+  log writing one row per event, no longer assemble rows from
+  `FormatValue` per cell. Cells are rendered by the encoder `Marshal`
+  uses, so a row reads back through `Scan` and `BindRow` as the message
+  it came from (a seeded round trip over every cell-capable kind, and a
+  fuzz target). The writers refuse what a v1 cell cannot hold: an empty,
+  dotted, duplicate or unknown column, a repeated, map or block-valued
+  field, a `pxf.Secret` with a hint or fingerprint, and a column list
+  that omits a `(pxf.required)` field. Where an empty cell would not
+  read back as the unset field, the row says so explicitly: an unset
+  field with `(pxf.default)` is `null` if it is message-typed (a
+  wrapper, a Timestamp) and its zero value if it is a proto3 scalar. An
+  unset `optional` or oneof scalar with a default is an empty cell and
+  reads back as its default: the draft rejects `null` on a scalar field
+  ([protowire#339](https://github.com/trendvidia/protowire/issues/339)),
+  and an absent annotated field means its default. An unset
+  `(pxf.required)` field with presence is an error. A defaulted oneof
+  member is left empty only when the set member of its oneof is among
+  the columns. A message-typed field in the message's `_null` mask is
+  `null`, as `Marshal` writes it; a scalar there is not, since the
+  draft rejects `null` on a scalar. A schema that `ValidateDescriptor`
+  refuses is refused. A table may export a subset of a message's
+  fields, but never leave out a required one. A row depends only on its
+  message and the columns, so appending to a file never rewrites
+  earlier bytes.
+
+[#142]: https://github.com/trendvidia/protowire-go/issues/142
+### Fixed
+
+- **`DatasetReader.Next` no longer ends quietly at a malformed or
+  truncated row** ([#141]). A row cut short (a crash mid-append), a `(`
+  inside a row, or non-row content between rows used to end the table
+  with `io.EOF`, losing every row after it without an error; `Parse`
+  rejected the same input. `Next` now returns the error `Parse`
+  returns, at the same document position, and `io.EOF` only at the end
+  of the input or before the next directive. Rows and errors carry
+  document positions (they were relative to the row), so the stream's
+  rows equal `Parse`'s as the draft requires (§3.4.4). The row scan no
+  longer rejects a raw LF inside a quoted string on its own: the parser
+  decides, as it does for `Parse`. `NewDatasetReader` on a header cut
+  short, or on one holding a bytes literal broken across a line, returns
+  `Parse`'s error instead of `ErrNoDataset` or a positionless scan
+  error. A bare `@` after the rows is an error, not the end of the
+  table. A reader chained on `Tail()` reports the next table's positions
+  in the whole document, not from the start of the `Tail`.
+- **`UnmarshalOptions.NewDatasetReader` applies the options'
+  `MaxBytesLiteralLength` and `MaxNestingDepth`.** Only
+  `MaxMessageSize` reached the stream; the header and the rows were
+  parsed under the package constants, so a bytes literal over the
+  caller's limit was accepted where `ParseOptions.Parse` rejects it.
+
+[#141]: https://github.com/trendvidia/protowire-go/issues/141
 
 ### Changed
 
