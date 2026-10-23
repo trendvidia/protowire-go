@@ -13,12 +13,11 @@ package pxf
 // on demand and yields one DatasetRow per Next() call, with working-set
 // memory bounded by the size of the largest single row.
 //
-// Per the spec: a streaming API MUST enforce per-row arity and the v1
-// cell-grammar rule on each row as it is consumed (not deferred to
-// end-of-input), and MUST yield rows in source order. Both invariants
-// fall out of the implementation here: the row-boundary scanner
-// produces one (...) slice at a time, and the same parseDatasetRow used
-// by Parse() decodes it.
+// Per the spec: a streaming API MUST enforce per-row arity on each row
+// as it is consumed (not deferred to end-of-input), and MUST yield rows
+// in source order. Both invariants fall out of the implementation here:
+// the row-boundary scanner produces one (...) slice at a time, and the
+// same parseDatasetRow used by Parse() decodes it.
 
 import (
 	"bytes"
@@ -91,7 +90,8 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // MaxMessageSize, so a stream that never ends a row cannot grow the
 // buffer without bound, and the header and every row are parsed under
 // its MaxNestingDepth and MaxBytesLiteralLength, as [ParseOptions.Parse]
-// parses them.
+// parses them. [DatasetReader.Scan] binds a row under every limit but
+// MaxMessageSize, as Unmarshal would bind the body the row stands for.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}}
 	if t, ok := r.(*datasetTail); ok {
@@ -657,8 +657,9 @@ func findNextRow(input []byte) (kind rowScan, start, end int) {
 		case ')':
 			return scanRow, i, j
 		case '(':
-			// No well-formed cell holds a '(' (v1 cells are scalars), so
-			// this row is malformed however the input continues. The
+			// No PXF value holds a '(' outside a string, list and block
+			// cells included, so this row is malformed however the input
+			// continues. The
 			// '(' may sit inside a malformed token, though (`0000-(0`
 			// lexes as one bad timestamp), so the error is only Parse's
 			// once that token is complete: end at the byte before the

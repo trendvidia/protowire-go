@@ -138,7 +138,7 @@ tr1, _ := pxf.NewDatasetReader(src)
 tr2, err := pxf.NewDatasetReader(tr1.Tail())
 ```
 
-Per-row arity and v1 cell-grammar errors (`[...]` / `{...}` cells, dotted columns) surface as the offending row is consumed, not deferred to end-of-input — see the [Streaming consumption](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) note in draft §3.4.4.
+A cell may hold any value, lists (`[...]`) and blocks (`{...}`) included; it binds as `<column> = <value>` would in a body. Per-row arity and cell errors surface as the offending row is consumed, not deferred to end-of-input; a dotted column (not yet supported) is a header error, returned by `NewDatasetReader` — see the [Streaming consumption](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) note in draft §3.4.4.
 
 ### `Scan` and `BindRow`: per-row binding
 

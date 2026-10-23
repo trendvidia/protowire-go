@@ -41,7 +41,8 @@ func TestDatasetReader_AgreesWithParse(t *testing.T) {
 		{"string between rows", head + "\"s\"\n(90, 120)\n", true},
 		{"block value between rows", head + "{ }\n", true},
 		{"unterminated block comment at end", head + "/* never closed", true},
-		{"list cell", head + "([1], 2)\n", true},
+		{"unclosed list cell", head + "([1, 2)\n(3, 4)\n", true},
+		{"unclosed block cell", head + "({ a = 1, 2)\n", true},
 		{"nested paren in a cell", head + "((1), 2)\n", true},
 		{"cut bytes literal", head + "(b\"QQ\nQQ\", 1)\n", true},
 		{"bare @ at end", head + "@", true},
@@ -57,6 +58,10 @@ func TestDatasetReader_AgreesWithParse(t *testing.T) {
 		{"empty and null cells", head + "(, null)\n(1,)\n", false},
 		{"strings with parens and commas", "@dataset T (a, b)\n(\"(,)\", \"#\")\n", false},
 		{"multi-line triple string", "@dataset T (a, b)\n(\"\"\"\nx)\n\"\"\", 1)\n", false},
+		// Value cells (protowire#341): a cell may hold a list or a block.
+		{"list cell", head + "([1], 2)\n", false},
+		{"block and map cells", "@dataset T (a, b)\n({ name = \"x)\" n = [1, 2] }, { \"k,\": \"v)\" })\n(, [])\n", false},
+		{"multi-line block cell", "@dataset T (a, b)\n({\n  name = \"x\"  # c)\n}, 1)\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

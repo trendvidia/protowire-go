@@ -13,6 +13,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
@@ -175,34 +176,27 @@ func TestTableReader_ErrorsAreSticky(t *testing.T) {
 	assert.Equal(t, first, err)
 }
 
-func TestTableReader_RejectsListCellMidStream(t *testing.T) {
+// List and block cells stream like any other cell, and the reader frames
+// the rows after them (protowire#341).
+func TestTableReader_ListAndBlockCellsMidStream(t *testing.T) {
 	in := `@dataset T (a, b)
 ("ok", 1)
-("bad", [1, 2])`
+("list", [1, 2])
+("block", { x = 1 })
+("after", 4)`
 	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
-	_, err = tr.Next()
-	require.NoError(t, err)
-
-	_, err = tr.Next()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "list values")
-}
-
-func TestTableReader_RejectsBlockCellMidStream(t *testing.T) {
-	in := `@dataset T (a, b)
-("ok", 1)
-("bad", { x = 1 })`
-	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
-	require.NoError(t, err)
-
-	_, err = tr.Next()
-	require.NoError(t, err)
-
-	_, err = tr.Next()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "block values")
+	var kinds []string
+	for {
+		row, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		kinds = append(kinds, fmt.Sprintf("%T", row.Cells[1]))
+	}
+	assert.Equal(t, []string{"*pxf.IntVal", "*pxf.ListVal", "*pxf.BlockVal", "*pxf.IntVal"}, kinds)
 }
 
 // --- Strings / comments inside cells don't trip the row-boundary scanner ---
@@ -448,4 +442,41 @@ func TestTableReader_BytesBufferSource(t *testing.T) {
 		count++
 	}
 	assert.Equal(t, 2, count)
+}
+
+// A reader built from UnmarshalOptions applies the options' bytes-literal
+// and digit limits, as UnmarshalFull and Unmarshal do: the bytes limit to
+// the header and each row, the digit limit when Scan binds. Each limit
+// gets an accept row at the bound and a reject row one past it.
+func TestTableReader_HonoursItsLiteralLimits(t *testing.T) {
+	bytesOpts := pxf.UnmarshalOptions{MaxBytesLiteralLength: 6}
+	next := func(in string) error {
+		tr, err := bytesOpts.NewDatasetReader(strings.NewReader(in))
+		if err != nil {
+			return err
+		}
+		_, err = tr.Next()
+		return err
+	}
+	// b"AAAAAAAA" decodes to 6 bytes, b"AAAAAAAAAAA=" to 8.
+	assert.NoError(t, next("@dataset T (b)\n(b\"AAAAAAAA\")\n"), "6 bytes is within the limit")
+	err := next("@dataset T (b)\n(b\"AAAAAAAAAAA=\")\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxBytesLiteralLength=6", "row")
+	assert.NoError(t, next("@x { b = b\"AAAAAAAA\" }\n@dataset T (b)\n(1)\n"), "6 bytes is within the limit")
+	err = next("@x { b = b\"AAAAAAAAAAA=\" }\n@dataset T (b)\n(1)\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxBytesLiteralLength=6", "header")
+
+	bigNum := bigNumDesc(t, "BigNumDemo")
+	scan := func(lit string) error {
+		in := "@dataset X (big_int_field)\n(" + lit + ")\n"
+		tr, err := pxf.UnmarshalOptions{MaxNumericLiteralDigits: 3}.NewDatasetReader(strings.NewReader(in))
+		require.NoError(t, err)
+		return tr.Scan(dynamicpb.NewMessage(bigNum))
+	}
+	assert.NoError(t, scan("123"), "3 digits is within MaxNumericLiteralDigits=3")
+	err = scan("1234")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxNumericLiteralDigits=3")
 }

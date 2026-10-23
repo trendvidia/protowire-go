@@ -91,10 +91,6 @@ func TestUnmarshalFull_Table_ErrorPaths(t *testing.T) {
 ( "x", "y", "z" )`, "3 cells, expected 2"},
 		{"row_unterminated", `@dataset T ( a )
 ( "x"`, "expected ',' or ')'"},
-		{"list_cell", `@dataset T ( a, b )
-( "x", ["y", "z"] )`, "list values"},
-		{"block_cell", `@dataset T ( a, b )
-( "x", { y = 1 } )`, "block values"},
 		{"at_type_then_at_table", `@type X
 @dataset T ( a )
 ( "x" )`, "@type"},

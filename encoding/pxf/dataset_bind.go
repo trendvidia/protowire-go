@@ -72,7 +72,15 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 	if err != nil {
 		return err
 	}
-	return BindRow(msg, tr.columns, row)
+	// The reader's limits, not MaxMessageSize: the row's bytes were
+	// capped as they were read, and the synthetic body may format wider.
+	o := UnmarshalOptions{
+		MaxNestingDepth:         tr.lim.maxDepth,
+		MaxNumericLiteralDigits: tr.lim.maxDigits,
+		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
+		MaxRepeatedCount:        tr.lim.maxRepeated,
+	}
+	return o.bindRow(msg, tr.columns, row)
 }
 
 // BindRow binds row.Cells to the fields of msg by column name. The
@@ -83,6 +91,12 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 // Result.Datasets()[i].Rows can reuse the same logic. Same cell-state
 // semantics as [DatasetReader.Scan].
 func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
+	return UnmarshalOptions{}.bindRow(msg, columns, row)
+}
+
+// bindRow is [BindRow] under the options' limits. The bind-time schema
+// checks run unless the caller set SkipValidate.
+func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	if len(columns) != len(row.Cells) {
 		return fmt.Errorf("pxf: BindRow: %d columns vs %d cells", len(columns), len(row.Cells))
 	}
@@ -96,7 +110,7 @@ func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	// well-defined (two spellings of one default that disagree,
 	// (pxf.required) on a oneof member).
 	if !rowNeedsPresence(msg.ProtoReflect().Descriptor()) {
-		return atRow(UnmarshalOptions{}.Unmarshal(body, msg), row.Pos)
+		return atRow(o.Unmarshal(body, msg), row.Pos)
 	}
 	// The full pipeline's post-decode pass gives an empty cell (no
 	// entry) the field's (pxf.default) and rejects it for
@@ -104,7 +118,7 @@ func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	// default off (draft §3.4.4); it also records a null cell in the
 	// row type's _null mask. It costs a presence record per row, so only
 	// a row type that needs it pays for it.
-	_, err = UnmarshalOptions{}.UnmarshalFull(body, msg)
+	_, err = o.UnmarshalFull(body, msg)
 	return atRow(err, row.Pos)
 }
 
@@ -131,7 +145,9 @@ var (
 
 // rowNeedsPresence reports whether a row of type desc must go through the
 // full pipeline: a field carries (pxf.default) or (pxf.required), or desc
-// declares a _null mask.
+// declares a _null mask. A block cell fills a sub-message, and the
+// post-decode pass recurses into present singular sub-messages, so their
+// fields count too.
 func rowNeedsPresence(desc protoreflect.MessageDescriptor) bool {
 	cacheable := reflect.TypeOf(desc).Comparable()
 	if cacheable {
@@ -139,7 +155,7 @@ func rowNeedsPresence(desc protoreflect.MessageDescriptor) bool {
 			return v.(bool)
 		}
 	}
-	need := findNullMaskField(desc) != nil || hasDefaultOrRequired(desc)
+	need := findNullMaskField(desc) != nil || hasDefaultOrRequired(desc, map[protoreflect.FullName]bool{})
 	if cacheable && rowPresenceCount.Load() < maxCachedDescriptors {
 		if _, loaded := rowPresenceCache.LoadOrStore(desc, need); !loaded {
 			rowPresenceCount.Add(1)
@@ -148,14 +164,25 @@ func rowNeedsPresence(desc protoreflect.MessageDescriptor) bool {
 	return need
 }
 
-// hasDefaultOrRequired reports whether a field of desc carries
-// (pxf.default) or (pxf.required). Only desc's own fields matter for a
-// row: a cell never holds a message that could carry them deeper down
-// (v1 cells are literals; the literal-shaped messages declare neither).
-func hasDefaultOrRequired(desc protoreflect.MessageDescriptor) bool {
+// hasDefaultOrRequired reports whether a field of desc, or of a message
+// reachable from desc through singular message fields, carries
+// (pxf.default) or (pxf.required): the fields postDecode visits. A block
+// cell (protowire#341) fills such a sub-message. Repeated and map fields
+// are not visited, as postDecode does not visit them. seen guards
+// recursive types.
+func hasDefaultOrRequired(desc protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) bool {
+	if seen[desc.FullName()] {
+		return false
+	}
+	seen[desc.FullName()] = true
 	fields := desc.Fields()
 	for i := range fields.Len() {
-		if o := pxfFieldOptions(fields.Get(i)); o.defSet || o.required {
+		fd := fields.Get(i)
+		if o := pxfFieldOptions(fd); o.defSet || o.required {
+			return true
+		}
+		if (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) &&
+			!fd.IsList() && !fd.IsMap() && hasDefaultOrRequired(fd.Message(), seen) {
 			return true
 		}
 	}
@@ -181,11 +208,9 @@ func rowToPXFBody(columns []string, row DatasetRow) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// writeCellValue formats a single cell value as PXF text. v1 @dataset
-// cells are scalar-shaped (no list, no block), so we only handle the
-// leaf-value variants — list and block AST nodes are unreachable here
-// because parseDatasetRow / consumeRowCell rejects them before the
-// streaming reader hands them to BindRow.
+// writeCellValue formats a single cell value as PXF text. A list or block
+// cell is written with the package formatter, so the synthetic body binds
+// it exactly as `<column> = <value>` would bind in a document.
 func writeCellValue(buf *bytes.Buffer, v Value) error {
 	switch v := v.(type) {
 	case *StringVal:
@@ -212,8 +237,10 @@ func writeCellValue(buf *bytes.Buffer, v Value) error {
 		buf.WriteString(v.Raw)
 	case *DurationVal:
 		buf.WriteString(v.Raw)
+	case *ListVal, *BlockVal:
+		buf.Write(FormatValue(v))
 	default:
-		return fmt.Errorf("pxf: BindRow: unexpected cell value type %T (v1 @dataset cells are scalar-shaped)", v)
+		return fmt.Errorf("pxf: BindRow: unexpected cell value type %T", v)
 	}
 	return nil
 }

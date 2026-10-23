@@ -58,24 +58,36 @@ func TestUnmarshalFull_AtTypeWithoutIdentifier_Rejects(t *testing.T) {
 	assert.Contains(t, err.Error(), "expected type name after @type")
 }
 
-// --- @dataset row's FIRST cell errors ---
+// --- @dataset row's FIRST cell ---
 //
-// table_test.go's TestParseTable_ListCell_Rejects / _BlockCell_Rejects
-// trip the SECOND-cell error path in parseDatasetRow (because the row
-// starts with "AAPL"). The first-cell-error branch — the `if err != nil`
-// immediately after parseRowCell on line 217 of parser.go — needs a
-// row that starts with a forbidden value.
+// parseDatasetRow reads the first cell outside its comma loop, so the
+// first cell has a branch of its own: these put a list, a block and a
+// malformed value there.
 
-func TestParseTable_FirstCellList_Rejects(t *testing.T) {
-	_, err := pxf.Parse([]byte(`@dataset T (a, b)
+// A list or block in a row's first cell is a value cell (protowire#341).
+func TestParseTable_FirstCellList(t *testing.T) {
+	doc, err := pxf.Parse([]byte(`@dataset T (a, b)
 ( [1, 2], "x" )`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "list values")
+	require.NoError(t, err)
+	cells := doc.Datasets[0].Rows[0].Cells
+	require.IsType(t, &pxf.ListVal{}, cells[0])
+	assert.Len(t, cells[0].(*pxf.ListVal).Elements, 2)
+	assert.Equal(t, "x", cells[1].(*pxf.StringVal).Value)
 }
 
-func TestParseTable_FirstCellBlock_Rejects(t *testing.T) {
-	_, err := pxf.Parse([]byte(`@dataset T (a, b)
+func TestParseTable_FirstCellBlock(t *testing.T) {
+	doc, err := pxf.Parse([]byte(`@dataset T (a, b)
 ( { x = 1 }, "x" )`))
+	require.NoError(t, err)
+	cells := doc.Datasets[0].Rows[0].Cells
+	require.IsType(t, &pxf.BlockVal{}, cells[0])
+	assert.Len(t, cells[0].(*pxf.BlockVal).Entries, 1)
+	assert.Equal(t, "x", cells[1].(*pxf.StringVal).Value)
+}
+
+func TestParseTable_FirstCellError_Rejects(t *testing.T) {
+	_, err := pxf.Parse([]byte(`@dataset T (a, b)
+( }, "x" )`))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "block values")
+	assert.Contains(t, err.Error(), "2:3: expected value")
 }

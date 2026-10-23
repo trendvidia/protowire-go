@@ -34,6 +34,32 @@ format changes.
 [#145]: https://github.com/trendvidia/protowire-go/issues/145
 ### Added
 
+- **`@dataset` value cells: a cell may hold a list or a block**
+  (trendvidia/protowire#341, draft `-01` §3.4.4 at protowire v1.13). A
+  non-empty cell in column `c` now means exactly what `c = <value>` means
+  in a body of the row type. So a row can carry a sub-message
+  (`{ name = "x" }`), a repeated field (`["a", "b"]`, `[{ ... }]`) or a
+  map (`{ "k": "v" }`). `Parse`, `UnmarshalFull`'s direct decoder and
+  `DatasetReader` accept them. `BindRow` and `DatasetReader.Scan` bind
+  them through the body decoder, so `{}` is a present empty message, an
+  empty cell is still absent, and a list on a scalar column is the body's
+  error. In the direct decoder, every cell is parsed by the AST parser
+  running on the decoder's own lexer, and it counts toward
+  `MaxNestingDepth` like any value. A `DatasetReader` built with
+  `UnmarshalOptions.NewDatasetReader` parses each row under the options'
+  `MaxNestingDepth`, and `Scan` binds under its `MaxNestingDepth` and
+  `MaxRepeatedCount`. `ParseTolerant` closes an unclosed list or block
+  cell at its row's `)`, so the rows after it still parse. Comments
+  before a block cell are no longer attached to the cell's first entry.
+  `Parse` reports a token the lexer rejects at a value position with the
+  lexer's diagnostic alone (`invalid duration: 5seconds`), as the direct
+  decoder already did, instead of `expected value, got invalid duration:
+  5seconds`. The errors `@dataset cells cannot contain list/block values
+  in v1` are gone; dotted column paths are still rejected
+  (protowire#342). `AppendDatasetRow` still refuses list, map and
+  block-valued columns; writing them is
+  [#155](https://github.com/trendvidia/protowire-go/issues/155).
+
 - **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset`
   tables** ([#142]). Callers producing datasets, such as an append-only
   log writing one row per event, no longer assemble rows from
@@ -97,6 +123,16 @@ format changes.
   fork version and one parent version. The adapter is unchanged and
   nothing in v1.8.1 reaches it; `go.sum` stays at 26 modules. Tagged
   `check/protovalidate/v1.4.3` at that commit.
+
+### Fixed
+
+- **`DatasetReader` applies its options' bytes-literal and digit
+  limits.** A reader built with `UnmarshalOptions.NewDatasetReader`
+  parsed the header and each row under the package
+  `MaxBytesLiteralLength`, and `Scan` bound under the package
+  `MaxNumericLiteralDigits`, so a stream accepted a `b"…"` literal or a
+  big-number cell that `UnmarshalFull` and `Unmarshal` reject under the
+  same options. Both now apply the caller's limits.
 
 ## [1.8.1] — 2026-09-10
 
