@@ -30,9 +30,15 @@ format changes.
   reads back as its default: the draft rejects `null` on a scalar field
   ([protowire#339](https://github.com/trendvidia/protowire/issues/339)),
   and an absent annotated field means its default. An unset
-  `(pxf.required)` field with presence is an error. A table may export
-  a subset of a message's fields, but never leave out a required one. A row depends only on its message and the columns, so
-  appending to a file never rewrites earlier bytes.
+  `(pxf.required)` field with presence is an error. A defaulted oneof
+  member is left empty only when the set member of its oneof is among
+  the columns. A message-typed field in the message's `_null` mask is
+  `null`, as `Marshal` writes it; a scalar there is not, since the
+  draft rejects `null` on a scalar. A schema that `ValidateDescriptor`
+  refuses is refused. A table may export a subset of a message's
+  fields, but never leave out a required one. A row depends only on its
+  message and the columns, so appending to a file never rewrites
+  earlier bytes.
 
 [#142]: https://github.com/trendvidia/protowire-go/issues/142
 

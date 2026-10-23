@@ -84,8 +84,9 @@ message Row {
     bool c_b = 52;
   }
 
-  // A scalar member with a default: unset with no member set, no cell
-  // holds it (null is rejected on a scalar).
+  // A scalar member with a default: unset with no member set, it is an
+  // empty cell (null is rejected on a scalar) and reads back as the
+  // default.
   oneof other {
     string o_s = 53 [(pxf.default) = "other"];
     int32 o_i = 54;
@@ -151,24 +152,32 @@ var defaultedColumns = []string{"d_s", "d_i32", "d_opt", "d_w", "d_ts", "d_color
 // AppendDatasetRow): d_opt, an optional scalar with a default, and a
 // member of oneof "other", whose defaulted member is a scalar. Written
 // unset they are empty cells and read back as their defaults, so a
-// round trip expecting equal messages sets them. Only fields among cols
-// are touched.
+// round trip expecting equal messages sets them. "other" counts as
+// unset when its set member is not among cols, since that member is
+// not written. Only fields among cols are touched.
 func makeWritable(m *dynamicpb.Message, cols []string) {
 	desc := m.Descriptor()
-	in := func(c string) bool {
-		for _, x := range cols {
-			if x == c {
-				return true
-			}
-		}
-		return false
-	}
-	if fd := desc.Fields().ByName("d_opt"); in("d_opt") && !m.Has(fd) {
+	if fd := desc.Fields().ByName("d_opt"); slices.Contains(cols, "d_opt") && !m.Has(fd) {
 		m.Set(fd, protoreflect.ValueOfInt32(0))
 	}
-	if in("o_s") && m.WhichOneof(desc.Oneofs().ByName("other")) == nil {
+	set := m.WhichOneof(desc.Oneofs().ByName("other"))
+	if slices.Contains(cols, "o_s") && (set == nil || !slices.Contains(cols, string(set.Name()))) {
 		m.Set(desc.Fields().ByName("o_s"), protoreflect.ValueOfString(""))
 	}
+}
+
+// onlyColumns is a copy of m with only the fields among cols: what a
+// row of those columns reads back as.
+func onlyColumns(m *dynamicpb.Message, cols []string) *dynamicpb.Message {
+	desc := m.Descriptor()
+	out := dynamicpb.NewMessage(desc)
+	for _, c := range cols {
+		fd := desc.Fields().ByName(protoreflect.Name(c))
+		if m.Has(fd) {
+			out.Set(fd, m.Get(fd))
+		}
+	}
+	return out
 }
 
 // randomRow fills each column of a dsw.v1.Row at random, leaving about
@@ -266,8 +275,8 @@ func writeTable(t testing.TB, desc protoreflect.MessageDescriptor, columns []str
 }
 
 // assertTableReadsBack reads table both ways, streaming (Scan) and
-// materializing (Parse + BindRow), and requires each row to equal the
-// message it was written from.
+// materializing (Parse + BindRow), and requires each row to equal msgs,
+// in order.
 func assertTableReadsBack(t testing.TB, desc protoreflect.MessageDescriptor, table []byte, msgs []*dynamicpb.Message) {
 	t.Helper()
 	tr, err := pxf.NewDatasetReader(bytes.NewReader(table))
@@ -312,7 +321,11 @@ func TestDatasetWrite_RoundTrip(t *testing.T) {
 }
 
 // FuzzDatasetWriteRoundTrip is the round trip on a fuzzer-chosen seed
-// and column subset.
+// and column subset. The whole message is written, as a caller exporting
+// some of its fields would write it, and each row must read back as the
+// message's column fields alone. A field outside the columns can still
+// shape a cell: a set oneof member that is not a column must not keep a
+// column member's default off.
 func FuzzDatasetWriteRoundTrip(f *testing.F) {
 	f.Add(uint64(1), uint64(0))
 	f.Add(uint64(142), uint64(math.MaxUint64))
@@ -326,21 +339,21 @@ func FuzzDatasetWriteRoundTrip(f *testing.F) {
 		}
 		r := rand.New(rand.NewPCG(seed, 7))
 		msgs := make([]*dynamicpb.Message, 8)
+		want := make([]*dynamicpb.Message, len(msgs))
 		for i := range msgs {
-			full := randomRow(t, r, desc)
-			// Only the columns are written; keep the rest unset so the
-			// message can come back equal.
-			m := dynamicpb.NewMessage(desc)
-			for _, c := range cols {
-				fd := desc.Fields().ByName(protoreflect.Name(c))
-				if full.Has(fd) {
-					m.Set(fd, full.Get(fd))
+			msgs[i] = randomRow(t, r, desc)
+			for _, c := range []string{"c_i", "c_b", "o_i"} {
+				// Set a non-defaulted oneof member now and then, so the
+				// ones left out of cols get exercised.
+				if r.IntN(4) == 0 {
+					fd := desc.Fields().ByName(protoreflect.Name(c))
+					msgs[i].Set(fd, randomScalar(r, fd))
 				}
 			}
-			makeWritable(m, cols)
-			msgs[i] = m
+			makeWritable(msgs[i], cols)
+			want[i] = onlyColumns(msgs[i], cols)
 		}
-		assertTableReadsBack(t, desc, writeTable(t, desc, cols, msgs), msgs)
+		assertTableReadsBack(t, desc, writeTable(t, desc, cols, msgs), want)
 	})
 }
 
@@ -418,6 +431,89 @@ func TestDatasetWrite_OneofDefaults(t *testing.T) {
 	row3, err := pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), cols)
 	require.NoError(t, err)
 	assert.Equal(t, "(null, , , , )\n", string(row3))
+
+	// A member set, but not among the columns: it is not written, so it
+	// cannot keep the default off. The wrapper member is null, as if no
+	// member were set; the scalar member is empty, as in row3.
+	m4 := dynamicpb.NewMessage(desc)
+	m4.Set(f.ByName("c_i"), protoreflect.ValueOfInt32(5))
+	m4.Set(f.ByName("o_i"), protoreflect.ValueOfInt32(6))
+	sub := []string{"c_w", "o_s"}
+	row4, err := pxf.AppendDatasetRow(nil, m4, sub)
+	require.NoError(t, err)
+	assert.Equal(t, "(null, )\n", string(row4))
+	h4, err := pxf.AppendDatasetHeader(nil, desc, sub)
+	require.NoError(t, err)
+	assertTableReadsBack(t, desc, append(h4, row4...), []*dynamicpb.Message{dynamicpb.NewMessage(desc)})
+}
+
+// The reader parses rows with the bind-time schema checks skipped, so
+// the writers refuse a schema Unmarshal refuses rather than write a
+// table that cannot be read back: a field named null makes the header
+// unparsable, and two defaulted members of one oneof would be two null
+// cells in one row.
+func TestDatasetWrite_RefusesInvalidSchema(t *testing.T) {
+	for _, tc := range []struct {
+		name, src string
+		cols      []string
+		want      string
+	}{
+		{"reserved", `message Res { int32 null = 1; int32 ok = 2; }`, []string{"ok"}, `uses PXF-reserved name "null"`},
+		{"two oneof defaults", `message Two { oneof k {
+		  google.protobuf.StringValue a = 1 [(pxf.default) = "x"];
+		  google.protobuf.StringValue b = 2 [(pxf.default) = "y"]; } }`, []string{"a", "b"}, `at most one member of oneof "k" may carry a default`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := "syntax = \"proto3\";\npackage dswbad.v1;\nimport \"google/protobuf/wrappers.proto\";\nimport \"pxf/annotations.proto\";\n" + tc.src
+			fd := compileProtoSources(t, "bad.proto", map[string]string{"bad.proto": src, "pxf/annotations.proto": annotationsProtoSrc})
+			desc := fd.Messages().Get(0)
+			_, err := pxf.AppendDatasetHeader(nil, desc, tc.cols)
+			require.ErrorContains(t, err, tc.want)
+			_, err = pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), tc.cols)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+// A message-typed field in the message's _null mask is null, as Marshal
+// writes it, so a default stays off and a required field is satisfied.
+// A scalar in the mask is written as if the mask did not name it: the
+// draft rejects null on a scalar, while Marshal writes it
+// (trendvidia/protowire#339). That divergence is pinned here.
+func TestDatasetWrite_NullMask(t *testing.T) {
+	src := `syntax = "proto3";
+package dswnull.v1;
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/wrappers.proto";
+import "pxf/annotations.proto";
+message N {
+  google.protobuf.StringValue w = 1;
+  google.protobuf.Int32Value dw = 2 [(pxf.default) = "9"];
+  google.protobuf.Int32Value rw = 3 [(pxf.required) = true];
+  int32 n = 4;
+  google.protobuf.FieldMask _null = 5;
+}`
+	fd := compileProtoSources(t, "null.proto", map[string]string{"null.proto": src, "pxf/annotations.proto": annotationsProtoSrc})
+	desc := fd.Messages().ByName("N")
+	cols := []string{"w", "dw", "rw", "n"}
+
+	m := dynamicpb.NewMessage(desc)
+	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = null\nn = null\n"), m)
+	require.NoError(t, err)
+	require.NoError(t, pxf.Unmarshal([]byte(`w = "set anyway"`+"\nn = 3\n"), m))
+	marshalled, err := pxf.Marshal(m)
+	require.NoError(t, err)
+	assert.Equal(t, "w = null\ndw = null\nrw = null\nn = null\n", string(marshalled))
+
+	row, err := pxf.AppendDatasetRow(nil, m, cols)
+	require.NoError(t, err)
+	assert.Equal(t, "(null, null, null, 3)\n", string(row))
+
+	// Without the mask, the set wrapper is its value and the unset
+	// required one is refused.
+	m.Clear(desc.Fields().ByName("_null"))
+	_, err = pxf.AppendDatasetRow(nil, m, cols)
+	require.ErrorContains(t, err, `column "rw": unset, and the field is (pxf.required)`)
 }
 
 // An unset optional scalar with a default is an empty cell: it reads

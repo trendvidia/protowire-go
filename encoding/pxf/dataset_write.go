@@ -15,6 +15,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
+	"sync"
+	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -29,9 +33,10 @@ import (
 // repeated or map field, or a message other than a Timestamp, Duration,
 // wrapper, pxf.BigInt, pxf.Decimal, pxf.BigFloat or pxf.Secret). A
 // (pxf.required) field missing from the columns is an error too: every
-// row would be rejected on reading.
+// row would be rejected on reading. So is a schema that
+// [ValidateDescriptor] refuses, which Unmarshal would refuse to read.
 func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, columns []string) ([]byte, error) {
-	if _, err := datasetColumns(desc, columns); err != nil {
+	if _, _, err := datasetColumns(desc, columns); err != nil {
 		return dst, err
 	}
 	dst = append(dst, "@dataset "...)
@@ -63,10 +68,17 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 //     the draft rejects `null` on a scalar field, so no cell holds it
 //     unset, and an absent field with a default means the default.
 //     A oneof member stays empty when another member of its oneof is
-//     set, since that keeps the default off.
+//     set and among the columns, since that member keeps the default
+//     off. A set member that is not a column is not written, so the
+//     oneof is treated as having no member set.
 //   - A (pxf.required) field would be rejected. A proto3 scalar is
 //     written as its zero value; an unset field with presence is an
 //     error.
+//
+// A message-typed field named in the message's `_null` FieldMask is
+// written `null`, as Marshal writes it. A scalar field named there is
+// written as if the mask did not name it, since the draft rejects
+// `null` on a scalar field (trendvidia/protowire#339).
 //
 // Fields not among the columns are not written, so a table can export a
 // subset of a message's fields. They read back absent, taking their
@@ -78,18 +90,22 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 // (which needs a block, not a cell), and for a value Marshal refuses.
 func AppendDatasetRow(dst []byte, msg proto.Message, columns []string) ([]byte, error) {
 	m := msg.ProtoReflect()
-	fds, err := datasetColumns(m.Descriptor(), columns)
+	desc := m.Descriptor()
+	fds, opts, err := datasetColumns(desc, columns)
 	if err != nil {
 		return dst, err
 	}
 	buf := bytes.NewBuffer(dst)
 	enc := &encoder{buf: buf}
+	if nfd := findNullMaskField(desc); nfd != nil && m.Has(nfd) {
+		enc.nullSet = readNullMask(m, nfd)
+	}
 	buf.WriteByte('(')
 	for i, fd := range fds {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		if err := enc.writeCell(m, fd); err != nil {
+		if err := enc.writeCell(m, fd, fds, opts[fd.Index()]); err != nil {
 			return dst, fmt.Errorf("pxf: @dataset column %q: %w", fd.Name(), err)
 		}
 	}
@@ -97,10 +113,16 @@ func AppendDatasetRow(dst []byte, msg proto.Message, columns []string) ([]byte, 
 	return buf.Bytes(), nil
 }
 
-// writeCell writes the cell for fd of m; see AppendDatasetRow.
-func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescriptor) error {
+// writeCell writes the cell for fd of m, in a row of the columns cols;
+// see AppendDatasetRow.
+func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescriptor, cols []protoreflect.FieldDescriptor, o cellOptions) error {
+	isMsg := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
+	if isMsg && e.nullSet[string(fd.Name())] {
+		e.buf.WriteString("null")
+		return nil
+	}
 	if m.Has(fd) {
-		if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+		if !isMsg {
 			return e.writeScalar(fd, m.Get(fd))
 		}
 		sub := m.Get(fd).Message()
@@ -109,23 +131,24 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 		}
 		return e.writeLiteralMessage(sub)
 	}
-	_, hasDefault := Default(fd)
-	required := IsRequired(fd)
-	if !hasDefault && !required {
+	if !o.hasDefault && !o.required {
 		return nil // empty: absent, and absent is what it reads back as
 	}
 	if !fd.HasPresence() {
 		return e.writeScalar(fd, m.Get(fd)) // the zero value, explicitly
 	}
-	if required {
+	if o.required {
 		return errors.New("unset, and the field is (pxf.required)")
 	}
-	if od := fd.ContainingOneof(); od != nil && !od.IsSynthetic() && m.WhichOneof(od) != nil {
-		// A set member keeps the default off. (At most one member of a
-		// oneof may carry a default, so no second null can arise.)
-		return nil
+	if od := fd.ContainingOneof(); od != nil && !od.IsSynthetic() {
+		if set := m.WhichOneof(od); set != nil && slices.Contains(cols, set) {
+			// A member written in this row keeps the default off. (At
+			// most one member of a oneof may carry a default, which
+			// datasetColumns has checked, so no second null can arise.)
+			return nil
+		}
 	}
-	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+	if !isMsg {
 		// No cell holds an unset scalar with presence: the draft rejects
 		// null on a scalar field. Empty reads back as the default.
 		return nil
@@ -135,51 +158,85 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 }
 
 // datasetColumns resolves columns against desc, refusing what a v1 row
-// cannot carry; see AppendDatasetHeader.
-func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]protoreflect.FieldDescriptor, error) {
+// cannot carry; see AppendDatasetHeader. It also returns desc's
+// cellOptions.
+func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]protoreflect.FieldDescriptor, []cellOptions, error) {
 	if len(columns) == 0 {
-		return nil, errors.New("pxf: @dataset needs at least one column")
+		return nil, nil, errors.New("pxf: @dataset needs at least one column")
+	}
+	// The reader parses rows through Unmarshal with SkipValidate, so a
+	// schema it would refuse is refused here instead of written: a field
+	// with a reserved name makes the header unreadable, and a oneof with
+	// two defaulted members would get two null cells.
+	if err := asValidationError(ValidateDescriptor(desc)); err != nil {
+		return nil, nil, fmt.Errorf("pxf: @dataset %s: %w", desc.FullName(), err)
 	}
 	fds := make([]protoreflect.FieldDescriptor, len(columns))
 	for i, c := range columns {
 		if containsDot(c) {
-			return nil, fmt.Errorf("pxf: @dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", c)
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", c)
 		}
 		fd := desc.Fields().ByName(protoreflect.Name(c))
 		if fd == nil {
-			return nil, fmt.Errorf("pxf: @dataset column %q: %s has no such field", c, desc.FullName())
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: %s has no such field", c, desc.FullName())
 		}
-		for _, prev := range fds[:i] {
-			if prev == fd {
-				return nil, fmt.Errorf("pxf: @dataset column %q appears twice", c)
-			}
+		if slices.Contains(fds[:i], fd) {
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q appears twice", c)
 		}
 		switch {
 		case fd.IsMap():
-			return nil, fmt.Errorf("pxf: @dataset column %q: a map field cannot be held by a v1 cell (draft §3.4.4)", c)
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: a map field cannot be held by a v1 cell (draft §3.4.4)", c)
 		case fd.IsList():
-			return nil, fmt.Errorf("pxf: @dataset column %q: a repeated field cannot be held by a v1 cell (draft §3.4.4)", c)
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: a repeated field cannot be held by a v1 cell (draft §3.4.4)", c)
 		case (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) && !isLiteralMessageType(fd.Message()):
-			return nil, fmt.Errorf("pxf: @dataset column %q: a %s field needs a block, which a v1 cell cannot hold (draft §3.4.4)", c, fd.Message().FullName())
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: a %s field needs a block, which a v1 cell cannot hold (draft §3.4.4)", c, fd.Message().FullName())
 		}
 		fds[i] = fd
 	}
-	all := desc.Fields()
-	for i := range all.Len() {
-		fd := all.Get(i)
-		if !IsRequired(fd) {
-			continue
-		}
-		found := false
-		for _, c := range fds {
-			if c == fd {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil, fmt.Errorf("pxf: @dataset columns omit %q, which is (pxf.required): every row would be rejected", fd.Name())
+	opts := datasetCellOptions(desc)
+	for i, o := range opts {
+		if fd := desc.Fields().Get(i); o.required && !slices.Contains(fds, fd) {
+			return nil, nil, fmt.Errorf("pxf: @dataset columns omit %q, which is (pxf.required): every row would be rejected", fd.Name())
 		}
 	}
-	return fds, nil
+	return fds, opts, nil
+}
+
+// cellOptions is what a row needs of a field's PXF annotations.
+type cellOptions struct {
+	hasDefault, required bool
+}
+
+// cellOptionsCache memoizes datasetCellOptions per message descriptor,
+// bounded like the bind-time validation caches (see
+// maxCachedDescriptors). Every row of a table needs the options of every
+// field, for the required-column check, and parsing them was a third
+// of a row's cost.
+var (
+	cellOptionsCache sync.Map // protoreflect.MessageDescriptor -> []cellOptions
+	cellOptionsCount atomic.Int64
+)
+
+// datasetCellOptions returns the cellOptions of desc's fields, indexed
+// like desc.Fields(). The result is shared and must not be modified.
+func datasetCellOptions(desc protoreflect.MessageDescriptor) []cellOptions {
+	// A sync.Map panics on an unhashable key; see loadCached.
+	cacheable := reflect.TypeOf(desc).Comparable()
+	if cacheable {
+		if v, hit := cellOptionsCache.Load(desc); hit {
+			return v.([]cellOptions)
+		}
+	}
+	fields := desc.Fields()
+	out := make([]cellOptions, fields.Len())
+	for i := range out {
+		o := pxfFieldOptions(fields.Get(i))
+		out[i] = cellOptions{hasDefault: o.defSet, required: o.required}
+	}
+	if cacheable && cellOptionsCount.Load() < maxCachedDescriptors {
+		if _, loaded := cellOptionsCache.LoadOrStore(desc, out); !loaded {
+			cellOptionsCount.Add(1)
+		}
+	}
+	return out
 }
