@@ -64,10 +64,9 @@ import (
 // a reused one, a field an earlier row set keeps its value under a null
 // cell, and a _null mask grows by every row's nulls.
 //
-// A row type with a (pxf.default), a (pxf.required) or a _null field
-// is checked against the bind-time schema rules ([ValidateDescriptor])
-// and a violation fails the row. A row's decode error carries the row's
-// position.
+// msg's descriptor is checked against the bind-time schema rules
+// ([ValidateDescriptor]), as [Unmarshal] checks it, and a violation
+// fails the row. A row's decode error carries the row's position.
 func (tr *DatasetReader) Scan(msg proto.Message) error {
 	row, err := tr.Next()
 	if err != nil {
@@ -77,8 +76,8 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 }
 
 // BindRow binds row.Cells to the fields of msg by column name. The
-// columns slice MUST have the same length as row.Cells; mismatch is
-// a programmer error and panics.
+// columns slice MUST have the same length as row.Cells; a mismatch is
+// a programmer error and returns an error.
 //
 // Exported so callers iterating the materializing path's
 // Result.Datasets()[i].Rows can reuse the same logic. Same cell-state
@@ -91,10 +90,13 @@ func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	if err != nil {
 		return err
 	}
+	// Both paths run the bind-time schema checks, as Unmarshal does by
+	// default: they are memoized per descriptor, so a row pays a cache
+	// lookup for them, and they are what make the annotations
+	// well-defined (two spellings of one default that disagree,
+	// (pxf.required) on a oneof member).
 	if !rowNeedsPresence(msg.ProtoReflect().Descriptor()) {
-		// SkipValidate: the bind-time schema checks are not repeated per
-		// row; pre-screen the descriptor with [ValidateDescriptor].
-		return UnmarshalOptions{SkipValidate: true}.Unmarshal(body, msg)
+		return atRow(UnmarshalOptions{}.Unmarshal(body, msg), row.Pos)
 	}
 	// The full pipeline's post-decode pass gives an empty cell (no
 	// entry) the field's (pxf.default) and rejects it for
@@ -102,11 +104,6 @@ func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	// default off (draft §3.4.4); it also records a null cell in the
 	// row type's _null mask. It costs a presence record per row, so only
 	// a row type that needs it pays for it.
-	//
-	// The bind-time schema checks run here: they are what make the
-	// annotations well-defined (two spellings of one default that
-	// disagree, (pxf.required) on a oneof member), and they are memoized
-	// per descriptor, so a row pays a cache lookup for them.
 	_, err = UnmarshalOptions{}.UnmarshalFull(body, msg)
 	return atRow(err, row.Pos)
 }

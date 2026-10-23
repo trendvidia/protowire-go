@@ -252,3 +252,34 @@ func TestBindRow_ErrorNamesTheRow(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, `3:3: required field "name" is absent`, err.Error())
 }
+
+// A row type without annotations is held to the same checks and named
+// the same way: neither may depend on whether some field is annotated.
+func TestBindRow_UnannotatedRowType(t *testing.T) {
+	t.Run("schema violation", func(t *testing.T) {
+		desc := compilePlacementSrc(t, `
+syntax = "proto3";
+package bindbad.v1;
+message M { Side side = 1; }
+enum Side { SIDE_UNSPECIFIED = 0; null = 1; }
+`, "bindbad.v1", "M")
+		_, err := bindRows(t, desc, "@dataset bindbad.v1.M (side)\n(SIDE_UNSPECIFIED)\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PXF-reserved name")
+	})
+	t.Run("error names the row", func(t *testing.T) {
+		desc := compilePlacementSrc(t, `
+syntax = "proto3";
+package bindplain.v1;
+message M { string plain = 1; }
+`, "bindplain.v1", "M")
+		doc, err := pxf.Parse([]byte("@dataset bindplain.v1.M (plain)\n(\"a\")\n  (2)\n"))
+		require.NoError(t, err)
+		ds := doc.Datasets[0]
+		require.NoError(t, pxf.BindRow(dynamicpb.NewMessage(desc), ds.Columns, ds.Rows[0]))
+		err = pxf.BindRow(dynamicpb.NewMessage(desc), ds.Columns, ds.Rows[1])
+		require.Error(t, err)
+		// An int into a string field; before, the synthetic body's 1:9.
+		assert.True(t, strings.HasPrefix(err.Error(), "3:3: "), err.Error())
+	})
+}
