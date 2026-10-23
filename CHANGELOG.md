@@ -11,6 +11,26 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`AppendDatasetHeader` and `AppendDatasetRow` write `@dataset`
+  tables** ([#142]). Callers producing datasets, such as an append-only
+  log writing one row per event, no longer assemble rows from
+  `FormatValue` per cell. Cells are rendered by the encoder `Marshal`
+  uses, so a row reads back through `Scan` and `BindRow` as the message
+  it came from (a seeded round trip over every cell-capable kind, and a
+  fuzz target). The writers refuse what a v1 cell cannot hold: an empty,
+  dotted, duplicate or unknown column, a repeated, map or block-valued
+  field, a `pxf.Secret` with a hint or fingerprint, and a column list
+  that omits a `(pxf.required)` field. Where an empty cell would not
+  read back as the unset field, the row says so explicitly: an unset
+  field with `(pxf.default)` is `null` (or its zero value, for a proto3
+  scalar), and an unset `(pxf.required)` field with presence is an
+  error. A row depends only on its message and the columns, so
+  appending to a file never rewrites earlier bytes.
+
+[#142]: https://github.com/trendvidia/protowire-go/issues/142
+
 ### Changed
 
 - **`check/protovalidate` requires the parent module at v1.8.1 instead of
