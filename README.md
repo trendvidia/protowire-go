@@ -165,7 +165,7 @@ for _, tbl := range doc.Datasets {
 }
 ```
 
-Both honor the three-state cell semantics (empty / `null` / value), bind WKT timestamps and durations, resolve enums by name, and clear wrappers / optional / oneof on a `null` cell — the implementation routes through the existing `Unmarshal` pipeline so every decoder branch is exercised. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
+Both honor the three-state cell semantics (empty / `null` / value): an empty cell takes the field's `(pxf.default)` and fails a `(pxf.required)` field, and a `null` cell satisfies required and keeps the default off. A `null` cell is also recorded in the row type's `_null` FieldMask when it declares one. They bind WKT timestamps and durations, resolve enums by name, and leave wrappers / optional / oneof unset on a `null` cell — the implementation routes through the existing decoder (`Unmarshal`, or `UnmarshalFull` for a row type with annotations or a `_null` mask) so every decoder branch is exercised. Bind each row into a fresh message, as above: the message is not reset first. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
 
 ### `AppendDatasetHeader` and `AppendDatasetRow`: writing `@dataset`
 

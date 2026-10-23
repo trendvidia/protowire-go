@@ -11,6 +11,27 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Scan` and `BindRow` apply `(pxf.default)` and `(pxf.required)` to
+  empty `@dataset` cells** ([#145]). An empty cell is an absent field
+  (draft §3.4.4): its default now applies, and a required field rejects
+  the row, as `Scan`'s documentation always said. Before, both were
+  ignored, because `BindRow` decoded through `Unmarshal`, which skips
+  the post-decode pass; it now uses `UnmarshalFull` for a row type with
+  either annotation or a `_null` mask, and `Unmarshal` otherwise. A
+  `null` cell satisfies required and keeps the default off, and is
+  recorded in the row type's `_null` FieldMask when it declares one. A
+  row that bound before can now fail (a required field left empty) or
+  bind differently (an empty cell where a default is declared). Such a
+  row type is also held to the bind-time schema checks, so a schema
+  `ValidateDescriptor` rejects — two spellings of one default that
+  disagree, `(pxf.required)` on a oneof member — now fails every row
+  instead of binding by picking one. A row's error names the row's
+  position instead of `1:1` (on the streaming path, the position
+  `DatasetReader.Next` gives the row).
+
+[#145]: https://github.com/trendvidia/protowire-go/issues/145
 ### Added
 
 - **`@dataset` value cells: a cell may hold a list or a block**
