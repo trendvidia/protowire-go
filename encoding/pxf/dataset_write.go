@@ -59,15 +59,19 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 //     default does not replace. A message-typed field (a wrapper, a
 //     Timestamp, ...) is written `null`, which keeps the default off
 //     and leaves the field unset. A scalar with presence (`optional`,
-//     or a oneof member) is an error: no cell holds it, because the
-//     draft rejects `null` on a scalar field (trendvidia/protowire#339
-//     asks whether it should). A oneof member stays empty when another
-//     member of its oneof is set, since that keeps the default off.
+//     or a oneof member) stays empty and reads back as its default:
+//     the draft rejects `null` on a scalar field, so no cell holds it
+//     unset, and an absent field with a default means the default.
+//     A oneof member stays empty when another member of its oneof is
+//     set, since that keeps the default off.
 //   - A (pxf.required) field would be rejected. A proto3 scalar is
 //     written as its zero value; an unset field with presence is an
 //     error.
 //
-// Fields not among the columns are not written, and read back absent.
+// Fields not among the columns are not written, so a table can export a
+// subset of a message's fields. They read back absent, taking their
+// (pxf.default) if they have one. A (pxf.required) field cannot be left
+// out: the column list is refused.
 //
 // It returns an error, and dst unchanged, for the column errors of
 // AppendDatasetHeader, for a pxf.Secret carrying a hint or fingerprint
@@ -122,7 +126,9 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 		return nil
 	}
 	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
-		return errors.New("unset, and no cell holds that: an empty cell reads back as the field's (pxf.default), and the draft rejects null on a scalar field")
+		// No cell holds an unset scalar with presence: the draft rejects
+		// null on a scalar field. Empty reads back as the default.
+		return nil
 	}
 	e.buf.WriteString("null")
 	return nil

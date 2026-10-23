@@ -147,10 +147,12 @@ var rowColumns = []string{
 // trip over a column subset always keeps these.
 var defaultedColumns = []string{"d_s", "d_i32", "d_opt", "d_w", "d_ts", "d_color", "c_w", "o_s"}
 
-// makeWritable sets what a row cannot hold unset (see
+// makeWritable sets what a row cannot carry unset (see
 // AppendDatasetRow): d_opt, an optional scalar with a default, and a
-// member of oneof "other", whose defaulted member is a scalar. Only
-// fields among cols are touched.
+// member of oneof "other", whose defaulted member is a scalar. Written
+// unset they are empty cells and read back as their defaults, so a
+// round trip expecting equal messages sets them. Only fields among cols
+// are touched.
 func makeWritable(m *dynamicpb.Message, cols []string) {
 	desc := m.Descriptor()
 	in := func(c string) bool {
@@ -411,15 +413,20 @@ func TestDatasetWrite_OneofDefaults(t *testing.T) {
 	assertTableReadsBack(t, desc, append(append(h, row...), row2...), []*dynamicpb.Message{m, m2})
 
 	// No member of "other" set: its defaulted member is a scalar, which
-	// no cell can hold unset.
-	_, err = pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), cols)
-	require.ErrorContains(t, err, `column "o_s": unset, and no cell holds that`)
+	// no cell holds unset (null is rejected on a scalar), so it is empty
+	// and reads back as its default.
+	row3, err := pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), cols)
+	require.NoError(t, err)
+	assert.Equal(t, "(null, , , , )\n", string(row3))
 }
 
-func TestDatasetWrite_RefusesUnsetOptionalScalarWithDefault(t *testing.T) {
+// An unset optional scalar with a default is an empty cell: it reads
+// back as the default, which is what an absent annotated field means.
+func TestDatasetWrite_UnsetOptionalScalarWithDefaultIsEmpty(t *testing.T) {
 	desc := compileDatasetWrite(t, "Row")
-	_, err := pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), []string{"d_opt"})
-	require.ErrorContains(t, err, `column "d_opt": unset, and no cell holds that`)
+	row, err := pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), []string{"d_opt"})
+	require.NoError(t, err)
+	assert.Equal(t, "()\n", string(row))
 }
 
 func TestDatasetWrite_Required(t *testing.T) {
