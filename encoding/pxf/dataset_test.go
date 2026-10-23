@@ -113,7 +113,7 @@ func TestParseTable_ArityLong_Rejects(t *testing.T) {
 	assert.Contains(t, err.Error(), "3 cells, expected 2")
 }
 
-// --- v1 cell-grammar restrictions ---
+// --- value cells (protowire#341) ---
 
 func TestParseTable_ListCell(t *testing.T) {
 	in := `@dataset trades.v1.Trade (symbol, tags)

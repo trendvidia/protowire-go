@@ -161,3 +161,101 @@ func TestValueCells_NestingDepthIsEnforced(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "MaxNestingDepth")
 }
+
+// The reader's own limits apply to its cells, not the package constants:
+// Next parses under its MaxNestingDepth and Scan binds under its
+// MaxRepeatedCount. Each limit gets an accept row at the bound and a
+// reject row one past it.
+func TestValueCells_StreamHonoursItsLimits(t *testing.T) {
+	allTypes := msgDesc(t, "AllTypes")
+	read := func(o pxf.UnmarshalOptions, row string) error {
+		in := "@dataset test.v1.AllTypes (repeated_string)\n" + row + "\n"
+		tr, err := o.NewDatasetReader(strings.NewReader(in))
+		require.NoError(t, err)
+		return tr.Scan(dynamicpb.NewMessage(allTypes))
+	}
+
+	depth := pxf.UnmarshalOptions{MaxNestingDepth: 2}
+	tr, err := depth.NewDatasetReader(strings.NewReader("@dataset T (a)\n([[\"a\"]])\n"))
+	require.NoError(t, err)
+	_, err = tr.Next()
+	assert.NoError(t, err, "depth 2 is within MaxNestingDepth=2")
+	tr, err = depth.NewDatasetReader(strings.NewReader("@dataset T (a)\n([[[\"a\"]]])\n"))
+	require.NoError(t, err)
+	_, err = tr.Next()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxNestingDepth=2")
+
+	count := pxf.UnmarshalOptions{MaxRepeatedCount: 2}
+	assert.NoError(t, read(count, `(["a", "b"])`), "2 elements are within MaxRepeatedCount=2")
+	err = read(count, `(["a", "b", "c"])`)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxRepeatedCount=2")
+}
+
+// Comments before a block cell are not the cell's: they stay out of its
+// entries on both paths, and a comment written inside the cell stays in.
+func TestValueCells_CommentsOutsideACellStayOutside(t *testing.T) {
+	in := `@dataset test.v1.AllTypes (string_field, nested_field)
+# before the row
+( # before the cell
+"x", { # inside
+name = "y" })
+`
+	want := "{\n  # inside\n  name = \"y\"\n}"
+
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	assert.Equal(t, want, string(pxf.FormatValue(doc.Datasets[0].Rows[0].Cells[1])), "Parse")
+
+	res, err := pxf.UnmarshalFull([]byte(in), dynamicpb.NewMessage(msgDesc(t, "AllTypes")))
+	require.NoError(t, err)
+	fast := string(pxf.FormatValue(res.Datasets()[0].Rows[0].Cells[1]))
+	assert.NotContains(t, fast, "before", "UnmarshalFull")
+}
+
+// A token the lexer rejects inside a list or block cell reports the
+// lexer's diagnostic, with no expectation in front of it, on every path
+// — as it does in a scalar cell and in every other value position.
+func TestValueCells_IllegalTokenInsideACell(t *testing.T) {
+	allTypes := msgDesc(t, "AllTypes")
+	for _, tc := range []struct{ row, want string }{
+		{`("x", 5seconds)`, "2:7: invalid duration: 5seconds"},
+		{`("x", [5seconds])`, "2:8: invalid duration: 5seconds"},
+		{`("x", { name = 5seconds })`, "2:16: invalid duration: 5seconds"},
+	} {
+		in := []byte("@dataset test.v1.AllTypes (string_field, nested_field)\n" + tc.row + "\n")
+		_, err := pxf.Parse(in)
+		require.Error(t, err, tc.row)
+		assert.Equal(t, tc.want, err.Error(), "Parse %s", tc.row)
+
+		_, err = pxf.UnmarshalFull(in, dynamicpb.NewMessage(allTypes))
+		require.Error(t, err, tc.row)
+		assert.Equal(t, tc.want, err.Error(), "UnmarshalFull %s", tc.row)
+	}
+}
+
+// ParseTolerant closes an unclosed list or block cell at its row's ')',
+// so one typo in a cell costs one error and the rows after it survive.
+func TestValueCells_TolerantClosesAnUnclosedCellAtTheRow(t *testing.T) {
+	for _, tc := range []struct {
+		row  string
+		want []string
+	}{
+		{`("x", [1, )`, []string{"expected ']', got )"}},
+		{`("x", { name = "a" )`, []string{"unclosed block: expected '}' before ')'"}},
+		{`("x", { name = )`, []string{`expected value, got ) (")")`, "unclosed block: expected '}' before ')'"}},
+	} {
+		in := "@dataset test.v1.AllTypes (string_field, repeated_int32)\n" + tc.row + "\n(\"y\", [2])\n(\"z\", [3])\n"
+		doc, errs := pxf.ParseTolerant([]byte(in))
+		var got []string
+		for _, e := range errs {
+			got = append(got, e.Msg)
+		}
+		assert.Equal(t, tc.want, got, tc.row)
+		require.Len(t, doc.Datasets, 1, tc.row)
+		rows := doc.Datasets[0].Rows
+		require.Len(t, rows, 3, tc.row)
+		assert.Equal(t, "z", rows[2].Cells[0].(*pxf.StringVal).Value, tc.row)
+	}
+}

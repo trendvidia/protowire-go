@@ -22,11 +22,20 @@ format changes.
   `DatasetReader` accept them. `BindRow` and `DatasetReader.Scan` bind
   them through the body decoder, so `{}` is a present empty message, an
   empty cell is still absent, and a list on a scalar column is the body's
-  error. In the direct decoder, a list or block cell is parsed by the AST
-  parser running on the decoder's own lexer, and it counts toward
-  `MaxNestingDepth` like any value. The errors `@dataset cells cannot
-  contain list/block values in v1` are gone; dotted column paths are
-  still rejected (protowire#342).
+  error. In the direct decoder, every cell is parsed by the AST parser
+  running on the decoder's own lexer, and it counts toward
+  `MaxNestingDepth` like any value. A `DatasetReader` built with
+  `UnmarshalOptions.NewDatasetReader` parses each row under the options'
+  `MaxNestingDepth`, and `Scan` binds under its `MaxNestingDepth` and
+  `MaxRepeatedCount`. `ParseTolerant` closes an unclosed list or block
+  cell at its row's `)`, so the rows after it still parse. Comments
+  before a block cell are no longer attached to the cell's first entry.
+  `Parse` reports a token the lexer rejects at a value position with the
+  lexer's diagnostic alone (`invalid duration: 5seconds`), as the direct
+  decoder already did, instead of `expected value, got invalid duration:
+  5seconds`. The errors `@dataset cells cannot contain list/block values
+  in v1` are gone; dotted column paths are still rejected
+  (protowire#342).
 
 ### Changed
 

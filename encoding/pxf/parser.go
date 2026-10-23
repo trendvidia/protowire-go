@@ -266,7 +266,8 @@ func (o ParseOptions) Parse(input []byte) (*Document, error) {
 //     alone) is synthesized as a [BadVal] placeholder so the entry —
 //     its key and position — still appears in the AST.
 //   - Unclosed blocks and lists are closed at EOF with their parsed
-//     contents intact.
+//     contents intact; one in a @dataset cell is closed at the row's
+//     ')' instead, so the rows after it still parse.
 //   - An unterminated string ends at the newline (or EOF). Note this
 //     differs from [Parse], which permits a raw newline inside a
 //     simple-quoted string; in tolerant mode the newline is taken as
@@ -525,7 +526,24 @@ func (p *parser) parseRowCell() (Value, error) {
 	case COMMA, RPAREN:
 		return nil, nil
 	}
-	return p.parseValue(0)
+	// A block cell's entries flush pending comments as their leading
+	// comments. Comments before the cell (between rows, or before the
+	// row's first cell) belong to no entry of the cell, so set them
+	// aside: the cell keeps only the comments written inside it, as the
+	// direct decoder's cells do.
+	pending := p.comments
+	p.comments = nil
+	v, err := p.parseValue(0)
+	p.comments = append(pending, p.comments...)
+	return v, err
+}
+
+// tolerantRowClose reports whether tolerant recovery should close the
+// list or block being parsed at the current token: a ')' appears in no
+// value, so inside one it is the end of the @dataset row the value is a
+// cell of. Strict mode never stops there; the ')' is its error.
+func (p *parser) tolerantRowClose() bool {
+	return p.tolerant && p.current.Kind == RPAREN
 }
 
 // parseProtoDirective reads `@proto <body>` where <body> is one of
@@ -1028,13 +1046,23 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return p.parseBlockVal(depth)
 
 	default:
-		if !p.tolerant {
-			return nil, errorf(pos, "expected value, got %s", p.tokenErrMsg())
+		// An ILLEGAL token is reported as the lexer's own diagnostic, as
+		// the direct decoder reports it at every value position (see
+		// directDecoder.illegalErr): an expectation adds nothing to
+		// "invalid duration: 5seconds". The decoder parses @dataset cells
+		// here, so a different shape would split one diagnostic in two.
+		err := errorf(pos, "expected value, got %s", p.tokenErrMsg())
+		if p.current.Kind == ILLEGAL {
+			err = errorf(pos, "%s", p.current.Value)
 		}
-		p.record(errorf(pos, "expected value, got %s", p.tokenErrMsg()))
+		if !p.tolerant {
+			return nil, err
+		}
+		p.record(err)
 		switch p.current.Kind {
-		case EOF, RBRACE, RBRACKET:
-			// Leave closers for the enclosing construct to consume.
+		case EOF, RBRACE, RBRACKET, RPAREN:
+			// Leave closers for the enclosing construct to consume. A
+			// ')' closes the @dataset row around an unclosed cell.
 		default:
 			p.advance()
 		}
@@ -1055,7 +1083,7 @@ func (p *parser) parseList(depth int) (Value, error) {
 	p.advance() // consume [
 
 	elems := make([]Value, 0, 4)
-	for p.current.Kind != RBRACKET && p.current.Kind != EOF {
+	for p.current.Kind != RBRACKET && p.current.Kind != EOF && !p.tolerantRowClose() {
 		before := p.current.Pos.Offset
 		elem, err := p.parseValue(depth + 1)
 		if err != nil {
@@ -1108,7 +1136,7 @@ func (p *parser) parseBlockVal(depth int) (Value, error) {
 
 func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 	entries := make([]Entry, 0, 4)
-	for p.current.Kind != RBRACE && p.current.Kind != EOF {
+	for p.current.Kind != RBRACE && p.current.Kind != EOF && !p.tolerantRowClose() {
 		// Inside a '{ ... }' block we don't know whether the surrounding
 		// field is a message or a map<K,V>; both forms are accepted and
 		// disambiguated by the schema layer.
@@ -1125,8 +1153,13 @@ func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 		if !p.tolerant {
 			return nil, Position{}, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
 		}
-		// Unclosed block: close it at EOF with the entries parsed so far.
-		p.record(errorf(p.current.Pos, "unclosed block: expected '}' before end of input"))
+		// Unclosed block: close it at EOF, or at the ')' of the @dataset
+		// row it is a cell of, with the entries parsed so far.
+		if p.current.Kind == RPAREN {
+			p.record(errorf(p.current.Pos, "unclosed block: expected '}' before ')'"))
+		} else {
+			p.record(errorf(p.current.Pos, "unclosed block: expected '}' before end of input"))
+		}
 		return entries, p.current.Pos, nil
 	}
 	end := p.tokenEnd()

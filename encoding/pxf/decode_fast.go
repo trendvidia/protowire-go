@@ -141,12 +141,14 @@ func (d *directDecoder) advance() {
 // message field". Position is the token's, so it is preserved either way.
 //
 // Placement: once at the entry of each value context — a field value, a
-// list element, a map value, a @dataset cell — rather than in the leaves
-// those contexts share, which sit in the decode hot path and would each
-// re-test the same token. Never in front of a schema check: an unknown
+// list element, a map value — rather than in the leaves those contexts
+// share, which sit in the decode hot path and would each re-test the same
+// token. Never in front of a schema check: an unknown
 // field with a malformed value is still an unknown field, which is the
 // more useful of the two things wrong. A context that loses its guard
-// shows up in TestIllegalTokenDiagnosticAtEveryValuePosition.
+// shows up in TestIllegalTokenDiagnosticAtEveryValuePosition. A @dataset
+// cell needs no guard here: parser.parseValue parses it and reports an
+// ILLEGAL token the same way.
 func (d *directDecoder) illegalErr() error {
 	if d.current.Kind != ILLEGAL {
 		return nil
@@ -455,90 +457,21 @@ func (d *directDecoder) consumeDatasetRow(expected int) (DatasetRow, error) {
 // consumeRowCell consumes one cell of a @dataset row. Returns nil for
 // an empty cell (no value between commas, or at row start/end). Any
 // value is a cell, lists and blocks included (draft §3.4.4).
+//
+// The value goes through the AST parser, running on this decoder's own
+// lexer, so a cell parses exactly as it does under [Parse] and the
+// decoder resumes at the token after the value. A cell sits at the row's
+// top level: depth 0, as in parser.parseRowCell. The parser does not
+// escape, so this allocates nothing beyond the cell's own nodes.
 func (d *directDecoder) consumeRowCell() (Value, error) {
 	switch d.current.Kind {
 	case COMMA, RPAREN:
 		return nil, nil
-	case LBRACKET, LBRACE:
-		// A list or block cell goes through the AST parser, running on
-		// this decoder's own lexer, so the decoder resumes at the token
-		// after the value. A cell sits at the row's top level: depth 0,
-		// as in parser.parseRowCell.
-		p := &parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
-		v, err := p.parseValue(0)
-		d.current = p.current
-		return v, err
 	}
-	// Re-use the AST-tier value parser by handing off to a small inline
-	// reader. We construct a one-shot parser around the current lexer
-	// state so the value-shape branches stay in one place.
-	return d.consumeValue()
-}
-
-// consumeValue parses one PXF value at the current decoder position,
-// covering the same shapes as parser.parseValue but using the
-// directDecoder's state. Used by @dataset row cells.
-func (d *directDecoder) consumeValue() (Value, error) {
-	if err := d.illegalErr(); err != nil {
-		return nil, err
-	}
-	pos := d.current.Pos
-	switch d.current.Kind {
-	case STRING:
-		v := &StringVal{Pos: pos, Value: d.current.Value}
-		d.advance()
-		return v, nil
-	case INT:
-		v := &IntVal{Pos: pos, Raw: d.current.Value}
-		d.advance()
-		return v, nil
-	case FLOAT:
-		v := &FloatVal{Pos: pos, Raw: d.current.Value}
-		d.advance()
-		return v, nil
-	case BOOL:
-		v := &BoolVal{Pos: pos, Value: d.current.Value == "true"}
-		d.advance()
-		return v, nil
-	case BYTES:
-		raw := d.current.Value
-		decoded, err := decodeBase64Lenient(raw)
-		if err != nil {
-			return nil, errorf(pos, "invalid base64: %v", err)
-		}
-		v := &BytesVal{Pos: pos, Value: decoded}
-		d.advance()
-		return v, nil
-	case TIMESTAMP:
-		t, err := time.Parse(time.RFC3339Nano, d.current.Value)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339, d.current.Value)
-			if err != nil {
-				return nil, errorf(pos, "invalid timestamp %q: %v", d.current.Value, err)
-			}
-		}
-		v := &TimestampVal{Pos: pos, Value: t, Raw: d.current.Value}
-		d.advance()
-		return v, nil
-	case DURATION:
-		dur, err := time.ParseDuration(d.current.Value)
-		if err != nil {
-			return nil, errorf(pos, "invalid duration %q: %v", d.current.Value, err)
-		}
-		v := &DurationVal{Pos: pos, Value: dur, Raw: d.current.Value}
-		d.advance()
-		return v, nil
-	case NULL:
-		v := &NullVal{Pos: pos}
-		d.advance()
-		return v, nil
-	case IDENT:
-		v := &IdentVal{Pos: pos, Name: d.current.Value}
-		d.advance()
-		return v, nil
-	default:
-		return nil, errorf(pos, "expected value, got %s (%q)", d.current.Kind, d.current.Value)
-	}
+	p := &parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
+	v, err := p.parseValue(0)
+	d.current = p.current
+	return v, err
 }
 
 // consumeDirective consumes `@<name> *(<prefix-id>) [{ ... }]`. The

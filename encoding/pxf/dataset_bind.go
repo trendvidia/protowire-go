@@ -53,7 +53,10 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 	if err != nil {
 		return err
 	}
-	return BindRow(msg, tr.columns, row)
+	// The reader's limits, not MaxMessageSize: the row's bytes were
+	// capped as they were read, and the synthetic body may format wider.
+	o := UnmarshalOptions{MaxNestingDepth: tr.lim.maxDepth, MaxRepeatedCount: tr.lim.maxRepeated}
+	return o.bindRow(msg, tr.columns, row)
 }
 
 // BindRow binds row.Cells to the fields of msg by column name. The
@@ -64,6 +67,12 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 // Result.Datasets()[i].Rows can reuse the same logic. Same cell-state
 // semantics as [DatasetReader.Scan].
 func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
+	return UnmarshalOptions{}.bindRow(msg, columns, row)
+}
+
+// bindRow is [BindRow] under the options' limits. It sets SkipValidate
+// itself; the other options are the caller's.
+func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	if len(columns) != len(row.Cells) {
 		return fmt.Errorf("pxf: BindRow: %d columns vs %d cells", len(columns), len(row.Cells))
 	}
@@ -75,7 +84,8 @@ func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	// SkipValidate avoids re-running the reserved-name check per row
 	// (DatasetReader's NewDatasetReader / the materializing UnmarshalFull
 	// already validated the descriptor once at bind time).
-	return UnmarshalOptions{SkipValidate: true}.Unmarshal(body, msg)
+	o.SkipValidate = true
+	return o.Unmarshal(body, msg)
 }
 
 // rowToPXFBody renders a row as a PXF body: one `<column> = <value>`

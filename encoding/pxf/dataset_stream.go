@@ -13,12 +13,11 @@ package pxf
 // on demand and yields one DatasetRow per Next() call, with working-set
 // memory bounded by the size of the largest single row.
 //
-// Per the spec: a streaming API MUST enforce per-row arity and the v1
-// cell-grammar rule on each row as it is consumed (not deferred to
-// end-of-input), and MUST yield rows in source order. Both invariants
-// fall out of the implementation here: the row-boundary scanner
-// produces one (...) slice at a time, and the same parseDatasetRow used
-// by Parse() decodes it.
+// Per the spec: a streaming API MUST enforce per-row arity on each row
+// as it is consumed (not deferred to end-of-input), and MUST yield rows
+// in source order. Both invariants fall out of the implementation here:
+// the row-boundary scanner produces one (...) slice at a time, and the
+// same parseDatasetRow used by Parse() decodes it.
 
 import (
 	"bytes"
@@ -64,9 +63,10 @@ type DatasetReader struct {
 	typ      string
 	columns  []string
 	dirs     []Directive
-	finished bool  // Next() has returned io.EOF
-	err      error // sticky error
-	maxRow   int   // cap on pending while a row boundary is sought (MaxMessageSize, UnmarshalOptions.limits)
+	finished bool   // Next() has returned io.EOF
+	err      error  // sticky error
+	maxRow   int    // cap on pending while a row boundary is sought (MaxMessageSize, UnmarshalOptions.limits)
+	lim      limits // the options' limits, applied to each row's parse and to Scan's bind
 }
 
 // NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
@@ -86,9 +86,12 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // NewDatasetReader is [NewDatasetReader] under the options' limits: the
 // bytes held while a row boundary is sought are capped at the options'
 // MaxMessageSize, so a stream that never ends a row cannot grow the
-// buffer without bound.
+// buffer without bound. Each row is parsed under MaxNestingDepth, and
+// [DatasetReader.Scan] binds it under the options' MaxNestingDepth and
+// MaxRepeatedCount, as Unmarshal would bind the body the row stands for.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r, maxRow: o.limits().maxMessageSize}
+	lim := o.limits()
+	tr := &DatasetReader{src: r, maxRow: lim.maxMessageSize, lim: lim}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
 	}
@@ -153,6 +156,7 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 		if found {
 			rowBytes := tr.pending[start : end+1]
 			p := newParser(rowBytes)
+			p.maxDepth = tr.lim.maxDepth
 			row, _, perr := p.parseDatasetRow(len(tr.columns))
 			tr.pending = tr.pending[end+1:]
 			if perr != nil {

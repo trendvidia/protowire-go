@@ -58,13 +58,11 @@ func TestUnmarshalFull_AtTypeWithoutIdentifier_Rejects(t *testing.T) {
 	assert.Contains(t, err.Error(), "expected type name after @type")
 }
 
-// --- @dataset row's FIRST cell errors ---
+// --- @dataset row's FIRST cell ---
 //
-// table_test.go's TestParseTable_ListCell_Rejects / _BlockCell_Rejects
-// trip the SECOND-cell error path in parseDatasetRow (because the row
-// starts with "AAPL"). The first-cell-error branch — the `if err != nil`
-// immediately after parseRowCell on line 217 of parser.go — needs a
-// row that starts with a forbidden value.
+// parseDatasetRow reads the first cell outside its comma loop, so the
+// first cell has a branch of its own: these put a list, a block and a
+// malformed value there.
 
 // A list or block in a row's first cell is a value cell (protowire#341).
 func TestParseTable_FirstCellList(t *testing.T) {
@@ -85,4 +83,11 @@ func TestParseTable_FirstCellBlock(t *testing.T) {
 	require.IsType(t, &pxf.BlockVal{}, cells[0])
 	assert.Len(t, cells[0].(*pxf.BlockVal).Entries, 1)
 	assert.Equal(t, "x", cells[1].(*pxf.StringVal).Value)
+}
+
+func TestParseTable_FirstCellError_Rejects(t *testing.T) {
+	_, err := pxf.Parse([]byte(`@dataset T (a, b)
+( }, "x" )`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2:3: expected value")
 }
