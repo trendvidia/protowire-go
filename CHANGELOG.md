@@ -28,8 +28,9 @@ format changes.
   empty segment. The error is at that column. `BindRow` and `Scan`
   reject a path that goes through a repeated or map field, into a type
   written as a literal (Timestamp, Duration, a wrapper, `pxf.BigInt`,
-  `pxf.Decimal`, `pxf.BigFloat`, `pxf.Secret`), through a scalar, or to
-  a field that does not exist. They reject it even when the row's cells
+  `pxf.Decimal`, `pxf.BigFloat`), through a scalar, or to a field that
+  does not exist. A path may go into a `pxf.Secret`, which has a block
+  form (`pw.hint`). They reject it even when the row's cells
   are all empty.
 
 ### Changed

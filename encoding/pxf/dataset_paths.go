@@ -41,9 +41,10 @@ func columnPathError(cols []string) (int, string) {
 // checkColumnPaths checks every dotted column against the row type desc:
 // each segment names a field, and each segment but the last names a
 // singular message field whose type is not written as a literal of its
-// own (a Timestamp, Duration, wrapper, pxf.BigInt, pxf.Decimal,
-// pxf.BigFloat or pxf.Secret). A path has no index, so it cannot go
-// through a repeated or map field. A column without a dot is left to the
+// own (a Timestamp, Duration, wrapper, pxf.BigInt, pxf.Decimal or
+// pxf.BigFloat). A path has no index, so it cannot go through a repeated
+// or map field. A pxf.Secret has a block form as well as its literal
+// (`pw { value = "x" hint = "h" }`), so a path may go into one. A column without a dot is left to the
 // decoder, which reports an unknown field as it does in a body.
 func checkColumnPaths(desc protoreflect.MessageDescriptor, cols []string) error {
 	if i, msg := columnPathError(cols); i >= 0 {
@@ -71,7 +72,7 @@ func checkColumnPaths(desc protoreflect.MessageDescriptor, cols []string) error 
 				return fmt.Errorf("pxf: @dataset column %q: %q is a repeated field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
 			case fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind:
 				return fmt.Errorf("pxf: @dataset column %q: %q is not a message field", c, at)
-			case isLiteralMessageType(fd.Message()):
+			case isLiteralMessageType(fd.Message()) && !isSecret(fd.Message()):
 				return fmt.Errorf("pxf: @dataset column %q: %q is a %s, which is written as a literal; a column path cannot go into it (draft §3.4.4)", c, at, fd.Message().FullName())
 			}
 			md = fd.Message()

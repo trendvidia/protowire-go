@@ -29,6 +29,7 @@ package dc.v1;
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/wrappers.proto";
 import "pxf/annotations.proto";
+import "pxf/secret.proto";
 
 message Tempo { int32 min_bpm = 1; int32 max_bpm = 2; }
 message Desc {
@@ -55,6 +56,7 @@ message Event {
   Req req = 8;
   int32 plain = 9;
   google.protobuf.Int32Value wrap = 10;
+  pxf.Secret pw = 11;
 }
 `
 
@@ -63,6 +65,7 @@ func dottedDesc(t *testing.T) protoreflect.MessageDescriptor {
 	fd := compileProtoSources(t, "dc.proto", map[string]string{
 		"dc.proto":              dottedProtoSrc,
 		"pxf/annotations.proto": annotationsProtoSrc,
+		"pxf/secret.proto":      secretProtoSrc,
 	})
 	md := fd.Messages().ByName("Event")
 	require.NotNil(t, md)
@@ -187,6 +190,15 @@ func TestDottedColumns_HeaderPathsAreCheckedAgainstTheType(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A pxf.Secret has a block form beside its literal, so a path may go
+// into one, as the block form would.
+func TestDottedColumns_PathIntoSecret(t *testing.T) {
+	md := dottedDesc(t)
+	got, err := bindAll(t, md, "@dataset dc.v1.Event (pw.value, pw.hint)\n(\"x\", \"h\")\n")
+	require.NoError(t, err)
+	assert.True(t, proto.Equal(fullBody(t, md, `pw { value = "x" hint = "h" }`), got[0]), "got %v", got[0])
 }
 
 // Columns may reach different members of one oneof, and two columns may
