@@ -434,17 +434,24 @@ func TestDatasetWrite_OneofDefaults(t *testing.T) {
 
 	// A member set, but not among the columns: it is not written, so it
 	// cannot keep the default off. The wrapper member is null, as if no
-	// member were set; the scalar member is empty, as in row3.
+	// member were set, and reads back unset; the scalar member is empty,
+	// as in row3, and reads back as its default.
 	m4 := dynamicpb.NewMessage(desc)
 	m4.Set(f.ByName("c_i"), protoreflect.ValueOfInt32(5))
 	m4.Set(f.ByName("o_i"), protoreflect.ValueOfInt32(6))
-	sub := []string{"c_w", "o_s"}
-	row4, err := pxf.AppendDatasetRow(nil, m4, sub)
+	row4, err := pxf.AppendDatasetRow(nil, m4, []string{"c_w", "o_s"})
 	require.NoError(t, err)
 	assert.Equal(t, "(null, )\n", string(row4))
-	h4, err := pxf.AppendDatasetHeader(nil, desc, sub)
+	// o_i is a column here, so it keeps o_s's default off and the row
+	// reads back as m4 without c_i.
+	row5, err := pxf.AppendDatasetRow(nil, m4, []string{"c_w", "o_i"})
 	require.NoError(t, err)
-	assertTableReadsBack(t, desc, append(h4, row4...), []*dynamicpb.Message{dynamicpb.NewMessage(desc)})
+	assert.Equal(t, "(null, 6)\n", string(row5))
+	h5, err := pxf.AppendDatasetHeader(nil, desc, []string{"c_w", "o_i"})
+	require.NoError(t, err)
+	want5 := dynamicpb.NewMessage(desc)
+	want5.Set(f.ByName("o_i"), protoreflect.ValueOfInt32(6))
+	assertTableReadsBack(t, desc, append(h5, row5...), []*dynamicpb.Message{want5})
 }
 
 // The reader parses rows with the bind-time schema checks skipped, so
