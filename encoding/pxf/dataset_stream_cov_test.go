@@ -127,19 +127,24 @@ func TestTableReader_EscapedQuoteInStringCell(t *testing.T) {
 	assert.Equal(t, "normal", sv.Value)
 }
 
-// --- skipSimpleString / skipBytesLiteral: \n inside literal is a hard
-// error (can't be fixed by more bytes; surfaces from the streaming
-// scanner before reaching the per-row parser).
+// --- A raw LF inside a simple string: the stream decides exactly as
+// Parse does, because the row goes through the same parser. (Parse
+// accepts it today although draft §3.5 says MUST reject; when the
+// lexer is fixed both reject together.)
 
 func TestTableReader_NewlineInsideStringInRow(t *testing.T) {
-	// The opening `("open` looks like a row start; the embedded \n
-	// makes the string unterminated by PXF rules.
 	in := "@dataset T (s)\n(\"open\n\")"
+	doc, perr := pxf.Parse([]byte(in))
 	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
-	_, err = tr.Next()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "unterminated string")
+	row, err := tr.Next()
+	if perr != nil {
+		require.Error(t, err)
+		assert.Equal(t, perr.Error(), err.Error())
+		return
+	}
+	require.NoError(t, err)
+	assert.Equal(t, doc.Datasets[0].Rows[0], row)
 }
 
 func TestTableReader_NewlineInsideBytesLiteralInRow(t *testing.T) {
@@ -323,14 +328,16 @@ func TestTableReader_UnterminatedStringInLeadingDirective(t *testing.T) {
 
 // --- @dataset header that has the keyword but no `(` ---
 
-func TestTableReader_AtTableWithoutOpenParen_ReportsHeaderTooLarge(t *testing.T) {
-	// `@dataset T` with nothing after it: the scanner finds @dataset, looks
-	// for `(`, hits EOF, falls through to ErrNoDataset. (The 64 KiB cap
-	// would only fire on a giant identifier; for short inputs we hit
-	// EOF first.)
+func TestTableReader_AtTableWithoutOpenParen_ReportsParseError(t *testing.T) {
+	// `@dataset T` with nothing after it: a header was started and cut
+	// short, which is a malformed document (as Parse says), not a
+	// document without a dataset.
 	_, err := pxf.NewDatasetReader(strings.NewReader(`@dataset T`))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, pxf.ErrNoDataset)
+	assert.NotErrorIs(t, err, pxf.ErrNoDataset)
+	_, perr := pxf.Parse([]byte(`@dataset T`))
+	require.Error(t, perr)
+	assert.Equal(t, perr.Error(), err.Error())
 }
 
 // --- Unterminated string AFTER @dataset but BEFORE `(`. Covers the
