@@ -26,6 +26,7 @@ const bindAnnotationsProtoSrc = `
 syntax = "proto3";
 package bindann.v1;
 
+import "google/protobuf/field_mask.proto";
 import "google/protobuf/wrappers.proto";
 import "pxf/annotations.proto";
 
@@ -44,6 +45,18 @@ message Row {
 message Req {
   int32 id = 1;
   google.protobuf.StringValue name = 2 [(pxf.required) = true];
+}
+
+// A row type with a _null mask, without and with an annotated field.
+message NullRow {
+  google.protobuf.StringValue w = 1;
+  google.protobuf.FieldMask _null = 15;
+}
+
+message NullRowDefault {
+  google.protobuf.StringValue w = 1;
+  string d = 2 [(pxf.default) = "z"];
+  google.protobuf.FieldMask _null = 15;
 }
 `
 
@@ -79,7 +92,9 @@ func bindRows(t *testing.T, desc protoreflect.MessageDescriptor, table string) (
 
 	if bindErr != nil {
 		require.Error(t, streamErr)
-		require.Equal(t, bindErr.Error(), streamErr.Error())
+		// The message, not the position: the stream reports every row at
+		// 1:1 until #144 gives its rows document positions.
+		require.Equal(t, errMsg(bindErr), errMsg(streamErr))
 		return nil, bindErr
 	}
 	require.ErrorContains(t, streamErr, "EOF")
@@ -88,6 +103,14 @@ func bindRows(t *testing.T, desc protoreflect.MessageDescriptor, table string) (
 		require.True(t, proto.Equal(streamed[i], bound[i]), "row %d: Scan %v, BindRow %v", i, streamed[i], bound[i])
 	}
 	return bound, nil
+}
+
+// errMsg is err's text without its position.
+func errMsg(err error) string {
+	if pe, ok := err.(*pxf.Error); ok {
+		return pe.Msg
+	}
+	return err.Error()
 }
 
 func TestBindRow_EmptyCellTakesDefault(t *testing.T) {
@@ -152,4 +175,80 @@ func TestBindRow_Required(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, rows[0].Has(desc.Fields().ByName("name")))
 	assert.True(t, rows[1].Has(desc.Fields().ByName("name")))
+}
+
+// A null cell is recorded in the row type's _null mask whether or not
+// some other field carries an annotation: the mask must not depend on
+// which decoder an unrelated field selects.
+func TestBindRow_NullCellIsRecordedInNullMask(t *testing.T) {
+	for _, name := range []string{"NullRow", "NullRowDefault"} {
+		t.Run(name, func(t *testing.T) {
+			desc := compilePlacementSrc(t, bindAnnotationsProtoSrc, "bindann.v1", name)
+			rows, err := bindRows(t, desc, "@dataset bindann.v1."+name+" (w)\n(null)\n(\"x\")\n")
+			require.NoError(t, err)
+			paths := func(m *dynamicpb.Message) []string {
+				var out []string
+				if !m.Has(desc.Fields().ByName("_null")) {
+					return out
+				}
+				l := m.Get(desc.Fields().ByName("_null")).Message().Get(desc.Fields().ByName("_null").Message().Fields().ByName("paths")).List()
+				for i := range l.Len() {
+					out = append(out, l.Get(i).String())
+				}
+				return out
+			}
+			assert.Equal(t, []string{"w"}, paths(rows[0]))
+			assert.Empty(t, paths(rows[1]))
+			assert.False(t, rows[0].Has(desc.Fields().ByName("w")))
+		})
+	}
+}
+
+// The annotation-form spelling (@default / @required, the 1327 carrier)
+// binds rows the same as the bracket options.
+func TestBindRow_AnnotationForm(t *testing.T) {
+	desc := v12Msg(t, annotFile(`message M { string s = 1 @default("hi"); string r = 2 @required; }`), "M")
+	rows, err := bindRows(t, desc, "@dataset annot.v1.M (s, r)\n(, \"x\")\n")
+	require.NoError(t, err)
+	assert.Equal(t, "hi", rows[0].Get(desc.Fields().ByName("s")).String())
+
+	_, err = bindRows(t, desc, "@dataset annot.v1.M (s, r)\n(\"a\", )\n")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `required field "r" is absent`)
+}
+
+// A schema the bind-time checks reject is rejected for rows too, rather
+// than bound by picking one of two defaults (RFC-001 §8.5) or by failing
+// every row that chooses another arm of a oneof.
+func TestBindRow_SchemaViolationsReject(t *testing.T) {
+	t.Run("conflicting defaults", func(t *testing.T) {
+		desc := v12Msg(t, annotFile(`message M { string s = 1 [(pxf.default) = "a"] @default("b"); string t = 2; }`), "M")
+		_, err := bindRows(t, desc, "@dataset annot.v1.M (s, t)\n(, \"x\")\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "carry different values")
+	})
+	t.Run("required oneof member", func(t *testing.T) {
+		desc := compilePlacementSrc(t, `
+syntax = "proto3";
+package bindbad.v1;
+import "pxf/annotations.proto";
+message M { oneof pick { string a = 1 [(pxf.required) = true]; string b = 2; } }
+`, "bindbad.v1", "M")
+		_, err := bindRows(t, desc, "@dataset bindbad.v1.M (a, b)\n(, \"x\")\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "PXF schema violations")
+	})
+}
+
+// A row's error names the row: the decoder sees a synthetic body, so
+// without this a required field left empty on row 3 reports 1:1.
+func TestBindRow_ErrorNamesTheRow(t *testing.T) {
+	desc := compilePlacementSrc(t, bindAnnotationsProtoSrc, "bindann.v1", "Req")
+	doc, err := pxf.Parse([]byte("@dataset bindann.v1.Req (id, name)\n(1, \"a\")\n  (2, )\n"))
+	require.NoError(t, err)
+	ds := doc.Datasets[0]
+	require.NoError(t, pxf.BindRow(dynamicpb.NewMessage(desc), ds.Columns, ds.Rows[0]))
+	err = pxf.BindRow(dynamicpb.NewMessage(desc), ds.Columns, ds.Rows[1])
+	require.Error(t, err)
+	assert.Equal(t, `3:3: required field "name" is absent`, err.Error())
 }
