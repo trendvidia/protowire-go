@@ -55,7 +55,12 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 	}
 	// The reader's limits, not MaxMessageSize: the row's bytes were
 	// capped as they were read, and the synthetic body may format wider.
-	o := UnmarshalOptions{MaxNestingDepth: tr.lim.maxDepth, MaxRepeatedCount: tr.lim.maxRepeated}
+	o := UnmarshalOptions{
+		MaxNestingDepth:         tr.lim.maxDepth,
+		MaxNumericLiteralDigits: tr.lim.maxDigits,
+		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
+		MaxRepeatedCount:        tr.lim.maxRepeated,
+	}
 	return o.bindRow(msg, tr.columns, row)
 }
 

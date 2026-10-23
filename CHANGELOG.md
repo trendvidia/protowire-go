@@ -47,6 +47,16 @@ format changes.
   nothing in v1.8.1 reaches it; `go.sum` stays at 26 modules. Tagged
   `check/protovalidate/v1.4.3` at that commit.
 
+### Fixed
+
+- **`DatasetReader` applies its options' bytes-literal and digit
+  limits.** A reader built with `UnmarshalOptions.NewDatasetReader`
+  parsed the header and each row under the package
+  `MaxBytesLiteralLength`, and `Scan` bound under the package
+  `MaxNumericLiteralDigits`, so a stream accepted a `b"…"` literal or a
+  big-number cell that `UnmarshalFull` and `Unmarshal` reject under the
+  same options. Both now apply the caller's limits.
+
 ## [1.8.1] — 2026-09-10
 
 A patch release: one fix and two dependency moves, nothing that changes

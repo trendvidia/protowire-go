@@ -86,9 +86,10 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // NewDatasetReader is [NewDatasetReader] under the options' limits: the
 // bytes held while a row boundary is sought are capped at the options'
 // MaxMessageSize, so a stream that never ends a row cannot grow the
-// buffer without bound. Each row is parsed under MaxNestingDepth, and
-// [DatasetReader.Scan] binds it under the options' MaxNestingDepth and
-// MaxRepeatedCount, as Unmarshal would bind the body the row stands for.
+// buffer without bound. The header and each row are parsed under the
+// options' MaxNestingDepth and MaxBytesLiteralLength, and
+// [DatasetReader.Scan] binds a row under every limit but MaxMessageSize,
+// as Unmarshal would bind the body the row stands for.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 	lim := o.limits()
 	tr := &DatasetReader{src: r, maxRow: lim.maxMessageSize, lim: lim}
@@ -157,6 +158,7 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 			rowBytes := tr.pending[start : end+1]
 			p := newParser(rowBytes)
 			p.maxDepth = tr.lim.maxDepth
+			p.lex.maxBytesLiteral = tr.lim.maxBytesLiteral
 			row, _, perr := p.parseDatasetRow(len(tr.columns))
 			tr.pending = tr.pending[end+1:]
 			if perr != nil {
@@ -215,7 +217,8 @@ func (tr *DatasetReader) readHeader() error {
 			// no rows yet, and validates everything we care about
 			// (leading-directive shape, @type / @dataset conflict,
 			// dotted columns, etc.).
-			doc, perr := Parse(tr.pending[:headerEnd+1])
+			po := ParseOptions{MaxNestingDepth: tr.lim.maxDepth, MaxBytesLiteralLength: tr.lim.maxBytesLiteral}
+			doc, perr := po.Parse(tr.pending[:headerEnd+1])
 			if perr != nil {
 				return perr
 			}
