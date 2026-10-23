@@ -11,6 +11,31 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`UnmarshalFull` keeps track of fields set inside `name = { ... }`,
+  list elements, map values, keyed entries and `Any` bodies**
+  ([#156](https://github.com/trendvidia/protowire-go/issues/156)). Only
+  the block-tail form `name { ... }` recorded a body's fields under
+  `name.`. Every other way into a message body recorded them under the
+  parent, with three consequences. A value set inside `one = { label =
+  "x" }` was overwritten by `label`'s `(pxf.default)`. A nested
+  `(pxf.required)` field in that form was never checked. And a field of
+  a list element, map value or keyed entry stood in for the parent's
+  field of the same name: `items = [{ need = 5 }]` satisfied the
+  parent's required `need`, and kept a parent default off. Every
+  `@dataset` block cell is bound in the `= { ... }` form, so v1.9.0 value
+  cells lost such values. Fields are now recorded under the body they
+  belong to (`one.label`, `items[0].label`, `by_key["k"].label`), which
+  is also what `Result.PresentFields` and `Result.IsNull` report. A
+  `null` inside a list element or map value no longer adds the parent's
+  field to the root `_null` mask; a FieldMask path cannot name an
+  element, so the null is recorded in the `Result` only. The
+  `OnSecretField` hook now sees a Secret written `name = { value = ...
+  }`, as it already did for `name { value = ... }`, instead of leaving
+  the plaintext on the message. `Unmarshal` without presence tracking
+  is unchanged and costs the same.
+
 ## [1.9.0] — 2026-10-23
 
 A minor release: `@dataset` grows from a read-only, scalar-cell table
