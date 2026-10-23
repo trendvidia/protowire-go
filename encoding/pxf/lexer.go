@@ -16,6 +16,11 @@ type lexer struct {
 	pos   int
 	line  int
 	col   int
+	// base is added to every reported Offset. It is non-zero only when
+	// the input is a window into a larger document (the streaming
+	// dataset reader parses one row at a time), so positions stay
+	// document-relative.
+	base int
 
 	// tolerant enables the error-recovering behaviors used by
 	// [ParseTolerant]: unterminated strings end at the newline (or EOF),
@@ -74,7 +79,7 @@ func (l *lexer) advance() byte {
 }
 
 func (l *lexer) currentPos() Position {
-	return Position{Line: l.line, Column: l.col, Offset: l.pos}
+	return Position{Line: l.line, Column: l.col, Offset: l.base + l.pos}
 }
 
 func (l *lexer) skipSpaces() {

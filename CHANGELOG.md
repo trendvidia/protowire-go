@@ -11,6 +11,23 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DatasetReader.Next` no longer ends quietly at a malformed or
+  truncated row** ([#141]). A row cut short (a crash mid-append), a `(`
+  inside a row, or non-row content between rows used to end the table
+  with `io.EOF`, losing every row after it without an error; `Parse`
+  rejected the same input. `Next` now returns the error `Parse`
+  returns, at the same document position, and `io.EOF` only at the end
+  of the input or before the next directive. Rows and errors carry
+  document positions (they were relative to the row), so the stream's
+  rows equal `Parse`'s as the draft requires (§3.4.4). The row scan no
+  longer rejects a raw LF inside a quoted string on its own: the parser
+  decides, as it does for `Parse`. `NewDatasetReader` on a header cut
+  short returns `Parse`'s error instead of `ErrNoDataset`.
+
+[#141]: https://github.com/trendvidia/protowire-go/issues/141
+
 ### Changed
 
 - **`check/protovalidate` requires the parent module at v1.8.1 instead of

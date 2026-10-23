@@ -38,6 +38,16 @@ func newParser(input []byte) *parser {
 	return p
 }
 
+// newParserAt is newParser for input that starts at position at of a
+// larger document, so every position it reports is document-relative.
+func newParserAt(input []byte, at Position) *parser {
+	lex := newLexer(input)
+	lex.line, lex.col, lex.base = at.Line, at.Column, at.Offset
+	p := &parser{lex: lex, maxDepth: MaxNestingDepth}
+	p.advance()
+	return p
+}
+
 func newTolerantParser(input []byte) *parser {
 	p := &parser{lex: newLexer(input), tolerant: true, maxDepth: MaxNestingDepth}
 	p.lex.tolerant = true
@@ -390,8 +400,7 @@ directives:
 			}
 		}
 		if p.current.Kind != EOF {
-			if err := p.soft(errorf(p.current.Pos,
-				"@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)")); err != nil {
+			if err := p.soft(errorf(p.current.Pos, errDatasetBesideEntries)); err != nil {
 				return nil, err
 			}
 		}
@@ -414,6 +423,11 @@ directives:
 	}
 	return doc, nil
 }
+
+// errDatasetBesideEntries is the error for anything after a dataset's
+// rows that is neither a row nor a directive. The streaming reader
+// reports the same text.
+const errDatasetBesideEntries = "@dataset directive cannot coexist with top-level field entries; the document's payload is the @dataset rows (draft §3.4.4)"
 
 // parseDatasetDirective reads `@dataset <type> ( col1, col2, ... ) row*`.
 // AT_DATASET is current on entry. Returns the table plus the byte offset
