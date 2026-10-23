@@ -10,6 +10,7 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,9 +79,16 @@ message Row {
   Color d_color = 45 [(pxf.default) = "COLOR_GREEN"];
 
   oneof choice {
-    string c_s = 50 [(pxf.default) = "picked"];
+    google.protobuf.StringValue c_w = 50 [(pxf.default) = "picked"];
     int32 c_i = 51;
     bool c_b = 52;
+  }
+
+  // A scalar member with a default: unset with no member set, no cell
+  // holds it (null is rejected on a scalar).
+  oneof other {
+    string o_s = 53 [(pxf.default) = "other"];
+    int32 o_i = 54;
   }
 
   // Not cell-shaped.
@@ -91,6 +99,18 @@ message Row {
 
 message Inner {
   int32 x = 1;
+}
+
+message Pick {
+  oneof choice {
+    google.protobuf.StringValue c_w = 1 [(pxf.default) = "picked"];
+    int32 c_i = 2;
+    bool c_b = 3;
+  }
+  oneof other {
+    string o_s = 4 [(pxf.default) = "other"];
+    int32 o_i = 5;
+  }
 }
 
 message Req {
@@ -119,7 +139,34 @@ var rowColumns = []string{
 	"fl", "db", "by", "color", "opt",
 	"ts", "dur", "w_s", "w_i64", "w_b", "w_by", "bi", "dec", "bf", "sec",
 	"d_s", "d_i32", "d_opt", "d_w", "d_ts", "d_color",
-	"c_s", "c_i", "c_b",
+	"c_w", "c_i", "c_b", "o_s", "o_i",
+}
+
+// defaultedColumns are the columns of dsw.v1.Row with (pxf.default).
+// A table that leaves one out reads it back as its default, so a round
+// trip over a column subset always keeps these.
+var defaultedColumns = []string{"d_s", "d_i32", "d_opt", "d_w", "d_ts", "d_color", "c_w", "o_s"}
+
+// makeWritable sets what a row cannot hold unset (see
+// AppendDatasetRow): d_opt, an optional scalar with a default, and a
+// member of oneof "other", whose defaulted member is a scalar. Only
+// fields among cols are touched.
+func makeWritable(m *dynamicpb.Message, cols []string) {
+	desc := m.Descriptor()
+	in := func(c string) bool {
+		for _, x := range cols {
+			if x == c {
+				return true
+			}
+		}
+		return false
+	}
+	if fd := desc.Fields().ByName("d_opt"); in("d_opt") && !m.Has(fd) {
+		m.Set(fd, protoreflect.ValueOfInt32(0))
+	}
+	if in("o_s") && m.WhichOneof(desc.Oneofs().ByName("other")) == nil {
+		m.Set(desc.Fields().ByName("o_s"), protoreflect.ValueOfString(""))
+	}
 }
 
 // randomRow fills each column of a dsw.v1.Row at random, leaving about
@@ -142,6 +189,7 @@ func randomRow(t testing.TB, r *rand.Rand, desc protoreflect.MessageDescriptor) 
 		}
 		m.Set(fd, randomScalar(r, fd))
 	}
+	makeWritable(m, rowColumns)
 	return m
 }
 
@@ -254,7 +302,9 @@ func TestDatasetWrite_RoundTrip(t *testing.T) {
 	for i := range msgs {
 		msgs[i] = randomRow(t, r, desc)
 	}
-	msgs = append(msgs, dynamicpb.NewMessage(desc)) // every column unset
+	empty := dynamicpb.NewMessage(desc) // every column unset that can be
+	makeWritable(empty, rowColumns)
+	msgs = append(msgs, empty)
 	table := writeTable(t, desc, rowColumns, msgs)
 	assertTableReadsBack(t, desc, table, msgs)
 }
@@ -268,12 +318,9 @@ func FuzzDatasetWriteRoundTrip(f *testing.F) {
 		desc := compileDatasetWrite(t, "Row")
 		var cols []string
 		for i, c := range rowColumns {
-			if colMask&(1<<uint(i)) != 0 {
+			if colMask&(1<<uint(i)) != 0 || slices.Contains(defaultedColumns, c) {
 				cols = append(cols, c)
 			}
-		}
-		if len(cols) == 0 {
-			cols = rowColumns[:1]
 		}
 		r := rand.New(rand.NewPCG(seed, 7))
 		msgs := make([]*dynamicpb.Message, 8)
@@ -288,6 +335,7 @@ func FuzzDatasetWriteRoundTrip(f *testing.F) {
 					m.Set(fd, full.Get(fd))
 				}
 			}
+			makeWritable(m, cols)
 			msgs[i] = m
 		}
 		assertTableReadsBack(t, desc, writeTable(t, desc, cols, msgs), msgs)
@@ -319,16 +367,16 @@ func TestDatasetWrite_AppendNeedsNoRewrite(t *testing.T) {
 
 func TestDatasetWrite_Text(t *testing.T) {
 	desc := compileDatasetWrite(t, "Row")
-	cols := []string{"s", "i32", "opt", "d_i32", "d_opt", "color", "ts"}
+	cols := []string{"s", "i32", "opt", "d_i32", "d_w", "color", "ts"}
 	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
 	require.NoError(t, err)
-	assert.Equal(t, "@dataset dsw.v1.Row (s, i32, opt, d_i32, d_opt, color, ts)\n", string(h))
+	assert.Equal(t, "@dataset dsw.v1.Row (s, i32, opt, d_i32, d_w, color, ts)\n", string(h))
 
 	m := dynamicpb.NewMessage(desc)
 	row, err := pxf.AppendDatasetRow(nil, m, cols)
 	require.NoError(t, err)
 	// Unset: empty, except d_i32 (zero written, so the default does not
-	// replace it) and d_opt (null, so it stays unset).
+	// replace it) and d_w (a wrapper: null, so it stays unset).
 	assert.Equal(t, "(, , , 0, null, , )\n", string(row))
 
 	require.NoError(t, pxf.Unmarshal([]byte(`s = "a, (b)" i32 = -3 opt = 0 d_i32 = 4 color = COLOR_RED ts = 2026-10-23T00:00:00Z`), m))
@@ -338,26 +386,40 @@ func TestDatasetWrite_Text(t *testing.T) {
 }
 
 func TestDatasetWrite_OneofDefaults(t *testing.T) {
-	desc := compileDatasetWrite(t, "Row")
-	cols := []string{"c_s", "c_i", "c_b"}
+	desc := compileDatasetWrite(t, "Pick")
+	f := desc.Fields()
+	cols := []string{"c_w", "c_i", "c_b", "o_s", "o_i"}
 
-	// No member set: the member with the default (at most one may have
-	// one) is null, which keeps the default off.
+	// No member of "choice" set: its defaulted member is a wrapper, so it
+	// is null, which keeps the default off. "other" has o_i set.
 	m := dynamicpb.NewMessage(desc)
+	m.Set(f.ByName("o_i"), protoreflect.ValueOfInt32(4))
 	row, err := pxf.AppendDatasetRow(nil, m, cols)
 	require.NoError(t, err)
-	assert.Equal(t, "(null, , )\n", string(row))
+	assert.Equal(t, "(null, , , , 4)\n", string(row))
 
-	// A member set: the others stay empty.
+	// A member set: the others stay empty, the defaulted one included.
 	m2 := dynamicpb.NewMessage(desc)
-	m2.Set(desc.Fields().ByName("c_b"), protoreflect.ValueOfBool(false))
+	m2.Set(f.ByName("c_b"), protoreflect.ValueOfBool(false))
+	m2.Set(f.ByName("o_s"), protoreflect.ValueOfString(""))
 	row2, err := pxf.AppendDatasetRow(nil, m2, cols)
 	require.NoError(t, err)
-	assert.Equal(t, "(, , false)\n", string(row2))
+	assert.Equal(t, `(, , false, "", )`+"\n", string(row2))
 
 	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
 	require.NoError(t, err)
 	assertTableReadsBack(t, desc, append(append(h, row...), row2...), []*dynamicpb.Message{m, m2})
+
+	// No member of "other" set: its defaulted member is a scalar, which
+	// no cell can hold unset.
+	_, err = pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), cols)
+	require.ErrorContains(t, err, `column "o_s": unset, and no cell holds that`)
+}
+
+func TestDatasetWrite_RefusesUnsetOptionalScalarWithDefault(t *testing.T) {
+	desc := compileDatasetWrite(t, "Row")
+	_, err := pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), []string{"d_opt"})
+	require.ErrorContains(t, err, `column "d_opt": unset, and no cell holds that`)
 }
 
 func TestDatasetWrite_Required(t *testing.T) {

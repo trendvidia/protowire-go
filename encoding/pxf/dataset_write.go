@@ -54,13 +54,15 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 // is an empty cell, which reads back as absent, except where reading
 // an empty cell would not give back the unset field:
 //
-//   - A field with (pxf.default) would take the default. An unset field
-//     with presence is written `null`, which suppresses the default and
-//     leaves the field unset; one without presence (a proto3 scalar) is
-//     written as its zero value, which the default does not replace.
-//     A oneof member stays empty when another member of its oneof is
-//     set, since a set member keeps the default off and only one
-//     member may appear.
+//   - A field with (pxf.default) would take the default. A proto3
+//     scalar without presence is written as its zero value, which the
+//     default does not replace. A message-typed field (a wrapper, a
+//     Timestamp, ...) is written `null`, which keeps the default off
+//     and leaves the field unset. A scalar with presence (`optional`,
+//     or a oneof member) is an error: no cell holds it, because the
+//     draft rejects `null` on a scalar field (trendvidia/protowire#339
+//     asks whether it should). A oneof member stays empty when another
+//     member of its oneof is set, since that keeps the default off.
 //   - A (pxf.required) field would be rejected. A proto3 scalar is
 //     written as its zero value; an unset field with presence is an
 //     error.
@@ -118,6 +120,9 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 		// A set member keeps the default off. (At most one member of a
 		// oneof may carry a default, so no second null can arise.)
 		return nil
+	}
+	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+		return errors.New("unset, and no cell holds that: an empty cell reads back as the field's (pxf.default), and the draft rejects null on a scalar field")
 	}
 	e.buf.WriteString("null")
 	return nil

@@ -180,7 +180,7 @@ for _, t := range batch {
 }
 ```
 
-A row depends only on its message and the columns, so appending to an existing file never rewrites earlier bytes. Both functions refuse what a v1 cell cannot hold (dotted, repeated, map or block-valued columns) and a column list that omits a `(pxf.required)` field. An unset field is an empty cell, except where an empty cell would read back as something else: a field with `(pxf.default)` is written `null` (or its zero value, for a proto3 scalar) so the default does not replace it.
+A row depends only on its message and the columns, so appending to an existing file never rewrites earlier bytes. Both functions refuse what a v1 cell cannot hold (dotted, repeated, map or block-valued columns) and a column list that omits a `(pxf.required)` field. An unset field is an empty cell, except where an empty cell would read back as something else: a field with `(pxf.default)` is written `null` if it is message-typed, or its zero value if it is a proto3 scalar, so the default does not replace it. An unset `optional` scalar with a default has no cell that reads back unset, and is refused.
 
 ### Schema bind-time checks
 

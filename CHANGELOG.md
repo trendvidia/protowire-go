@@ -24,9 +24,13 @@ format changes.
   field, a `pxf.Secret` with a hint or fingerprint, and a column list
   that omits a `(pxf.required)` field. Where an empty cell would not
   read back as the unset field, the row says so explicitly: an unset
-  field with `(pxf.default)` is `null` (or its zero value, for a proto3
-  scalar), and an unset `(pxf.required)` field with presence is an
-  error. A row depends only on its message and the columns, so
+  field with `(pxf.default)` is `null` if it is message-typed (a
+  wrapper, a Timestamp) and its zero value if it is a proto3 scalar. An
+  unset `optional` or oneof scalar with a default is an error, since
+  the draft rejects `null` on a scalar field and no other cell holds it
+  ([protowire#339](https://github.com/trendvidia/protowire/issues/339)
+  asks whether it should); so is an unset `(pxf.required)` field with
+  presence. A row depends only on its message and the columns, so
   appending to a file never rewrites earlier bytes.
 
 [#142]: https://github.com/trendvidia/protowire-go/issues/142
