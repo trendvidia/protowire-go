@@ -175,34 +175,27 @@ func TestTableReader_ErrorsAreSticky(t *testing.T) {
 	assert.Equal(t, first, err)
 }
 
-func TestTableReader_RejectsListCellMidStream(t *testing.T) {
+// List and block cells stream like any other cell, and the reader frames
+// the rows after them (protowire#341).
+func TestTableReader_ListAndBlockCellsMidStream(t *testing.T) {
 	in := `@dataset T (a, b)
 ("ok", 1)
-("bad", [1, 2])`
+("list", [1, 2])
+("block", { x = 1 })
+("after", 4)`
 	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
 
-	_, err = tr.Next()
-	require.NoError(t, err)
-
-	_, err = tr.Next()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "list values")
-}
-
-func TestTableReader_RejectsBlockCellMidStream(t *testing.T) {
-	in := `@dataset T (a, b)
-("ok", 1)
-("bad", { x = 1 })`
-	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
-	require.NoError(t, err)
-
-	_, err = tr.Next()
-	require.NoError(t, err)
-
-	_, err = tr.Next()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "block values")
+	var kinds []string
+	for {
+		row, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err)
+		kinds = append(kinds, fmt.Sprintf("%T", row.Cells[1]))
+	}
+	assert.Equal(t, []string{"*pxf.IntVal", "*pxf.ListVal", "*pxf.BlockVal", "*pxf.IntVal"}, kinds)
 }
 
 // --- Strings / comments inside cells don't trip the row-boundary scanner ---

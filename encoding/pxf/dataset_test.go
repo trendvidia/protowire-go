@@ -115,20 +115,24 @@ func TestParseTable_ArityLong_Rejects(t *testing.T) {
 
 // --- v1 cell-grammar restrictions ---
 
-func TestParseTable_ListCell_Rejects(t *testing.T) {
+func TestParseTable_ListCell(t *testing.T) {
 	in := `@dataset trades.v1.Trade (symbol, tags)
 ("AAPL", ["tech", "blue-chip"])`
-	_, err := pxf.Parse([]byte(in))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "list values")
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	list, ok := doc.Datasets[0].Rows[0].Cells[1].(*pxf.ListVal)
+	require.True(t, ok)
+	assert.Len(t, list.Elements, 2)
 }
 
-func TestParseTable_BlockCell_Rejects(t *testing.T) {
+func TestParseTable_BlockCell(t *testing.T) {
 	in := `@dataset trades.v1.Trade (symbol, meta)
 ("AAPL", { exchange = "NASDAQ" })`
-	_, err := pxf.Parse([]byte(in))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "block values")
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	block, ok := doc.Datasets[0].Rows[0].Cells[1].(*pxf.BlockVal)
+	require.True(t, ok)
+	assert.Len(t, block.Entries, 1)
 }
 
 // --- Column-entry restrictions ---
@@ -233,10 +237,6 @@ func TestParseTable_ErrorMessagesMentionDraftSection(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"list_cell", `@dataset T (a, b)
-(1, [2,3])`, "§3.4.4"},
-		{"block_cell", `@dataset T (a, b)
-(1, {x=1})`, "§3.4.4"},
 		{"dotted_col", `@dataset T (a.b)`, "§3.4.4"},
 		{"with_type", `@type X
 @dataset T (a)

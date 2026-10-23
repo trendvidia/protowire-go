@@ -453,16 +453,21 @@ func (d *directDecoder) consumeDatasetRow(expected int) (DatasetRow, error) {
 }
 
 // consumeRowCell consumes one cell of a @dataset row. Returns nil for
-// an empty cell (no value between commas, or at row start/end).
-// Rejects list / block values per v1 cell-grammar.
+// an empty cell (no value between commas, or at row start/end). Any
+// value is a cell, lists and blocks included (draft §3.4.4).
 func (d *directDecoder) consumeRowCell() (Value, error) {
 	switch d.current.Kind {
 	case COMMA, RPAREN:
 		return nil, nil
-	case LBRACKET:
-		return nil, errorf(d.current.Pos, "@dataset cells cannot contain list values in v1 (draft §3.4.4)")
-	case LBRACE:
-		return nil, errorf(d.current.Pos, "@dataset cells cannot contain block values in v1 (draft §3.4.4)")
+	case LBRACKET, LBRACE:
+		// A list or block cell goes through the AST parser, running on
+		// this decoder's own lexer, so the decoder resumes at the token
+		// after the value. A cell sits at the row's top level: depth 0,
+		// as in parser.parseRowCell.
+		p := &parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
+		v, err := p.parseValue(0)
+		d.current = p.current
+		return v, err
 	}
 	// Re-use the AST-tier value parser by handing off to a small inline
 	// reader. We construct a one-shot parser around the current lexer

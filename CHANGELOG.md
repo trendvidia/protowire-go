@@ -11,6 +11,23 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`@dataset` value cells: a cell may hold a list or a block**
+  (trendvidia/protowire#341, draft `-01` §3.4.4 at protowire v1.13). A
+  non-empty cell in column `c` now means exactly what `c = <value>` means
+  in a body of the row type. So a row can carry a sub-message
+  (`{ name = "x" }`), a repeated field (`["a", "b"]`, `[{ ... }]`) or a
+  map (`{ "k": "v" }`). `Parse`, `UnmarshalFull`'s direct decoder and
+  `DatasetReader` accept them. `BindRow` and `DatasetReader.Scan` bind
+  them through the body decoder, so `{}` is a present empty message, an
+  empty cell is still absent, and a list on a scalar column is the body's
+  error. In the direct decoder, a list or block cell is parsed by the AST
+  parser running on the decoder's own lexer, and it counts toward
+  `MaxNestingDepth` like any value. The errors `@dataset cells cannot
+  contain list/block values in v1` are gone; dotted column paths are
+  still rejected (protowire#342).
+
 ### Changed
 
 - **`check/protovalidate` requires the parent module at v1.8.1 instead of

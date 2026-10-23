@@ -518,17 +518,12 @@ func (p *parser) parseDatasetRow(expected int) (*DatasetRow, int, error) {
 }
 
 // parseRowCell consumes one cell of a @dataset row. Returns nil for an
-// empty cell (no value between two commas, or at row start/end).
-// Rejects list ('[ ... ]') and block ('{ ... }') values per v1
-// cell-grammar (draft §3.4.4).
+// empty cell (no value between two commas, or at row start/end). Any
+// value is a cell, lists and blocks included (draft §3.4.4).
 func (p *parser) parseRowCell() (Value, error) {
 	switch p.current.Kind {
 	case COMMA, RPAREN:
 		return nil, nil
-	case LBRACKET:
-		return nil, errorf(p.current.Pos, "@dataset cells cannot contain list values in v1 (draft §3.4.4)")
-	case LBRACE:
-		return nil, errorf(p.current.Pos, "@dataset cells cannot contain block values in v1 (draft §3.4.4)")
 	}
 	return p.parseValue(0)
 }

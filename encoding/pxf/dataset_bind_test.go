@@ -233,12 +233,9 @@ func TestBindRow_ArityMismatch_Rejects(t *testing.T) {
 
 // --- BindRow: hand-constructed row with a non-leaf cell value
 // surfaces the "unexpected cell value type" defensive error.
-// The parser rejects list/block cells in @dataset rows, so this branch
-// is only reachable by callers that construct a DatasetRow manually
-// (e.g. wiring BindRow into a non-PXF pipeline). Worth covering for
-// the error message itself.
-
-func TestBindRow_NonLeafCellValue_Rejects(t *testing.T) {
+// A list cell binds as `<column> = [ ... ]` would in a body, so a list on
+// a singular scalar column is the body's error, not a silent bind.
+func TestBindRow_ListCellOnScalarColumn_Rejects(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	msg := dynamicpb.NewMessage(allTypes)
 	row := pxf.DatasetRow{
@@ -248,7 +245,7 @@ func TestBindRow_NonLeafCellValue_Rejects(t *testing.T) {
 	}
 	err := pxf.BindRow(msg, []string{"string_field"}, row)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "scalar-shaped")
+	assert.Contains(t, err.Error(), "string_field")
 }
 
 // --- Equivalence: Scan vs. UnmarshalFull-then-BindRow produces same fields ---

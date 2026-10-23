@@ -97,11 +97,9 @@ func rowToPXFBody(columns []string, row DatasetRow) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// writeCellValue formats a single cell value as PXF text. v1 @dataset
-// cells are scalar-shaped (no list, no block), so we only handle the
-// leaf-value variants — list and block AST nodes are unreachable here
-// because parseDatasetRow / consumeRowCell rejects them before the
-// streaming reader hands them to BindRow.
+// writeCellValue formats a single cell value as PXF text. A list or block
+// cell is written with the package formatter, so the synthetic body binds
+// it exactly as `<column> = <value>` would bind in a document.
 func writeCellValue(buf *bytes.Buffer, v Value) error {
 	switch v := v.(type) {
 	case *StringVal:
@@ -128,8 +126,10 @@ func writeCellValue(buf *bytes.Buffer, v Value) error {
 		buf.WriteString(v.Raw)
 	case *DurationVal:
 		buf.WriteString(v.Raw)
+	case *ListVal, *BlockVal:
+		buf.Write(FormatValue(v))
 	default:
-		return fmt.Errorf("pxf: BindRow: unexpected cell value type %T (v1 @dataset cells are scalar-shaped)", v)
+		return fmt.Errorf("pxf: BindRow: unexpected cell value type %T", v)
 	}
 	return nil
 }

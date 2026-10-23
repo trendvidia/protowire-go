@@ -29,11 +29,12 @@ type Document struct {
 // entry at document root (draft §3.4.4). It carries many instances of
 // one message type in a single document — the protowire-native CSV.
 //
-// Cells are scalar-shaped in v1: list ('[ ... ]') and block ('{ ... }')
-// values are not permitted in cells. An empty cell (no value between
-// commas) denotes an absent field; a `null` literal denotes a present-
-// but-null field; any other value denotes a present field with that
-// value. See [DatasetRow] for cell representation.
+// A cell holds any PXF value, list ('[ ... ]') and block ('{ ... }')
+// included, and means exactly what `<column> = <value>` means in a body
+// of the row type (draft -01 §3.4.4, protowire#341). An empty cell (no
+// value between commas) denotes an absent field; a `null` literal denotes
+// a present-but-null field; any other value denotes a present field with
+// that value. See [DatasetRow] for cell representation.
 //
 // A document with any DatasetDirective MUST NOT have a @type directive
 // or any top-level field entries: the @dataset header IS the document's
