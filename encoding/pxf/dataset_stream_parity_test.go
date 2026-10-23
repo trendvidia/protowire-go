@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -43,6 +44,11 @@ func TestDatasetReader_AgreesWithParse(t *testing.T) {
 		{"list cell", head + "([1], 2)\n", true},
 		{"nested paren in a cell", head + "((1), 2)\n", true},
 		{"cut bytes literal", head + "(b\"QQ\nQQ\", 1)\n", true},
+		{"bare @ at end", head + "@", true},
+		{"bare @ between rows", head + "@\n(90, 120)\n", true},
+		{"@ then a space", head + "@ x\n", true},
+		{"cut bytes literal in a leading entry", "x = b\"QQ\nQQ\"\n@dataset T (a, b)\n(1, 2)\n", true},
+		{"cut bytes literal in a leading directive", "@x b\"\n@dataset T (a, b)\n", true},
 
 		{"clean", head + "(90, 120)\n", false},
 		{"no rows", "@dataset T (a, b)\n", false},
@@ -82,6 +88,11 @@ func readAllRows(src io.Reader) ([]pxf.DatasetRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	return readRows(tr)
+}
+
+// readRows reads tr's rows to io.EOF.
+func readRows(tr *pxf.DatasetReader) ([]pxf.DatasetRow, error) {
 	var rows []pxf.DatasetRow
 	for {
 		row, err := tr.Next()
@@ -118,6 +129,48 @@ func TestDatasetReader_DirectiveEndsRows(t *testing.T) {
 	require.ErrorIs(t, err, io.EOF)
 }
 
+// A reader chained on Tail reports the next table's rows and errors at
+// their document positions, as Parse does.
+func TestDatasetReader_TailKeepsDocumentPositions(t *testing.T) {
+	const two = "@dataset A (x)\n(1)\n\n@x {}\n@proto { message M {} }\n@dataset B (y)\n(3)\n"
+	for _, tc := range []struct{ name, in string }{
+		{"rows", two},
+		{"error", two + "(4\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, perr := pxf.Parse([]byte(tc.in))
+			for _, r := range []struct {
+				name string
+				src  io.Reader
+			}{
+				{"whole", strings.NewReader(tc.in)},
+				{"one byte", iotest.OneByteReader(strings.NewReader(tc.in))},
+			} {
+				tr, err := pxf.NewDatasetReader(r.src)
+				require.NoError(t, err, r.name)
+				for {
+					if _, err := tr.Next(); err != nil {
+						require.ErrorIs(t, err, io.EOF, r.name)
+						break
+					}
+				}
+				tr2, err := pxf.NewDatasetReader(tr.Tail())
+				require.NoError(t, err, r.name)
+				rows, err := readRows(tr2)
+				if perr != nil {
+					require.Error(t, err, r.name)
+					assert.Equal(t, perr.Error(), err.Error(), r.name)
+					continue
+				}
+				require.NoError(t, err, r.name)
+				assert.Equal(t, doc.Datasets[1].Rows, rows, r.name)
+				assert.Equal(t, doc.Directives, tr2.Directives(), r.name)
+				assert.Equal(t, doc.Datasets[1].Columns, tr2.Columns(), r.name)
+			}
+		})
+	}
+}
+
 // An error is sticky: the rows after a malformed one are never yielded.
 func TestDatasetReader_ErrorIsSticky(t *testing.T) {
 	tr, err := pxf.NewDatasetReader(strings.NewReader("@dataset T (a, b)\n(1, 2\n(3, 4)\n"))
@@ -127,6 +180,10 @@ func TestDatasetReader_ErrorIsSticky(t *testing.T) {
 	_, err2 := tr.Next()
 	assert.Equal(t, err, err2)
 }
+
+// directiveStart matches the start of a directive token: '@' and a name
+// (lexDirective). A bare '@' is not one.
+var directiveStart = regexp.MustCompile(`^@[A-Za-z0-9_.]`)
 
 // FuzzDatasetStreamParity holds the stream to Parse on arbitrary rows
 // read one byte at a time, so every row boundary also falls on a read
@@ -145,6 +202,8 @@ func FuzzDatasetStreamParity(f *testing.F) {
 		"(1, [2])\n",
 		"(1, {})\n",
 		"(\"x\ny\", 1)\n",
+		"(1, 2)\n@",
+		"(1, 2)\n@ x\n",
 	} {
 		f.Add(s)
 	}
@@ -172,7 +231,7 @@ func FuzzDatasetStreamParity(f *testing.F) {
 		}
 		rest, _ := io.ReadAll(tr.Tail())
 		stop := len(in) - len(rest)
-		if len(rest) > 0 && rest[0] != '@' {
+		if len(rest) > 0 && !directiveStart.Match(rest) {
 			t.Fatalf("stream ended at %q, not at a directive", rest)
 		}
 		if perr != nil {

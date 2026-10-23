@@ -18,8 +18,9 @@ type lexer struct {
 	col   int
 	// base is added to every reported Offset. It is non-zero only when
 	// the input is a window into a larger document (the streaming
-	// dataset reader parses one row at a time), so positions stay
-	// document-relative.
+	// dataset reader parses one row, or a chained table's header, at a
+	// time), so positions stay document-relative. A Pos.Offset indexes
+	// input only after base is subtracted.
 	base int
 
 	// tolerant enables the error-recovering behaviors used by

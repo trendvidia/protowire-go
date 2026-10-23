@@ -33,9 +33,7 @@ type parser struct {
 }
 
 func newParser(input []byte) *parser {
-	p := &parser{lex: newLexer(input), maxDepth: MaxNestingDepth}
-	p.advance()
-	return p
+	return newParserAt(input, Position{Line: 1, Column: 1})
 }
 
 // newParserAt is newParser for input that starts at position at of a
@@ -602,7 +600,7 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 		// stripped and (for triple-quoted) leading-LF / dedent applied.
 		pd.Shape = ProtoSource
 		pd.Body = []byte(p.current.Value)
-		endOffset := p.lex.pos
+		endOffset := p.lex.base + p.lex.pos
 		p.advance()
 		return pd, endOffset, nil
 
@@ -619,7 +617,7 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 			}
 		}
 		pd.Body = decoded
-		endOffset := p.lex.pos
+		endOffset := p.lex.base + p.lex.pos
 		p.advance()
 		return pd, endOffset, nil
 
@@ -637,7 +635,7 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 // to that token. Used by parseProtoDirective for anonymous/named
 // @proto bodies, whose interior is protobuf source rather than PXF.
 func (p *parser) captureBraceBody(label string) ([]byte, int, error) {
-	open := p.current.Pos.Offset
+	open := p.current.Pos.Offset - p.lex.base
 	close := findMatchingBrace(p.lex.input, open)
 	if close < 0 {
 		return nil, 0, errorf(p.current.Pos, "%s: unmatched '{'", label)
@@ -649,7 +647,7 @@ func (p *parser) captureBraceBody(label string) ([]byte, int, error) {
 		p.lex.advance()
 	}
 	p.advance() // prime current token past `}`
-	return body, close + 1, nil
+	return body, p.lex.base + close + 1, nil
 }
 
 // containsDot reports whether s has a '.' rune. Inlined here so we
@@ -720,7 +718,7 @@ prefixesDone:
 	// validated (string / brace / comment well-formedness); then slice
 	// the raw bytes between { and } from the input for Body.
 	if p.current.Kind == LBRACE {
-		open := p.current.Pos.Offset
+		open := p.current.Pos.Offset - p.lex.base
 		if _, err := p.parseBlockVal(0); err != nil {
 			return nil, 0, err
 		}
@@ -731,7 +729,7 @@ prefixesDone:
 			return nil, 0, errorf(d.Pos, "directive @%s: unmatched '{'", d.Name)
 		}
 		d.Body = p.lex.input[open+1 : close]
-		endOffset = close + 1
+		endOffset = p.lex.base + close + 1
 	}
 	return d, endOffset, nil
 }

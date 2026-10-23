@@ -24,7 +24,11 @@ format changes.
   rows equal `Parse`'s as the draft requires (§3.4.4). The row scan no
   longer rejects a raw LF inside a quoted string on its own: the parser
   decides, as it does for `Parse`. `NewDatasetReader` on a header cut
-  short returns `Parse`'s error instead of `ErrNoDataset`.
+  short, or on one holding a bytes literal broken across a line, returns
+  `Parse`'s error instead of `ErrNoDataset` or a positionless scan
+  error. A bare `@` after the rows is an error, not the end of the
+  table. A reader chained on `Tail()` reports the next table's positions
+  in the whole document, not from the start of the `Tail`.
 
 [#141]: https://github.com/trendvidia/protowire-go/issues/141
 

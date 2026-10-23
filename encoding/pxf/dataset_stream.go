@@ -91,7 +91,10 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // MaxMessageSize, so a stream that never ends a row cannot grow the
 // buffer without bound.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r, maxRow: o.limits().maxMessageSize}
+	tr := &DatasetReader{src: r, maxRow: o.limits().maxMessageSize, base: Position{Line: 1, Column: 1}}
+	if t, ok := r.(*datasetTail); ok {
+		tr.base = t.at
+	}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
 	}
@@ -126,12 +129,21 @@ func (tr *DatasetReader) Directives() []Directive { return tr.dirs }
 // it earlier returns bytes the current reader still intends to
 // consume, which will desync the next reader. The returned io.Reader
 // is unbuffered; consumers needing bufio semantics should wrap it
-// themselves.
+// themselves. A reader built directly on it reports document positions,
+// as [Parse] does; one built on a wrapper counts from the Tail's start.
 func (tr *DatasetReader) Tail() io.Reader {
 	if len(tr.pending) == 0 {
-		return tr.src
+		return &datasetTail{Reader: tr.src, at: tr.base}
 	}
-	return io.MultiReader(bytes.NewReader(tr.pending), tr.src)
+	return &datasetTail{Reader: io.MultiReader(bytes.NewReader(tr.pending), tr.src), at: tr.base}
+}
+
+// datasetTail is the reader Tail returns. It carries the document
+// position its first byte sits at, so the next table's rows and errors
+// carry Parse's positions.
+type datasetTail struct {
+	io.Reader
+	at Position
 }
 
 // Next reads the next row. Returns [io.EOF] when the table's row
@@ -266,6 +278,11 @@ func (tr *DatasetReader) readHeader() error {
 	for {
 		headerEnd, found, err := scanHeaderEnd(tr.pending)
 		if err != nil {
+			// The scan found a literal that can never close. Every token
+			// before it is complete, so Parse fails at or before it.
+			if _, perr := tr.parseHeader(tr.pending); perr != nil {
+				return perr
+			}
 			return err
 		}
 		if found {
@@ -274,7 +291,7 @@ func (tr *DatasetReader) readHeader() error {
 			// no rows yet, and validates everything we care about
 			// (leading-directive shape, @type / @dataset conflict,
 			// dotted columns, etc.).
-			doc, perr := Parse(tr.pending[:headerEnd+1])
+			doc, perr := tr.parseHeader(tr.pending[:headerEnd+1])
 			if perr != nil {
 				return perr
 			}
@@ -287,7 +304,6 @@ func (tr *DatasetReader) readHeader() error {
 			tr.typ = ds.Type
 			tr.columns = ds.Columns
 			tr.dirs = doc.Directives
-			tr.base = Position{Line: 1, Column: 1}
 			tr.consume(headerEnd + 1)
 			return nil
 		}
@@ -296,7 +312,7 @@ func (tr *DatasetReader) readHeader() error {
 			// document (a header cut short, a literal that never
 			// closes) reports what Parse reports for it; only a
 			// well-formed one is a document without a dataset.
-			if _, perr := Parse(tr.pending); perr != nil {
+			if _, perr := tr.parseHeader(tr.pending); perr != nil {
 				return perr
 			}
 			return ErrNoDataset
@@ -308,6 +324,12 @@ func (tr *DatasetReader) readHeader() error {
 			return err
 		}
 	}
+}
+
+// parseHeader parses input, which starts at the reader's base, as a
+// document, the way Parse does.
+func (tr *DatasetReader) parseHeader(input []byte) (*Document, error) {
+	return newParserAt(input, tr.base).parseDocument()
 }
 
 // scanHeaderEnd searches input for the first complete `@dataset TYPE (
@@ -604,6 +626,15 @@ func findNextRow(input []byte) (kind rowScan, start, end int) {
 	switch input[i] {
 	case '(':
 	case '@':
+		// A directive name follows its '@' directly (lexDirective). A
+		// bare '@' is no directive; Parse rejects it as a top-level
+		// entry.
+		if i+1 == len(input) {
+			return scanNeedMore, i, 0
+		}
+		if !isIdentPart(input[i+1]) {
+			return scanNotRow, i, 0
+		}
 		return scanEnd, i, 0
 	default:
 		return scanNotRow, i, 0
