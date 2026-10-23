@@ -165,7 +165,7 @@ for _, tbl := range doc.Tables {
 }
 ```
 
-Both honor the three-state cell semantics (empty / `null` / value), bind WKT timestamps and durations, resolve enums by name, and clear wrappers / optional / oneof on a `null` cell — the implementation routes through the existing `Unmarshal` pipeline so every decoder branch is exercised. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
+Both honor the three-state cell semantics (empty / `null` / value): an empty cell takes the field's `(pxf.default)` and fails a `(pxf.required)` field, and a `null` cell satisfies required and keeps the default off. They bind WKT timestamps and durations, resolve enums by name, and clear wrappers / optional / oneof on a `null` cell — the implementation routes through the existing `Unmarshal` pipeline so every decoder branch is exercised. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
 
 ### Schema bind-time checks
 

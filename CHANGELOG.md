@@ -11,6 +11,20 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Scan` and `BindRow` apply `(pxf.default)` and `(pxf.required)` to
+  empty `@dataset` cells** ([#145]). An empty cell is an absent field
+  (draft §3.4.4): its default now applies, and a required field rejects
+  the row, as `Scan`'s documentation always said. Before, both were
+  ignored, because `BindRow` decoded through `Unmarshal`, which skips
+  the post-decode pass; it now uses `UnmarshalFull`. A `null` cell
+  satisfies required and keeps the default off. A row that bound before
+  can now fail (a required field left empty) or bind differently (an
+  empty cell where a default is declared).
+
+[#145]: https://github.com/trendvidia/protowire-go/issues/145
+
 ### Changed
 
 - **`check/protovalidate` requires the parent module at v1.8.1 instead of

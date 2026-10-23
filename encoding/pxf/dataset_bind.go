@@ -26,6 +26,7 @@ import (
 	"strconv"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Scan reads the next row and binds its cells to the matching fields
@@ -44,9 +45,12 @@ import (
 //
 //   - nil Value (empty cell) — field absent. (pxf.default) is
 //     applied if declared on the field; (pxf.required) errors if
-//     neither default nor value is present.
-//   - *NullVal — field cleared, per §3.9 (clears optional /
-//     wrapper / oneof; rejects on non-nullable scalars).
+//     neither default nor value is present. A field that is not a
+//     column is absent in the same way.
+//   - *NullVal — field present-but-null: it stays unset, satisfies
+//     (pxf.required) and keeps (pxf.default) off. The draft rejects
+//     null on a scalar field that is not a wrapper; this decoder
+//     accepts it, as it does outside @dataset (trendvidia/protowire#339).
 //   - any other Value — field set to that value.
 func (tr *DatasetReader) Scan(msg proto.Message) error {
 	row, err := tr.Next()
@@ -71,11 +75,33 @@ func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	if err != nil {
 		return err
 	}
-	// Run the synthetic body through the standard unmarshal pipeline.
-	// SkipValidate avoids re-running the reserved-name check per row
-	// (DatasetReader's NewDatasetReader / the materializing UnmarshalFull
-	// already validated the descriptor once at bind time).
-	return UnmarshalOptions{SkipValidate: true}.Unmarshal(body, msg)
+	// SkipValidate: the bind-time schema checks are not repeated per row;
+	// pre-screen the descriptor with [ValidateDescriptor].
+	o := UnmarshalOptions{SkipValidate: true}
+	if !hasDefaultOrRequired(msg.ProtoReflect().Descriptor()) {
+		return o.Unmarshal(body, msg)
+	}
+	// The full pipeline's post-decode pass gives an empty cell (no
+	// entry) the field's (pxf.default) and rejects it for
+	// (pxf.required), and lets a null cell satisfy required and keep the
+	// default off (draft §3.4.4). It costs a presence record per row,
+	// so only a row type that needs it pays for it.
+	_, err = o.UnmarshalFull(body, msg)
+	return err
+}
+
+// hasDefaultOrRequired reports whether a field of desc carries
+// (pxf.default) or (pxf.required). Only desc's own fields matter for a
+// row: a cell never holds a message that could carry them deeper down
+// (v1 cells are literals; the literal-shaped messages declare neither).
+func hasDefaultOrRequired(desc protoreflect.MessageDescriptor) bool {
+	fields := desc.Fields()
+	for i := range fields.Len() {
+		if o := pxfFieldOptions(fields.Get(i)); o.defSet || o.required {
+			return true
+		}
+	}
+	return false
 }
 
 // rowToPXFBody renders a row as a PXF body: one `<column> = <value>`
