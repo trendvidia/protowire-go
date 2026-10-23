@@ -171,6 +171,41 @@ func TestDatasetReader_TailKeepsDocumentPositions(t *testing.T) {
 	}
 }
 
+// The stream parses the header and every row under the options' limits,
+// as ParseOptions.Parse does under the same limits.
+func TestDatasetReader_HonoursLimits(t *testing.T) {
+	const head = "@dataset T (a)\n"
+	cases := []struct {
+		name, in string
+		wantErr  bool
+	}{
+		{"bytes literal in a row over the limit", head + "(b\"QUFBQUFBQUFBQUFB\")\n", true},
+		{"bytes literal in a row within the limit", head + "(b\"QUFB\")\n", false},
+		{"bytes literal in a leading directive over the limit", "@x { k = b\"QUFBQUFBQUFBQUFB\" }\n" + head, true},
+		{"nesting in a leading directive over the limit", "@x { a { b { c {} } } }\n" + head, true},
+	}
+	popts := pxf.ParseOptions{MaxBytesLiteralLength: 4, MaxNestingDepth: 2}
+	uopts := pxf.UnmarshalOptions{MaxBytesLiteralLength: 4, MaxNestingDepth: 2}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, perr := popts.Parse([]byte(tc.in))
+			require.Equal(t, tc.wantErr, perr != nil, "Parse: %v", perr)
+			tr, err := uopts.NewDatasetReader(strings.NewReader(tc.in))
+			var rows []pxf.DatasetRow
+			if err == nil {
+				rows, err = readRows(tr)
+			}
+			if perr != nil {
+				require.Error(t, err, "stream accepted what Parse rejects: %v", perr)
+				assert.Equal(t, perr.Error(), err.Error())
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, doc.Datasets[0].Rows, rows)
+		})
+	}
+}
+
 // An error is sticky: the rows after a malformed one are never yielded.
 func TestDatasetReader_ErrorIsSticky(t *testing.T) {
 	tr, err := pxf.NewDatasetReader(strings.NewReader("@dataset T (a, b)\n(1, 2\n(3, 4)\n"))

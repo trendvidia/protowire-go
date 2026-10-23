@@ -33,15 +33,17 @@ type parser struct {
 }
 
 func newParser(input []byte) *parser {
-	return newParserAt(input, Position{Line: 1, Column: 1})
+	return newParserAt(input, Position{Line: 1, Column: 1}, defaultLimits)
 }
 
-// newParserAt is newParser for input that starts at position at of a
-// larger document, so every position it reports is document-relative.
-func newParserAt(input []byte, at Position) *parser {
+// newParserAt is newParser under lim, for input that starts at position
+// at of a larger document, so every position it reports is
+// document-relative.
+func newParserAt(input []byte, at Position, lim limits) *parser {
 	lex := newLexer(input)
 	lex.line, lex.col, lex.base = at.Line, at.Column, at.Offset
-	p := &parser{lex: lex, maxDepth: MaxNestingDepth}
+	lex.maxBytesLiteral = lim.maxBytesLiteral
+	p := &parser{lex: lex, maxDepth: lim.maxDepth}
 	p.advance()
 	return p
 }

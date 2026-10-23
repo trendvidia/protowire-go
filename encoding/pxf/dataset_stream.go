@@ -66,7 +66,7 @@ type DatasetReader struct {
 	dirs     []Directive
 	finished bool     // Next() has returned io.EOF
 	err      error    // sticky error
-	maxRow   int      // cap on pending while a row boundary is sought (MaxMessageSize, UnmarshalOptions.limits)
+	lim      limits   // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
 	base     Position // document position of pending[0], so rows and errors carry Parse's positions
 }
 
@@ -89,9 +89,11 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // NewDatasetReader is [NewDatasetReader] under the options' limits: the
 // bytes held while a row boundary is sought are capped at the options'
 // MaxMessageSize, so a stream that never ends a row cannot grow the
-// buffer without bound.
+// buffer without bound, and the header and every row are parsed under
+// its MaxNestingDepth and MaxBytesLiteralLength, as [ParseOptions.Parse]
+// parses them.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r, maxRow: o.limits().maxMessageSize, base: Position{Line: 1, Column: 1}}
+	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}}
 	if t, ok := r.(*datasetTail); ok {
 		tr.base = t.at
 	}
@@ -228,7 +230,7 @@ func (tr *DatasetReader) consume(n int) {
 // parseRow parses pending[start:end] as one row with the parser Parse
 // uses, at its document position.
 func (tr *DatasetReader) parseRow(start, end int) (*DatasetRow, error) {
-	p := newParserAt(tr.pending[start:end], tr.posAt(start))
+	p := newParserAt(tr.pending[start:end], tr.posAt(start), tr.lim)
 	if p.current.Kind != LPAREN {
 		// Parse reports any token here, a lexical error included, as a
 		// top-level entry beside the dataset.
@@ -260,8 +262,8 @@ func (tr *DatasetReader) pull(n int) error {
 	read, err := tr.src.Read(buf)
 	if read > 0 {
 		tr.pending = append(tr.pending, buf[:read]...)
-		if len(tr.pending) > tr.maxRow {
-			return fmt.Errorf("dataset input holds %d bytes without a row boundary, MaxMessageSize=%d", len(tr.pending), tr.maxRow)
+		if len(tr.pending) > tr.lim.maxMessageSize {
+			return fmt.Errorf("dataset input holds %d bytes without a row boundary, MaxMessageSize=%d", len(tr.pending), tr.lim.maxMessageSize)
 		}
 	}
 	if errors.Is(err, io.EOF) {
@@ -329,7 +331,7 @@ func (tr *DatasetReader) readHeader() error {
 // parseHeader parses input, which starts at the reader's base, as a
 // document, the way Parse does.
 func (tr *DatasetReader) parseHeader(input []byte) (*Document, error) {
-	return newParserAt(input, tr.base).parseDocument()
+	return newParserAt(input, tr.base, tr.lim).parseDocument()
 }
 
 // scanHeaderEnd searches input for the first complete `@dataset TYPE (

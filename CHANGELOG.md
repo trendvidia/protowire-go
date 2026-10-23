@@ -29,6 +29,11 @@ format changes.
   error. A bare `@` after the rows is an error, not the end of the
   table. A reader chained on `Tail()` reports the next table's positions
   in the whole document, not from the start of the `Tail`.
+- **`UnmarshalOptions.NewDatasetReader` applies the options'
+  `MaxBytesLiteralLength` and `MaxNestingDepth`.** Only
+  `MaxMessageSize` reached the stream; the header and the rows were
+  parsed under the package constants, so a bytes literal over the
+  caller's limit was accepted where `ParseOptions.Parse` rejects it.
 
 [#141]: https://github.com/trendvidia/protowire-go/issues/141
 
