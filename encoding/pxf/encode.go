@@ -171,66 +171,9 @@ func readNullMask(msg protoreflect.Message, nmFd protoreflect.FieldDescriptor) m
 func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protoreflect.Message, level int) error {
 	mdesc := fd.Message()
 
-	if isTimestamp(mdesc) {
-		t := readTimestamp(sub)
+	if isLiteralMessage(sub) {
 		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(t.Format(time.RFC3339Nano))
-		e.buf.WriteByte('\n')
-		return nil
-	}
-	if isDuration(mdesc) {
-		d := readDuration(sub)
-		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(d.String())
-		e.buf.WriteByte('\n')
-		return nil
-	}
-	if isWrapperType(mdesc) {
-		innerFd := mdesc.Fields().ByName("value")
-		e.writeFieldPrefix(level, fd.Name())
-		if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
-			return err
-		}
-		e.buf.WriteByte('\n')
-		return nil
-	}
-	if isBigInt(mdesc) {
-		s, err := formatBigInt(sub)
-		if err != nil {
-			return err
-		}
-		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(s)
-		e.buf.WriteByte('\n')
-		return nil
-	}
-	if isDecimal(mdesc) {
-		s, err := readDecimalStr(sub)
-		if err != nil {
-			return err
-		}
-		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(s)
-		e.buf.WriteByte('\n')
-		return nil
-	}
-	if isBigFloat(mdesc) {
-		s, err := formatBigFloat(sub)
-		if err != nil {
-			return err
-		}
-		e.writeFieldPrefix(level, fd.Name())
-		e.buf.WriteString(s)
-		e.buf.WriteByte('\n')
-		return nil
-	}
-	// pxf.Secret: scalar shorthand iff hint and fingerprint are empty
-	// (otherwise we would silently drop authoring metadata on re-emit).
-	// The block-form fallthrough handles the metadata case.
-	if isSecret(mdesc) && !secretHasMetadata(sub) {
-		innerFd := mdesc.Fields().ByName("value")
-		e.writeFieldPrefix(level, fd.Name())
-		if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
+		if err := e.writeLiteralMessage(sub); err != nil {
 			return err
 		}
 		e.buf.WriteByte('\n')
@@ -261,6 +204,56 @@ func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protor
 	return nil
 }
 
+// isLiteralMessageType reports whether a message of type mdesc can be
+// written as one literal instead of a block: a Timestamp, a Duration, a
+// wrapper, a big number, or a Secret (which needs a block when it
+// carries metadata; see isLiteralMessage).
+func isLiteralMessageType(mdesc protoreflect.MessageDescriptor) bool {
+	return isTimestamp(mdesc) || isDuration(mdesc) || isWrapperType(mdesc) ||
+		isBigInt(mdesc) || isDecimal(mdesc) || isBigFloat(mdesc) || isSecret(mdesc)
+}
+
+// isLiteralMessage reports whether sub is written as one literal. A
+// Secret is, only without a hint or fingerprint: the literal would
+// drop that authoring metadata.
+func isLiteralMessage(sub protoreflect.Message) bool {
+	mdesc := sub.Descriptor()
+	if isSecret(mdesc) {
+		return !secretHasMetadata(sub)
+	}
+	return isLiteralMessageType(mdesc)
+}
+
+// writeLiteralMessage writes sub, for which isLiteralMessage holds, as
+// its literal.
+func (e *encoder) writeLiteralMessage(sub protoreflect.Message) error {
+	mdesc := sub.Descriptor()
+	var s string
+	var err error
+	switch {
+	case isTimestamp(mdesc):
+		s = readTimestamp(sub).Format(time.RFC3339Nano)
+	case isDuration(mdesc):
+		s = readDuration(sub).String()
+	case isWrapperType(mdesc), isSecret(mdesc):
+		innerFd := mdesc.Fields().ByName("value")
+		return e.writeScalar(innerFd, sub.Get(innerFd))
+	case isBigInt(mdesc):
+		s, err = formatBigInt(sub)
+	case isDecimal(mdesc):
+		s, err = readDecimalStr(sub)
+	case isBigFloat(mdesc):
+		s, err = formatBigFloat(sub)
+	default:
+		return fmt.Errorf("pxf: %s has no literal form", mdesc.FullName())
+	}
+	if err != nil {
+		return err
+	}
+	e.buf.WriteString(s)
+	return nil
+}
+
 func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protoreflect.Value, level int) error {
 	list := val.List()
 	if list.Len() == 0 && !e.emitDefaults {
@@ -285,47 +278,9 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 
 		if fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind {
 			sub := elem.Message()
-			mdesc := fd.Message()
-
-			if isTimestamp(mdesc) {
-				t := readTimestamp(sub)
+			if isLiteralMessage(sub) {
 				e.writeIndent(level + 1)
-				e.buf.WriteString(t.Format(time.RFC3339Nano))
-			} else if isDuration(mdesc) {
-				d := readDuration(sub)
-				e.writeIndent(level + 1)
-				e.buf.WriteString(d.String())
-			} else if isWrapperType(mdesc) {
-				innerFd := mdesc.Fields().ByName("value")
-				e.writeIndent(level + 1)
-				if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
-					return err
-				}
-			} else if isBigInt(mdesc) {
-				s, err := formatBigInt(sub)
-				if err != nil {
-					return err
-				}
-				e.writeIndent(level + 1)
-				e.buf.WriteString(s)
-			} else if isDecimal(mdesc) {
-				s, err := readDecimalStr(sub)
-				if err != nil {
-					return err
-				}
-				e.writeIndent(level + 1)
-				e.buf.WriteString(s)
-			} else if isBigFloat(mdesc) {
-				s, err := formatBigFloat(sub)
-				if err != nil {
-					return err
-				}
-				e.writeIndent(level + 1)
-				e.buf.WriteString(s)
-			} else if isSecret(mdesc) && !secretHasMetadata(sub) {
-				innerFd := mdesc.Fields().ByName("value")
-				e.writeIndent(level + 1)
-				if err := e.writeScalar(innerFd, sub.Get(innerFd)); err != nil {
+				if err := e.writeLiteralMessage(sub); err != nil {
 					return err
 				}
 			} else {

@@ -156,7 +156,7 @@ for {
 
 ```go
 doc, _ := pxf.Parse(data)
-for _, tbl := range doc.Tables {
+for _, tbl := range doc.Datasets {
     for _, row := range tbl.Rows {
         var t trades.Trade
         if err := pxf.BindRow(&t, tbl.Columns, row); err != nil { return err }
@@ -166,6 +166,21 @@ for _, tbl := range doc.Tables {
 ```
 
 Both honor the three-state cell semantics (empty / `null` / value), bind WKT timestamps and durations, resolve enums by name, and clear wrappers / optional / oneof on a `null` cell — the implementation routes through the existing `Unmarshal` pipeline so every decoder branch is exercised. See [draft §3.4.4](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) for the spec.
+
+### `AppendDatasetHeader` and `AppendDatasetRow`: writing `@dataset`
+
+Write the header once, then one row per message. Each cell is the text `Marshal` writes for that field, so a row reads back through `Scan` or `BindRow` as the message it came from:
+
+```go
+cols := []string{"symbol", "price", "qty"}
+out, err := pxf.AppendDatasetHeader(nil, (&trades.Trade{}).ProtoReflect().Descriptor(), cols)
+if err != nil { return err }
+for _, t := range batch {
+    if out, err = pxf.AppendDatasetRow(out, t, cols); err != nil { return err }
+}
+```
+
+A row depends only on its message and the columns, so appending to an existing file never rewrites earlier bytes. Both functions refuse what a v1 cell cannot hold (dotted, repeated, map or block-valued columns) and a column list that omits a `(pxf.required)` field. An unset field is an empty cell, except where an empty cell would read back as something else: a field with `(pxf.default)` is written `null` if it is message-typed, or its zero value if it is a proto3 scalar, so the default does not replace it. An unset `optional` scalar with a default is an empty cell and reads back as its default, since the draft rejects `null` on a scalar. A message-typed field named in the message's `_null` mask is written `null`, as `Marshal` writes it. The columns may be any subset of the message's fields, as long as every `(pxf.required)` field is among them. A schema that `ValidateDescriptor` refuses is refused, since `Unmarshal` would not read the table back.
 
 ### Schema bind-time checks
 
