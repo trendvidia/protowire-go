@@ -390,15 +390,13 @@ func (d *directDecoder) consumeDatasetDirective() (DatasetDirective, error) {
 	if d.current.Kind != IDENT {
 		return ds, errorf(d.current.Pos, "@dataset column list must contain at least one field name, got %s", d.tokenErrMsg())
 	}
+	var colPos []Position
 	for {
 		if d.current.Kind != IDENT {
 			return ds, errorf(d.current.Pos, "expected column field name, got %s", d.tokenErrMsg())
 		}
-		colName := d.current.Value
-		if containsDot(colName) {
-			return ds, errorf(d.current.Pos, "@dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
-		}
-		ds.Columns = append(ds.Columns, colName)
+		ds.Columns = append(ds.Columns, d.current.Value)
+		colPos = append(colPos, d.current.Pos)
 		d.advance()
 		if d.current.Kind == COMMA {
 			d.advance()
@@ -408,6 +406,9 @@ func (d *directDecoder) consumeDatasetDirective() (DatasetDirective, error) {
 			break
 		}
 		return ds, errorf(d.current.Pos, "expected ',' or ')' in @dataset column list, got %s", d.tokenErrMsg())
+	}
+	if i, msg := columnPathError(ds.Columns); i >= 0 {
+		return ds, errorf(colPos[i], "%s", msg)
 	}
 	d.advance() // consume )
 

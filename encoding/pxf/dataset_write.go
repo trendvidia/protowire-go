@@ -174,7 +174,7 @@ func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]pr
 	fds := make([]protoreflect.FieldDescriptor, len(columns))
 	for i, c := range columns {
 		if containsDot(c) {
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", c)
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: the writer does not write dotted column paths yet (trendvidia/protowire-go#155)", c)
 		}
 		fd := desc.Fields().ByName(protoreflect.Name(c))
 		if fd == nil {

@@ -557,7 +557,7 @@ func TestDatasetWrite_RefusesWhatACellCannotHold(t *testing.T) {
 		want string
 	}{
 		{nil, "at least one column"},
-		{[]string{"inner.x"}, "dotted column paths are not supported"},
+		{[]string{"inner.x"}, "does not write dotted column paths yet"},
 		{[]string{"nope"}, "dsw.v1.Row has no such field"},
 		{[]string{"s", "s"}, `column "s" appears twice`},
 		{[]string{"list"}, "a repeated field cannot be held"},

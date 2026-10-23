@@ -137,12 +137,14 @@ func TestParseTable_BlockCell(t *testing.T) {
 
 // --- Column-entry restrictions ---
 
-func TestParseTable_DottedColumn_Rejects(t *testing.T) {
+// A dotted column path is a header entry like any other (protowire#342);
+// whether it names a field is checked when a row binds.
+func TestParseTable_DottedColumn_Parses(t *testing.T) {
 	in := `@dataset trades.v1.Trade (symbol, meta.exchange)
 ("AAPL", "NASDAQ")`
-	_, err := pxf.Parse([]byte(in))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "dotted column paths")
+	doc, err := pxf.Parse([]byte(in))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"symbol", "meta.exchange"}, doc.Datasets[0].Columns)
 }
 
 func TestParseTable_EmptyColumnList_Rejects(t *testing.T) {
@@ -237,7 +239,7 @@ func TestParseTable_ErrorMessagesMentionDraftSection(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"dotted_col", `@dataset T (a.b)`, "§3.4.4"},
+		{"overlapping_col", `@dataset T (a.b, a)`, "§3.4.4"},
 		{"with_type", `@type X
 @dataset T (a)
 (1)`, "§3.4.4"},

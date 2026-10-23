@@ -292,7 +292,7 @@ func (tr *DatasetReader) readHeader() error {
 			// parseDocument is happy with an @dataset directive that has
 			// no rows yet, and validates everything we care about
 			// (leading-directive shape, @type / @dataset conflict,
-			// dotted columns, etc.).
+			// repeated or overlapping column paths, etc.).
 			doc, perr := tr.parseHeader(tr.pending[:headerEnd+1])
 			if perr != nil {
 				return perr

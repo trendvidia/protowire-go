@@ -46,7 +46,7 @@ type Document struct {
 type DatasetDirective struct {
 	Pos             Position
 	Type            string       // row message type, e.g. "trades.v1.Trade"; empty if bound to a preceding anonymous @proto
-	Columns         []string     // top-level field names on Type; len(Columns) >= 1
+	Columns         []string     // field names on Type, or dotted paths into its sub-messages; len(Columns) >= 1
 	Rows            []DatasetRow // zero or more rows
 	LeadingComments []Comment
 }

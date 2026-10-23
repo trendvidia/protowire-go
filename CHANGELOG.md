@@ -11,6 +11,40 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`@dataset` dotted column paths** (trendvidia/protowire#342, draft
+  `-01` §3.4.4). A column may be a path into a sub-message, such as
+  `descriptor.energy`. A row binds as the body that groups its non-empty
+  cells by path prefix: every cell under `descriptor.` lands in one
+  `descriptor { ... }` block, so two columns can fill one oneof member.
+  A block none of whose cells is non-empty is not written, so the
+  sub-message stays absent. `null` applies to the leaf and makes the
+  parent present. `(pxf.required)` and `(pxf.default)` apply under a
+  present parent, as in a body.
+- **Header rules for column paths.** `Parse`, `UnmarshalFull` and
+  `NewDatasetReader` reject a header that names the same path twice, a
+  field next to a path inside it (`a` with `a.b`), or a path with an
+  empty segment. The error is at that column. `BindRow` and `Scan`
+  reject a path that goes through a repeated or map field, into a type
+  written as a literal (Timestamp, Duration, a wrapper, `pxf.BigInt`,
+  `pxf.Decimal`, `pxf.BigFloat`, `pxf.Secret`), through a scalar, or to
+  a field that does not exist. They reject it even when the row's cells
+  are all empty.
+
+### Changed
+
+- **A `BindRow` or `Scan` error names its column**, as
+  `<row position>: column <c>: <message>`. Before, it gave only the
+  row's position. An error on no single column, such as a missing
+  required field, is unchanged.
+- **A header that names the same plain column twice, `(a, a)`, is now
+  rejected.** It used to parse, and for a repeated field the two cells
+  were concatenated.
+- `AppendDatasetHeader` still refuses dotted columns, now with a message
+  that says the writer does not support them yet
+  ([#155](https://github.com/trendvidia/protowire-go/issues/155)).
+
 ## [1.9.0] — 2026-10-23
 
 A minor release: `@dataset` grows from a read-only, scalar-cell table
