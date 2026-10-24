@@ -23,26 +23,37 @@ package nulltest.v1;
 
 import "google/protobuf/field_mask.proto";
 import "google/protobuf/wrappers.proto";
+import "pxf/annotations.proto";
 
 message NullDemo {
   string name = 1;
-  string role = 2;
+  google.protobuf.StringValue role = 2;
   int32 age = 3;
-  string email = 4;
+  google.protobuf.StringValue email = 4;
   bool active = 5;
   Nested nested = 6;
   repeated string tags = 7;
   map<string, string> labels = 8;
   google.protobuf.StringValue nullable_string = 9;
   oneof choice {
-    string text_choice = 10;
+    google.protobuf.StringValue text_choice = 10;
     int32 number_choice = 11;
+  }
+  optional int32 opt = 12;
+  oneof scalar_choice {
+    string scalar_text = 13;
+    int32 scalar_number = 14;
   }
   google.protobuf.FieldMask _null = 15;
 }
 
 message Nested {
-  string value = 1;
+  google.protobuf.StringValue value = 1;
+}
+
+// A required field that may be null is a wrapper (#150).
+message RequiredWrapper {
+  google.protobuf.StringValue name = 1 [(pxf.required) = true];
 }
 `
 
@@ -198,7 +209,7 @@ func TestUnmarshalFullNullFields(t *testing.T) {
 	msg := dynamicpb.NewMessage(desc)
 
 	input := `
-name = null
+nested = null
 email = null
 `
 	result, err := pxf.UnmarshalFull([]byte(input), msg)
@@ -206,7 +217,7 @@ email = null
 
 	nulls := result.NullFields()
 	assert.Len(t, nulls, 2)
-	assert.Contains(t, nulls, "name")
+	assert.Contains(t, nulls, "nested")
 	assert.Contains(t, nulls, "email")
 }
 
@@ -283,7 +294,8 @@ func TestRequiredFieldPresent(t *testing.T) {
 }
 
 func TestRequiredFieldNull(t *testing.T) {
-	desc := configDesc(t)
+	fd := compileNullTestProto(t, "null_test.proto", nullTestProtoSrc)
+	desc := fd.Messages().ByName("RequiredWrapper")
 	msg := dynamicpb.NewMessage(desc)
 
 	// null counts as present for required
@@ -361,14 +373,14 @@ func TestDefaultNotAppliedOnNull(t *testing.T) {
 
 	input := `
 name = "Alice"
-role = null
+nickname = null
 `
 	result, err := pxf.UnmarshalFull([]byte(input), msg)
 	require.NoError(t, err)
 
-	// role should NOT get default because it was explicitly null
-	assert.True(t, result.IsNull("role"))
-	assert.Equal(t, "", msg.ProtoReflect().Get(desc.Fields().ByName("role")).String())
+	// nickname should NOT get its default because it was explicitly null
+	assert.True(t, result.IsNull("nickname"))
+	assert.False(t, msg.ProtoReflect().Has(desc.Fields().ByName("nickname")))
 }
 
 func TestDefaultNotAppliedOnSet(t *testing.T) {
@@ -601,8 +613,8 @@ email = null
 	_, err := pxf.UnmarshalDescriptor([]byte(input), desc)
 	require.NoError(t, err)
 
-	// email should simply be unset (zero value)
-	assert.Equal(t, "", msg.ProtoReflect().Get(desc.Fields().ByName("email")).String())
+	// email should simply be unset
+	assert.False(t, msg.ProtoReflect().Has(desc.Fields().ByName("email")))
 }
 
 // --- Null in list/map via plain Unmarshal ---
@@ -649,4 +661,58 @@ age = 30
 
 	assert.Contains(t, string(out), "email = null")
 	assert.Contains(t, string(out), `name = "Alice"`)
+}
+
+// --- Null where the field cannot hold it (#150, trendvidia/protowire#339) ---
+
+// null is a decode error on a field that is not a singular message
+// field: a plain scalar, one with explicit presence (proto3 optional, a
+// oneof member), a repeated field and a map field. Every decode path
+// rejects it, at the null, naming the field.
+func TestNullRejectedWhereNotNullable(t *testing.T) {
+	desc := nullDemoDesc(t)
+	for _, tc := range []struct{ doc, want string }{
+		{`name = null`, `1:8: null is not allowed on scalar field "name": declare it as a wrapper type (google.protobuf.StringValue`},
+		{`age = null`, `1:7: null is not allowed on scalar field "age": declare it as a wrapper type (google.protobuf.Int32Value`},
+		{`active = null`, `google.protobuf.BoolValue`},
+		{`opt = null`, `null is not allowed on scalar field "opt"`},
+		{`scalar_text = null`, `null is not allowed on scalar field "scalar_text"`},
+		{`tags = null`, `null is not allowed on repeated field "tags"`},
+		{`labels = null`, `null is not allowed on map field "labels"`},
+		{"nested {\n  value = \"v\"\n}\nage = null", `4:7: null is not allowed on scalar field "age"`},
+	} {
+		for name, decode := range map[string]func() error{
+			"Unmarshal":     func() error { return pxf.Unmarshal([]byte(tc.doc), dynamicpb.NewMessage(desc)) },
+			"UnmarshalFull": func() error { _, err := pxf.UnmarshalFull([]byte(tc.doc), dynamicpb.NewMessage(desc)); return err },
+		} {
+			err := decode()
+			require.Error(t, err, "%s %q", name, tc.doc)
+			assert.Contains(t, err.Error(), tc.want, "%s %q", name, tc.doc)
+		}
+	}
+}
+
+// Marshal writes `field = null` only for a field that may hold it. A
+// scalar named in a _null mask (one from another producer, or from
+// before #150) is written as its value, so Marshal's output decodes
+// (#151).
+func TestMarshalNullOnlyWhereNullable(t *testing.T) {
+	desc := nullDemoDesc(t)
+	msg := dynamicpb.NewMessage(desc)
+	require.NoError(t, pxf.Unmarshal([]byte(`name = "Alice" age = 3`), msg))
+	mask := msg.Mutable(desc.Fields().ByName("_null")).Message()
+	paths := mask.Mutable(mask.Descriptor().Fields().ByName("paths")).List()
+	for _, p := range []string{"email", "name", "age", "tags"} {
+		paths.Append(protoreflect.ValueOfString(p))
+	}
+	out, err := pxf.Marshal(msg)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "email = null")
+	assert.Contains(t, string(out), `name = "Alice"`)
+	assert.Contains(t, string(out), "age = 3")
+	assert.NotContains(t, string(out), "tags = null")
+
+	back := dynamicpb.NewMessage(desc)
+	_, err = pxf.UnmarshalFull(out, back)
+	require.NoError(t, err, "Marshal's output decodes")
 }

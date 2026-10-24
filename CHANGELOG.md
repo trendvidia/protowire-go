@@ -54,6 +54,36 @@ format changes.
 
 ### Changed
 
+- **`null` is a decode error on a field that cannot hold it; `Marshal`
+  writes `null` only where it can**
+  ([#150](https://github.com/trendvidia/protowire-go/issues/150),
+  [#151](https://github.com/trendvidia/protowire-go/issues/151);
+  [protowire#339](https://github.com/trendvidia/protowire/issues/339)).
+  The draft requires a decoder to reject `null` bound to a singular
+  scalar that is not a wrapper, or to a repeated field; this decoder
+  accepted both and left the field unset, following the README's `_null`
+  convention, which the spec repo has now narrowed to fields that can
+  hold `null`. `Unmarshal` and `UnmarshalFull` (and so `Scan`/`BindRow`)
+  now fail at the `null` with `null is not allowed on scalar field "age":
+  declare it as a wrapper type (google.protobuf.Int32Value or similar)
+  to make it nullable`, and likewise for a repeated or map field. A
+  proto3 `optional` scalar and a oneof's scalar member are scalars for
+  this rule. A singular message field, wrappers included, still accepts
+  `null` and records it in `Result` and the `_null` mask. `Marshal`
+  writes `field = null` only for such a field: a scalar named in a
+  `_null` mask (from another producer, or a mask written before this
+  release) is written as its value, so `Marshal`'s output decodes. A
+  document carrying `null` on a scalar, repeated or map field decoded
+  before and is rejected now; declare the field as its wrapper type.
+- **A raw newline inside a simple string is an error**
+  ([#143](https://github.com/trendvidia/protowire-go/issues/143)). The
+  draft says decoders MUST reject an unescaped LF in a `"..."` string
+  (§ Strings), and `Parse`, `Unmarshal`, `UnmarshalFull` and
+  `DatasetReader` kept it in the literal instead. They now fail at the
+  string with `newline in string literal: write it as \n, or use a
+  """triple-quoted""" string`. `ParseTolerant` still ends the
+  string at the newline and parses on. The conformance row is
+  [protowire#350](https://github.com/trendvidia/protowire/issues/350).
 - **A `BindRow` or `Scan` error names its column**, as
   `<row position>: column <c>: <message>`. Before, it gave only the
   row's position. An error on no single column, such as a missing
@@ -112,6 +142,31 @@ format changes.
   map value, keyed entry or `Any` body.** `Marshal` looks a null up
   under the same path `UnmarshalFull` records it under, so `items = [{
   deep = null }]` re-encodes as written instead of losing the `null`.
+- **`DatasetReader` finds rows with the lexer, in time linear in the
+  input** ([#148](https://github.com/trendvidia/protowire-go/issues/148),
+  [#149](https://github.com/trendvidia/protowire-go/issues/149)). After
+  every read the reader scanned its whole buffer again for the row's
+  closing `)`, so one unclosed row of n bytes cost about n²/8192 byte
+  visits: 4.79 s for 4 MiB, and minutes near the 64 MiB
+  `MaxMessageSize`, on untrusted input. The scan now resumes where the
+  last read left it, and a token that runs past the end of the buffer
+  is not lexed again until bytes arrive that could end it. A 4 MiB
+  unclosed row takes 35 ms, and one long unterminated string 21 ms
+  (it took 4.75 s). The boundary comes from the lexer `Parse` uses
+  rather than from hand-copied lexer rules, which were where all three
+  stream/`Parse` disagreements the fuzzer found in #144 came from; the
+  `malformed @dataset row` fallback error is gone with them. A row
+  already in the buffer is parsed in one pass, so ordinary streaming is
+  13% faster than before (100k rows in 4 KiB reads, n=8). A reader fed
+  one byte per `Read` no longer allocates a 4 KiB buffer per call.
+- **A reader chained on `Tail()` keeps the comments before the next
+  directive** ([#149](https://github.com/trendvidia/protowire-go/issues/149)).
+  `Parse` gives the comments between a table's last row and the next
+  directive (a trailing `# c` on the row's line included) to that
+  directive as its `LeadingComments`. `Next` consumed them while
+  looking for another row, so `NewDatasetReader(tr.Tail()).Directives()`
+  had none. They now stay in the `Tail`, and a reader built on a `Tail`
+  files them under the directive, as `Parse` does.
 
 ## [1.9.0] — 2026-10-23
 
