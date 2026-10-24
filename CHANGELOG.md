@@ -13,6 +13,16 @@ format changes.
 
 ### Added
 
+- **`AppendDatasetRow` writes list, map and block cells**
+  ([#155](https://github.com/trendvidia/protowire-go/issues/155)). Since
+  value cells (v1.9.0, protowire#341) the reader accepts a repeated
+  field, a map or a sub-message in a cell, but the writer still refused
+  such a column as one "a v1 cell cannot hold". Any field can now be a
+  column: the cell is the text `Marshal` writes for the field, on one
+  line, so a table keeps one row per line. A `pxf.Secret` with a hint or
+  fingerprint is written as its block instead of refused. The writer
+  still refuses dotted columns. Covered by the seeded round trip,
+  now over lists, maps, sub-messages, message lists and keyed lists.
 - **`@dataset` dotted column paths** (trendvidia/protowire#342, draft
   `-01` §3.4.4). A column may be a path into a sub-message, such as
   `descriptor.energy`. A row binds as the body that groups its non-empty
@@ -36,6 +46,15 @@ format changes.
 
 ### Changed
 
+- **A raw newline inside a simple string is an error**
+  ([#143](https://github.com/trendvidia/protowire-go/issues/143)). The
+  draft says decoders MUST reject an unescaped LF in a `"..."` string
+  (§ Strings), and `Parse`, `Unmarshal`, `UnmarshalFull` and
+  `DatasetReader` kept it in the literal instead. They now fail at the
+  string with `newline in string literal: write it as \n, or use a
+  """triple-quoted""" string`. `ParseTolerant` still ends the
+  string at the newline and parses on. The conformance row is
+  [protowire#350](https://github.com/trendvidia/protowire/issues/350).
 - **A `BindRow` or `Scan` error names its column**, as
   `<row position>: column <c>: <message>`. Before, it gave only the
   row's position. An error on no single column, such as a missing
@@ -114,6 +133,14 @@ format changes.
   already in the buffer is parsed in one pass, so ordinary streaming is
   13% faster than before (100k rows in 4 KiB reads, n=8). A reader fed
   one byte per `Read` no longer allocates a 4 KiB buffer per call.
+- **A reader chained on `Tail()` keeps the comments before the next
+  directive** ([#149](https://github.com/trendvidia/protowire-go/issues/149)).
+  `Parse` gives the comments between a table's last row and the next
+  directive (a trailing `# c` on the row's line included) to that
+  directive as its `LeadingComments`. `Next` consumed them while
+  looking for another row, so `NewDatasetReader(tr.Tail()).Directives()`
+  had none. They now stay in the `Tail`, and a reader built on a `Tail`
+  files them under the directive, as `Parse` does.
 
 ## [1.9.0] — 2026-10-23
 

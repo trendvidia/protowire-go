@@ -254,9 +254,10 @@ func TestDatasetReader_ErrorIsSticky(t *testing.T) {
 	assert.Equal(t, err, err2)
 }
 
-// directiveStart matches the start of a directive token: '@' and a name
-// (lexDirective). A bare '@' is not one.
-var directiveStart = regexp.MustCompile(`^@[A-Za-z0-9_.]`)
+// directiveStart matches the start of a directive token, '@' and a
+// name, after the newlines and comments that precede it: the reader
+// leaves those in Tail, since Parse gives them to the directive (#149).
+var directiveStart = regexp.MustCompile(`^(?:\s|#[^\n]*|//[^\n]*|/\*(?s:.*?)\*/)*@[A-Za-z0-9_.]`)
 
 // FuzzDatasetStreamParity holds the stream to Parse on arbitrary rows
 // read one byte at a time, so every row boundary also falls on a read
@@ -363,4 +364,48 @@ func FuzzDatasetHeaderParity(f *testing.F) {
 	f.Fuzz(func(t *testing.T, header string) {
 		checkStreamAgrees(t, header+"\n@dataset T (a, b)\n(1, 2)\n")
 	})
+}
+
+// A reader chained on Tail sees the directives between two tables as
+// Parse does, with the comments before each one as its LeadingComments
+// (#149): the trailing comment on the last row's line, and the lines
+// before the directive. The reader used to consume them while looking
+// for the next row.
+func TestDatasetReader_TailKeepsDirectiveComments(t *testing.T) {
+	for _, in := range []string{
+		// The issue's input.
+		"@dataset A (x)\n(1) # a\n# b\n@x {}\n@dataset B (y)\n(3)\n",
+		"@dataset A (x)\n(1)\n/* block\n */ // line\n@x {}\n@y { k = 1 }\n@dataset B (y)\n(3)\n",
+		"@dataset A (x)\n(1)\n\n# only before the dataset\n@dataset B (y)\n(3)\n",
+		"@dataset A (x)\n# no rows\n@x {}\n@dataset B (y)\n",
+	} {
+		doc, err := pxf.Parse([]byte(in))
+		require.NoError(t, err, in)
+		// Parse's directives between the two tables: all of them here,
+		// since nothing precedes table A.
+		want := doc.Directives
+
+		for _, oneByte := range []bool{false, true} {
+			var src io.Reader = strings.NewReader(in)
+			if oneByte {
+				src = iotest.OneByteReader(src)
+			}
+			tr, err := pxf.NewDatasetReader(src)
+			require.NoError(t, err)
+			for {
+				if _, err := tr.Next(); err != nil {
+					require.ErrorIs(t, err, io.EOF)
+					break
+				}
+			}
+			tr2, err := pxf.NewDatasetReader(tr.Tail())
+			require.NoError(t, err, in)
+			assert.Equal(t, "B", tr2.Type())
+			if len(want) == 0 {
+				assert.Empty(t, tr2.Directives(), "%q one-byte=%v", in, oneByte)
+				continue
+			}
+			assert.Equal(t, want, tr2.Directives(), "%q one-byte=%v", in, oneByte)
+		}
+	}
 }

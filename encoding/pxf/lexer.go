@@ -278,13 +278,16 @@ func (l *lexer) lexString(pos Position) Token {
 	tolerant := l.tolerant // hoisted: checked once per byte below
 	noValue := l.noValue
 	for l.pos < len(l.input) {
-		if tolerant && l.peek() == '\n' {
-			// Recovery for mid-edit buffers: treat the newline as the
-			// end of the (unterminated) string, leaving the newline for
-			// the next token. Strict mode instead consumes the newline
-			// into the literal and keeps scanning for the closing quote.
-			l.reportErr(pos, "unterminated string: ended at newline")
-			return Token{Kind: STRING, Value: sb.String(), Pos: pos}
+		if l.peek() == '\n' {
+			// A simple string MUST NOT hold an unescaped LF (draft
+			// § Strings; #143). Tolerant mode recovers for mid-edit
+			// buffers by ending the string at the newline, leaving the
+			// newline for the next token.
+			if tolerant {
+				l.reportErr(pos, "unterminated string: ended at newline")
+				return Token{Kind: STRING, Value: sb.String(), Pos: pos}
+			}
+			return Token{Kind: ILLEGAL, Value: `newline in string literal: write it as \n, or use a """triple-quoted""" string`, Pos: pos}
 		}
 		ch := l.advance()
 		if ch == '"' {

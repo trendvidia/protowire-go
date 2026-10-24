@@ -95,6 +95,8 @@ type DatasetReader struct {
 
 	lx lexer // the scan's lexer, reset for each token (nextToken)
 
+	chained bool // built on another reader's Tail, so it starts mid-document
+
 	// pathsChecked is the last row type Scan checked columns against
 	// (checkColumnPaths), so a table of one type checks them once.
 	pathsChecked protoreflect.MessageDescriptor
@@ -127,6 +129,7 @@ func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) 
 	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1}
 	if t, ok := r.(*datasetTail); ok {
 		tr.base = t.at
+		tr.chained = true
 	}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
@@ -217,7 +220,9 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 			// would read as unterminated instead.
 			return tr.fail(tr.rowError(start, len(tr.pending)))
 		case scanEnd:
-			tr.consume(start)
+			// The newlines and comments before the directive stay in the
+			// buffer, so Tail carries them: Parse gives them to that
+			// directive as its LeadingComments (#149).
 			tr.finished = true
 			return DatasetRow{}, io.EOF
 		case scanNotRow:
@@ -386,6 +391,13 @@ func (tr *DatasetReader) readHeader() error {
 			ds := doc.Datasets[0]
 			tr.typ = ds.Type
 			tr.columns = ds.Columns
+			if tr.chained && len(doc.LeadingComments) > 0 && len(doc.Directives) > 0 &&
+				doc.Directives[0].Pos.Offset < ds.Pos.Offset {
+				// A reader on Tail starts mid-document, where the comments
+				// before a directive are its own, as Parse files them; at
+				// a document's start they are the document's.
+				doc.Directives[0].LeadingComments = append(doc.LeadingComments, doc.Directives[0].LeadingComments...)
+			}
 			tr.dirs = doc.Directives
 			tr.consume(headerEnd)
 			return nil
@@ -534,16 +546,17 @@ const shortWait = 8
 
 // mayEndToken reports whether the bytes read since the waiting token was
 // last lexed could end it: a closing quote for a string (one not
-// escaped by an odd run of backslashes), `"""` for a triple-quoted one,
-// a quote or newline for a bytes literal, or enough characters that the
-// lexer refuses it (MaxBytesLiteralLength), a newline for a line
-// comment, `*/` for a block comment, a byte that ends a run (endsRun)
-// or a comment opener for a timestamp, and for any other token a byte
-// that cannot continue an identifier, number or duration. Each of those
-// does end the token, so a token is lexed again only once it is short or
-// decided, and the scan stays linear. It only decides when the lexer
-// looks again, never what the token is; a byte that ends a row, ')',
-// always counts, so a complete row is never left waiting for input.
+// escaped by an odd run of backslashes) or a newline, which a simple
+// string cannot hold, `"""` for a triple-quoted one, a quote or newline
+// for a bytes literal, or enough characters that the lexer refuses it
+// (MaxBytesLiteralLength), a newline for a line comment, `*/` for a
+// block comment, a byte that ends a run (endsRun) or a comment opener
+// for a timestamp, and for any other token a byte that cannot continue
+// an identifier, number or duration. Each of those does end the token,
+// so a token is lexed again only once it is short or decided, and the
+// scan stays linear. It only decides when the lexer looks again, never
+// what the token is; a byte that ends a row, ')', always counts, so a
+// complete row is never left waiting for input.
 func (tr *DatasetReader) mayEndToken() bool {
 	buf, at, from := tr.pending, tr.waitAt, tr.waitFrom
 	if from-at < shortWait {
@@ -555,6 +568,9 @@ func (tr *DatasetReader) mayEndToken() bool {
 		return bytes.Contains(buf[max(from-2, at+3):], []byte(`"""`))
 	case tok[0] == '"':
 		for i, ch := range fresh {
+			if ch == '\n' {
+				return true // a simple string cannot hold one (#143)
+			}
 			if ch == '"' {
 				n := 0
 				for j := from + i - 1; j > at && buf[j] == '\\'; j-- {
