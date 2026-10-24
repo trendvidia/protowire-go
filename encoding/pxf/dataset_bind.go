@@ -201,9 +201,9 @@ var (
 
 // rowNeedsPresence reports whether a row of type desc must go through the
 // full pipeline: a field carries (pxf.default) or (pxf.required), or desc
-// declares a _null mask. A block cell fills a sub-message, and the
-// post-decode pass recurses into present singular sub-messages, so their
-// fields count too.
+// declares a _null mask. A list or block cell fills message bodies, and
+// the post-decode pass visits every body (#161), so their fields count
+// too.
 func rowNeedsPresence(desc protoreflect.MessageDescriptor) bool {
 	cacheable := reflect.TypeOf(desc).Comparable()
 	if cacheable {
@@ -221,24 +221,31 @@ func rowNeedsPresence(desc protoreflect.MessageDescriptor) bool {
 }
 
 // hasDefaultOrRequired reports whether a field of desc, or of a message
-// reachable from desc through singular message fields, carries
-// (pxf.default) or (pxf.required): the fields postDecode visits. A block
-// cell (protowire#341) fills such a sub-message. Repeated and map fields
-// are not visited, as postDecode does not visit them. seen guards
-// recursive types.
+// reachable from desc through message fields, list elements or map
+// values, carries (pxf.default) or (pxf.required): the fields postDecode
+// visits (#161). A list or block cell (protowire#341) fills such
+// bodies. An Any field counts too: a cell may open an Any block with
+// `@type = "..."` (#173), and the type it names is known only from the
+// row. seen guards recursive types.
 func hasDefaultOrRequired(desc protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) bool {
 	if seen[desc.FullName()] {
 		return false
 	}
 	seen[desc.FullName()] = true
+	if isAny(desc) {
+		return true
+	}
 	fields := desc.Fields()
 	for i := range fields.Len() {
 		fd := fields.Get(i)
 		if o := pxfFieldOptions(fd); o.defSet || o.required {
 			return true
 		}
+		if fd.IsMap() {
+			fd = fd.MapValue()
+		}
 		if (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) &&
-			!fd.IsList() && !fd.IsMap() && hasDefaultOrRequired(fd.Message(), seen) {
+			hasDefaultOrRequired(fd.Message(), seen) {
 			return true
 		}
 	}

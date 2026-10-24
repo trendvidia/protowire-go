@@ -344,3 +344,25 @@ func TestMarshal_ElementFieldWithNullMaskNumberIsWritten(t *testing.T) {
 	assert.Contains(t, string(out), "x = 8")
 	assert.Contains(t, string(out), "x = 9")
 }
+
+// The _null mask holds paths of singular fields only (protowire#352,
+// owner decision on #170): a null inside a list element is kept in the
+// Result and lost once the message goes through protobuf binary, while
+// a null on a field reached through singular fields survives.
+func TestEqBlock_ElementNullDoesNotSurviveBinary(t *testing.T) {
+	desc := eqBlockDesc(t)
+	m, res, err := decodeFull(t, desc, `need = 1 items = [{ id = "a" deep = null }] one { deep = null }`)
+	require.NoError(t, err)
+	require.True(t, res.IsNull("items[0].deep"))
+	require.True(t, res.IsNull("one.deep"))
+
+	b, err := proto.Marshal(m)
+	require.NoError(t, err)
+	back := dynamicpb.NewMessage(desc)
+	require.NoError(t, proto.Unmarshal(b, back))
+	out, err := pxf.Marshal(back)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(out), "deep = null"), "%s", out)
+	assert.Contains(t, string(out), "one {\n  label = \"item-dflt\"\n  deep = null\n}", "%s", out)
+	assert.Contains(t, string(out), `id = "a"`, "%s", out)
+}

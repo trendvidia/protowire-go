@@ -31,7 +31,9 @@ format changes.
   type_url = ... }` used to fail when a resolver was set.
   `DatasetReader.Scan` binds with the reader's `TypeResolver`, and the
   new `UnmarshalOptions.BindRow` is `BindRow` under options, so a cell
-  holding an `Any` block with a type entry binds.
+  holding an `Any` block with a type entry binds. A row type that
+  reaches an `Any` field takes the full decoder, so the defaults of the
+  type a cell names apply (#161).
 - **`AppendDatasetRow` writes list, map and block cells**
   ([#155](https://github.com/trendvidia/protowire-go/issues/155)). Since
   value cells (v1.9.0, protowire#341) the reader accepts a repeated
@@ -103,6 +105,31 @@ format changes.
   """triple-quoted""" string`. `ParseTolerant` still ends the
   string at the newline and parses on. The conformance row is
   [protowire#350](https://github.com/trendvidia/protowire/issues/350).
+- **`(pxf.default)` and `(pxf.required)` apply inside list elements,
+  map values and `Any` bodies**
+  ([#161](https://github.com/trendvidia/protowire-go/issues/161),
+  [protowire#352](https://github.com/trendvidia/protowire/issues/352)).
+  `UnmarshalFull`'s post-decode pass visited singular message fields
+  only, so `items = [{}]` left the element's defaulted `label` empty and
+  `items = [{ deep {} }]` passed a required `deep.n`. The draft's rules
+  have no exception for elements, and the owner decided to apply both.
+  The pass now visits every element and map value under the paths #156
+  records, and an `Any` body takes it before it is packed. Errors name
+  the element: `required field "items[1].deep.n" is absent`. This
+  changes decoded output, and a document that left a required field
+  unset inside an element is rejected now; `Unmarshal` and
+  `SkipPostDecode` are unchanged. `BindRow` and `Scan` take the full
+  decoder for a row type whose only annotations sit inside elements.
+  `AppendDatasetRow` follows inside list, map and block cells: an unset
+  annotated field in a cell is written by the row rules (zero value,
+  `null`, or left out), so a row still reads back as its message; an
+  unset required field with presence in a cell is refused. Before this
+  change, a block cell already lost such a field's value to its default
+  on reading. The post-decode pass now reads each type's annotations
+  once and skips fields and bodies that carry none: 1000 unannotated
+  elements cost what they did, 1000 elements that each take a default
+  cost 21% more (`BenchmarkPXFUnmarshalFullElements`), and
+  `BenchmarkPXFUnmarshalFullAnnotated` is 53% faster.
 - **A `BindRow` or `Scan` error names its column**, as
   `<row position>: column <c>: <message>`. Before, it gave only the
   row's position. An error on no single column, such as a missing
