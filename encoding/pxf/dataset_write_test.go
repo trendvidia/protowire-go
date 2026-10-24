@@ -557,9 +557,11 @@ func TestDatasetWrite_RefusesWhatACellCannotHold(t *testing.T) {
 		want string
 	}{
 		{nil, "at least one column"},
-		{[]string{"inner.x"}, "dotted column paths are not supported"},
+		{[]string{"inner.x"}, "does not write dotted column paths yet"},
 		{[]string{"nope"}, "dsw.v1.Row has no such field"},
 		{[]string{"s", "s"}, `column "s" appears twice`},
+		// The reader's header rules, applied before any column resolves.
+		{[]string{"inner", "inner.x"}, `column "inner.x" overlaps column "inner"`},
 		{[]string{"list"}, "a repeated field cannot be held"},
 		{[]string{"m"}, "a map field cannot be held"},
 		{[]string{"inner"}, "a dsw.v1.Inner field needs a block"},
