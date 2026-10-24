@@ -623,6 +623,25 @@ func TestDatasetWrite_UnsetOptionalScalarWithDefaultIsEmpty(t *testing.T) {
 	assert.Equal(t, "()\n", string(row))
 }
 
+// The same empty cells read back as the defaults (#171): an unset
+// optional scalar, and an unset oneof whose defaulted member is a
+// scalar, through Scan and BindRow both.
+func TestDatasetWrite_EmptyDefaultedCellsReadBackAsDefaults(t *testing.T) {
+	desc := compileDatasetWrite(t, "Row")
+	cols := []string{"d_opt", "o_s", "o_i"}
+	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
+	require.NoError(t, err)
+	row, err := pxf.AppendDatasetRow(nil, dynamicpb.NewMessage(desc), cols)
+	require.NoError(t, err)
+	assert.Equal(t, "(, , )\n", string(row))
+
+	want := dynamicpb.NewMessage(desc)
+	want.Set(desc.Fields().ByName("d_opt"), protoreflect.ValueOfInt32(8))
+	want.Set(desc.Fields().ByName("o_s"), protoreflect.ValueOfString("other"))
+	// Defaulted fields outside the columns take their defaults too.
+	assertTableReadsBack(t, desc, append(h, row...), []*dynamicpb.Message{withDefaults(t, desc, want, cols)})
+}
+
 func TestDatasetWrite_Required(t *testing.T) {
 	desc := compileDatasetWrite(t, "Req")
 
