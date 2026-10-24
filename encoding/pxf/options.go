@@ -83,9 +83,14 @@ type UnmarshalOptions struct {
 	//
 	//   pw = "x"                           → "pw"
 	//   db { password = "x" }              → "db.password"
+	//   db = { password = "x" }            → "db.password"
 	//   pw { value = "x", hint = "h" }     → "pw"      (block form)
+	//   pw = { value = "x" }               → "pw"      (block form)
+	//   servers = [{ password = "x" }]     → "servers[0].password"
+	//   by_host = { "a": { password = "x" } } → "by_host[\"a\"].password"
+	//   payload { @type = "..." pw = "x" } → "payload.pw" (Any body)
 	//   backup_keys = ["a", "b"]           → "backup_keys[0]", "backup_keys[1]"
-	//   tenant_keys = { "acme": "k" }      → "tenant_keys[acme]"
+	//   tenant_keys = { "acme": "k" }      → "tenant_keys[\"acme\"]"
 	//
 	// Memory note: the value crosses as a Go string. PXF is a text codec, so
 	// the plaintext also exists as a substring of the input []byte for the

@@ -17,6 +17,21 @@ import (
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
 
+// inputBudget is the time a decode of doc may take when its magnitude
+// bound works: 2s plus five times what Parse takes to lex the same bytes.
+// A bound applied before the work leaves the decode costing about what
+// lexing costs; a regression costs the big-number conversion (measured
+// 2026-10-23: 7.95s for 4,000,000 digits, 8.77s under -race, against a
+// lex of well under a second either way). Deriving the budget from the
+// lex keeps a slow machine, a loaded one or the race detector, which
+// slow both alike, from failing the test on time alone (#154).
+func inputBudget(t *testing.T, doc string) time.Duration {
+	t.Helper()
+	start := time.Now()
+	_, _ = pxf.Parse([]byte(doc))
+	return 2*time.Second + 5*time.Since(start)
+}
+
 // promptly runs f and fails the test if it has not returned within the
 // budget: a regression in a magnitude bound is work proportional to the
 // hostile value, which would hang the suite rather than fail it.
@@ -59,7 +74,7 @@ func TestNumericLiteralDigitCap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doc := tc.field + " = " + tc.lit
 			var msg protoreflect.Message
-			err := promptly(t, 2*time.Second, func() error {
+			err := promptly(t, inputBudget(t, doc), func() error {
 				m, err := pxf.UnmarshalDescriptor([]byte(doc), md)
 				if m != nil {
 					msg = m
