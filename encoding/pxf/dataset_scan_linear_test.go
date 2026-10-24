@@ -73,6 +73,27 @@ func TestDatasetReader_ScanIsLinear(t *testing.T) {
 	}
 }
 
+// The header scan resumes too: a header near the 64 KiB budget, in
+// one-byte reads, used to be lexed from its start on every read, about
+// 1.8G byte visits for 60 KB.
+func TestDatasetReader_HeaderScanIsLinear(t *testing.T) {
+	const n = 60 << 10
+	for _, sh := range []struct{ name, header string }{
+		{"short tokens", "@x { " + strings.Repeat("a = 1 ", n/6) + "}\n"},
+		{"one long string", `@x { k = "` + strings.Repeat("a", n) + "\" }\n"},
+		{"@proto body", "@proto { " + strings.Repeat("string a = 1; ", n/14) + "}\n"},
+	} {
+		in := sh.header + "@dataset T (a)\n(1)\n"
+		tr, err := NewDatasetReader(iotest.OneByteReader(strings.NewReader(in)))
+		if err != nil {
+			t.Fatalf("%s: %v", sh.name, err)
+		}
+		if limit := 2 * len(in); tr.scanned > limit {
+			t.Errorf("%s: scanned %d bytes of %d (limit %d)", sh.name, tr.scanned, len(in), limit)
+		}
+	}
+}
+
 // A row whose ')' is the last byte read is returned at once: the scan
 // must not wait for bytes that may never come (a live, append-only
 // stream). Each case writes a header and one complete row into a pipe

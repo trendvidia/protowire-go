@@ -71,13 +71,14 @@ type DatasetReader struct {
 	lim      limits   // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
 	base     Position // document position of pending[0], so rows and errors carry Parse's positions
 
-	// The row scan resumes where the previous pull left it, so a row is
-	// lexed once however many reads it arrives in (#148). scanPos is the
-	// start of the first token not yet known to be complete; rowStart is
-	// the offset of the current row's '(' , or -1 between rows. Both
-	// are offsets into pending.
+	// The header and row scans resume where the previous pull left
+	// them, so a header or a row is lexed once however many reads it
+	// arrives in (#148). scanPos is the start of the first token not yet
+	// known to be complete; rowStart is the offset of the current row's
+	// '(' , or -1 between rows. Both are offsets into pending.
 	scanPos  int
 	rowStart int
+	hdr      headerScan // the header scan's state, until the header ends
 
 	// While a token runs past the buffer's end (waiting), the scan does
 	// not lex it again until bytes arrive that could end it
@@ -88,8 +89,8 @@ type DatasetReader struct {
 	waitAt   int
 	waitFrom int
 
-	// scanned counts the bytes the row scan has lexed, for the tests
-	// that hold it linear in the input.
+	// scanned counts the bytes the header and row scans have lexed, for
+	// the tests that hold them linear in the input.
 	scanned int
 
 	lx lexer // the scan's lexer, reset for each token (nextToken)
@@ -599,22 +600,26 @@ type headerScan struct {
 	inDataset bool
 	proto     int        // 1 after @proto, 2 after its type name, else 0
 	inBody    bool       // body matches an @proto body's '{' ... '}'
-	body      braceMatch // the body matched so far
+	body      braceMatch // the body matched so far, resumed at scanPos
 }
 
 // scanHeader finds the end of the first `@dataset TYPE ( cols )` header
 // with the lexer: the offset just past the ')' that closes the column
 // list, the first ')' after an @dataset token. It returns found=false
 // when the input ends first. bad is the token the lexer rejected, or an
-// @proto body that can never close, before the header ended, or nil; a
-// header is at most defaultHeaderMaxBytes, so it is lexed from the start
-// on every pull.
+// @proto body that can never close, before the header ended, or nil.
+// Like scanRow it resumes at scanPos, so a header costs time linear in
+// its size however many reads it arrives in.
 func (tr *DatasetReader) scanHeader() (end int, found bool, bad *Token) {
-	var h headerScan
-	for at := 0; ; {
+	h := &tr.hdr
+	if !h.inBody && !tr.resume() {
+		return 0, false, nil
+	}
+	for {
 		if h.inBody {
-			i, st := h.body.scan(tr.pending, at)
-			tr.scanned += i - at
+			i, st := h.body.scan(tr.pending, tr.scanPos)
+			tr.scanned += i - tr.scanPos
+			tr.scanPos = i
 			switch st {
 			case braceOpen:
 				return 0, false, nil
@@ -622,20 +627,25 @@ func (tr *DatasetReader) scanHeader() (end int, found bool, bad *Token) {
 				return 0, false, &Token{Kind: ILLEGAL, Value: "@proto: unmatched '{'", Pos: Position{Offset: i}}
 			}
 			h.inBody = false
-			at = i + 1 // past the closing '}'
+			tr.scanPos++ // the closing '}'
 			continue
 		}
-		tok, tokEnd, ok := tr.nextToken(at)
-		if !ok || tok.Kind == EOF {
+		tok, tokEnd, ok := tr.nextToken(tr.scanPos)
+		if !ok {
+			tr.wait(tok)
 			return 0, false, nil
 		}
 		switch {
+		case tok.Kind == EOF:
+			// Only at the end of the source (nextToken).
+			return 0, false, nil
 		case tok.Kind == ILLEGAL:
 			return 0, false, &tok
 		case tok.Kind == NEWLINE || tok.Kind == COMMENT:
 			// Parse skips these between @proto, its name and '{'.
 		case h.inDataset:
 			if tok.Kind == RPAREN {
+				tr.scanPos = tokEnd
 				return tokEnd, true, nil
 			}
 		case tok.Kind == AT_DATASET:
@@ -649,6 +659,6 @@ func (tr *DatasetReader) scanHeader() (end int, found bool, bad *Token) {
 		default:
 			h.proto = 0
 		}
-		at = tokEnd
+		tr.scanPos = tokEnd
 	}
 }
