@@ -11,6 +11,57 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`@dataset` dotted column paths** (trendvidia/protowire#342, draft
+  `-01` §3.4.4). A column may be a path into a sub-message, such as
+  `descriptor.energy`. A row binds as the body that groups its non-empty
+  cells by path prefix: every cell under `descriptor.` lands in one
+  `descriptor { ... }` block, so two columns can fill one oneof member.
+  A block none of whose cells is non-empty is not written, so the
+  sub-message stays absent. `null` applies to the leaf and makes the
+  parent present. `(pxf.required)` and `(pxf.default)` apply under a
+  present parent, as in a body.
+- **Header rules for column paths.** `Parse`, `UnmarshalFull` and
+  `NewDatasetReader` reject a header that names the same path twice, a
+  field next to a path inside it (`a` with `a.b`), or a path with an
+  empty segment. The error is at that column. `BindRow` and `Scan`
+  reject a path that goes through a repeated or map field, into a type
+  written as a literal (Timestamp, Duration, a wrapper, `pxf.BigInt`,
+  `pxf.Decimal`, `pxf.BigFloat`), through a scalar, or to a field that
+  does not exist. A path may go into a `pxf.Secret`, which has a block
+  form (`pw.hint`). They reject it even when the row's cells are all
+  empty, with an error at the row. `Scan` checks the paths once per row
+  type, not once per row.
+
+### Changed
+
+- **A `BindRow` or `Scan` error names its column**, as
+  `<row position>: column <c>: <message>`. Before, it gave only the
+  row's position. An error on no single column, such as a missing
+  required field, is unchanged. A row built by hand has no position, so
+  its error keeps the position in the row's body, numbered as before.
+- **A header that names the same plain column twice, `(a, a)`, is now
+  rejected.** It used to parse, and for a repeated field the two cells
+  were concatenated.
+- **A plain column that names no field of the row type fails `BindRow`
+  and `Scan` on every row, its cells empty or not**, as a dotted column
+  that names no field does (draft §3.4.4: each column entry names a field
+  declared on the type). Before, a row whose cell in that column was
+  empty bound without error.
+- `AppendDatasetHeader` and `AppendDatasetRow` apply the reader's header
+  rules first, with its messages, so the writer cannot write a header
+  its reader rejects.
+- `AppendDatasetHeader` still refuses dotted columns, now with a message
+  that says the writer does not support them yet
+  ([#155](https://github.com/trendvidia/protowire-go/issues/155)).
+- **`check/protovalidate` requires the parent module at v1.9.0 instead of
+  v1.8.1.** Keeps the nested module on the parent it ships with, the
+  #134 / #139 precedent. Nothing in v1.9.0 reaches the adapter (the
+  release is `@dataset` reading and writing); `go.sum` changes only the
+  parent's two lines and stays at 26 modules. Tagged
+  `check/protovalidate/v1.4.4` at that commit.
+
 ### Fixed
 
 - **`UnmarshalFull` keeps track of fields set inside `name = { ... }`,

@@ -171,17 +171,19 @@ func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]pr
 	if err := asValidationError(ValidateDescriptor(desc)); err != nil {
 		return nil, nil, fmt.Errorf("pxf: @dataset %s: %w", desc.FullName(), err)
 	}
+	// The header rules every reader applies, so the writer cannot write
+	// a header its own reader rejects.
+	if i, msg := columnPathError(columns); i >= 0 {
+		return nil, nil, errors.New("pxf: " + msg)
+	}
 	fds := make([]protoreflect.FieldDescriptor, len(columns))
 	for i, c := range columns {
 		if containsDot(c) {
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", c)
+			return nil, nil, fmt.Errorf("pxf: @dataset column %q: the writer does not write dotted column paths yet (trendvidia/protowire-go#155)", c)
 		}
 		fd := desc.Fields().ByName(protoreflect.Name(c))
 		if fd == nil {
 			return nil, nil, fmt.Errorf("pxf: @dataset column %q: %s has no such field", c, desc.FullName())
-		}
-		if slices.Contains(fds[:i], fd) {
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q appears twice", c)
 		}
 		switch {
 		case fd.IsMap():
