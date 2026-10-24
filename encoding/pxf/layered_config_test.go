@@ -571,16 +571,13 @@ func TestPresentFields_ReturnsAllPresentPaths(t *testing.T) {
 	input := `
 s = "explicit"
 i32 = 42
-b = null
 `
 	_, res, err := pxf.UnmarshalOptions{SkipPostDecode: true}.UnmarshalFullDescriptor([]byte(input), desc)
 	require.NoError(t, err)
 
 	paths := res.PresentFields()
-	// PresentFields returns set + null entries (the union).
 	assert.Contains(t, paths, "s")
 	assert.Contains(t, paths, "i32")
-	assert.Contains(t, paths, "b")
 	// no_default never mentioned — must NOT be in PresentFields.
 	for _, p := range paths {
 		assert.NotEqual(t, "no_default", p)
@@ -596,8 +593,9 @@ func TestPresentFields_EmptyForUnpopulatedMessage(t *testing.T) {
 
 func TestPresentFields_UnionWithNulls(t *testing.T) {
 	// Verify PresentFields returns BOTH set and null (union per godoc).
-	desc := compileLayeredProto(t)
-	input := `s = "x"  i32 = null`
+	// null binds only to a message field (#150), so this uses Nested's.
+	desc := compileLayeredProto(t).ParentFile().Messages().ByName("Nested")
+	input := `outer = "x"  inner = null`
 	_, res, err := pxf.UnmarshalOptions{SkipPostDecode: true}.UnmarshalFullDescriptor([]byte(input), desc)
 	require.NoError(t, err)
 
@@ -606,9 +604,9 @@ func TestPresentFields_UnionWithNulls(t *testing.T) {
 	for _, p := range paths {
 		pathSet[p] = true
 	}
-	assert.True(t, pathSet["s"], "set field included")
-	assert.True(t, pathSet["i32"], "null field included in PresentFields union")
-	assert.True(t, res.IsNull("i32"))
-	assert.True(t, res.IsSet("s"))
-	assert.False(t, res.IsSet("i32"), "null does not count as IsSet")
+	assert.True(t, pathSet["outer"], "set field included")
+	assert.True(t, pathSet["inner"], "null field included in PresentFields union")
+	assert.True(t, res.IsNull("inner"))
+	assert.True(t, res.IsSet("outer"))
+	assert.False(t, res.IsSet("inner"), "null does not count as IsSet")
 }

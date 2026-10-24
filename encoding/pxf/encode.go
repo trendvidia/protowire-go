@@ -147,8 +147,11 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 
 		path := e.pathPrefix + string(fd.Name())
 
-		// Emit null for fields in the null set.
-		if e.nullSet != nil && e.nullSet[path] {
+		// Emit null for fields in the null set that can hold one. A
+		// scalar, repeated or map field named in the set is written as
+		// if the set did not name it: null on it is a decode error
+		// (nullable; #151).
+		if e.nullSet != nil && e.nullSet[path] && nullable(fd) {
 			e.writeFieldPrefix(level, fd.Name())
 			e.buf.WriteString("null\n")
 			continue

@@ -484,9 +484,9 @@ func TestDatasetWrite_RefusesInvalidSchema(t *testing.T) {
 
 // A message-typed field in the message's _null mask is null, as Marshal
 // writes it, so a default stays off and a required field is satisfied.
-// A scalar in the mask is written as if the mask did not name it: the
-// draft rejects null on a scalar, while Marshal writes it
-// (trendvidia/protowire#339). That divergence is pinned here.
+// A scalar in the mask is written as if the mask did not name it, by
+// the writer and by Marshal alike: null on a scalar is a decode error
+// (#150, #151).
 func TestDatasetWrite_NullMask(t *testing.T) {
 	src := `syntax = "proto3";
 package dswnull.v1;
@@ -505,12 +505,17 @@ message N {
 	cols := []string{"w", "dw", "rw", "n"}
 
 	m := dynamicpb.NewMessage(desc)
-	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = null\nn = null\n"), m)
+	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = null\n"), m)
 	require.NoError(t, err)
 	require.NoError(t, pxf.Unmarshal([]byte(`w = "set anyway"`+"\nn = 3\n"), m))
+	// A scalar in the mask: no decode puts one there since #150, but a
+	// mask from another producer can carry one. Marshal and the writer
+	// both write its value (#151).
+	mask := m.Mutable(desc.Fields().ByName("_null")).Message()
+	mask.Mutable(mask.Descriptor().Fields().ByName("paths")).List().Append(protoreflect.ValueOfString("n"))
 	marshalled, err := pxf.Marshal(m)
 	require.NoError(t, err)
-	assert.Equal(t, "w = null\ndw = null\nrw = null\nn = null\n", string(marshalled))
+	assert.Equal(t, "w = null\ndw = null\nrw = null\nn = 3\n", string(marshalled))
 
 	row, err := pxf.AppendDatasetRow(nil, m, cols)
 	require.NoError(t, err)

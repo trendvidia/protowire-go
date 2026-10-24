@@ -612,6 +612,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 				return err
 			}
 			if d.current.Kind == NULL {
+				if !nullable(fd) {
+					return nullNotAllowed(d.current.Pos, fd)
+				}
 				if d.result != nil {
 					path := d.pathPrefix + string(fd.Name())
 					d.result.markNull(path)
@@ -1815,6 +1818,53 @@ func (d *directDecoder) skipBracketed() {
 		}
 		d.advance()
 	}
+}
+
+// nullable reports whether a null literal may be bound to fd: only a
+// singular message field may hold one, wrapper types included, which it
+// clears (draft -01 § Booleans, Null, and Identifier Values). A scalar is
+// not nullable even with explicit presence (proto3 optional, a oneof
+// member), and neither is a repeated or map field (#150,
+// trendvidia/protowire#339).
+func nullable(fd protoreflect.FieldDescriptor) bool {
+	return (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) &&
+		!fd.IsList() && !fd.IsMap()
+}
+
+// nullNotAllowed is the error for a null bound to a field nullable
+// refuses, saying how the schema can admit one where it can.
+func nullNotAllowed(pos Position, fd protoreflect.FieldDescriptor) error {
+	switch {
+	case fd.IsMap():
+		return errorf(pos, "null is not allowed on map field %q", fd.Name())
+	case fd.IsList():
+		return errorf(pos, "null is not allowed on repeated field %q", fd.Name())
+	}
+	return errorf(pos, "null is not allowed on scalar field %q: declare it as a wrapper type (google.protobuf.%sValue or similar) to make it nullable", fd.Name(), wrapperName(fd.Kind()))
+}
+
+// wrapperName is the google.protobuf wrapper stem for a scalar kind, for
+// the hint in nullNotAllowed.
+func wrapperName(k protoreflect.Kind) string {
+	switch k {
+	case protoreflect.BoolKind:
+		return "Bool"
+	case protoreflect.StringKind:
+		return "String"
+	case protoreflect.BytesKind:
+		return "Bytes"
+	case protoreflect.FloatKind:
+		return "Float"
+	case protoreflect.DoubleKind:
+		return "Double"
+	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
+		return "Int64"
+	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
+		return "UInt32"
+	case protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+		return "UInt64"
+	}
+	return "Int32"
 }
 
 // addToNullMask appends a dotted field path to the root message's _null FieldMask.

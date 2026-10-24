@@ -61,9 +61,8 @@ import (
 //   - *NullVal — field present-but-null: it stays unset, satisfies
 //     (pxf.required) and keeps (pxf.default) off, and its name is
 //     added to msg's _null FieldMask when the row type declares one.
-//     The draft rejects null on a scalar field that is not a wrapper;
-//     this decoder accepts it, as it does outside @dataset
-//     (trendvidia/protowire#339).
+//     Only a message field may be null, wrappers included; null in a
+//     scalar, repeated or map column is the body's error (#150).
 //   - any other Value — field set to that value.
 //
 // msg is not reset first, so "stays unset" and "absent" describe a
