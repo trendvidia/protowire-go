@@ -89,6 +89,8 @@ type DatasetReader struct {
 	scanned int
 
 	lx lexer // the scan's lexer, reset for each token (nextToken)
+
+	chained bool // built on another reader's Tail, so it starts mid-document
 }
 
 // NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
@@ -118,6 +120,7 @@ func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) 
 	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1}
 	if t, ok := r.(*datasetTail); ok {
 		tr.base = t.at
+		tr.chained = true
 	}
 	if err := tr.readHeader(); err != nil {
 		return nil, err
@@ -208,7 +211,9 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 			// would read as unterminated instead.
 			return tr.fail(tr.rowError(start, len(tr.pending)))
 		case scanEnd:
-			tr.consume(start)
+			// The newlines and comments before the directive stay in the
+			// buffer, so Tail carries them: Parse gives them to that
+			// directive as its LeadingComments (#149).
 			tr.finished = true
 			return DatasetRow{}, io.EOF
 		case scanNotRow:
@@ -379,6 +384,13 @@ func (tr *DatasetReader) readHeader() error {
 			ds := doc.Datasets[0]
 			tr.typ = ds.Type
 			tr.columns = ds.Columns
+			if tr.chained && len(doc.LeadingComments) > 0 && len(doc.Directives) > 0 &&
+				doc.Directives[0].Pos.Offset < ds.Pos.Offset {
+				// A reader on Tail starts mid-document, where the comments
+				// before a directive are its own, as Parse files them; at
+				// a document's start they are the document's.
+				doc.Directives[0].LeadingComments = append(doc.LeadingComments, doc.Directives[0].LeadingComments...)
+			}
 			tr.dirs = doc.Directives
 			tr.consume(headerEnd)
 			return nil
