@@ -9,9 +9,10 @@ package pxf
 // Result.Datasets()[i].Rows.
 //
 // Implementation strategy: convert each non-nil cell back to its PXF
-// text representation, concatenate as a `<column> = <value>\n` body,
-// and run through the existing decoder: Unmarshal, or UnmarshalFull for
-// a row type that needs presence (see [rowNeedsPresence]). That reuses every
+// text representation, concatenate as a `<column> = <value>\n` body
+// (with dotted columns grouped into blocks, see [rowToPXFBody]), and
+// run through the existing decoder: Unmarshal, or UnmarshalFull for a
+// row type that needs presence (see [rowNeedsPresence]). That reuses every
 // branch of the existing decoder — WKT timestamps and durations,
 // wrapper-type nullability, enum-by-name resolution, pxf.required /
 // pxf.default, oneof handling — instead of growing a parallel
@@ -23,9 +24,12 @@ package pxf
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -33,17 +37,20 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// Scan reads the next row and binds its cells to the matching fields
-// of msg by column name. Returns [io.EOF] when the row sequence is
-// exhausted; returns the same sticky error as [DatasetReader.Next] on
-// any read or parse failure.
+// Scan reads the next row and binds its cells to the fields of msg its
+// columns name: a field of msg, or for a dotted column such as
+// "desc.energy" a field inside one of msg's sub-messages. Returns
+// [io.EOF] when the row sequence is exhausted; returns the same sticky
+// error as [DatasetReader.Next] on any read or parse failure.
 //
 // msg's descriptor MUST resolve the field names this reader's
 // Columns() list refers to. Type compatibility against the @dataset
-// header's declared type is the caller's responsibility — a row
-// whose columns don't match msg's fields surfaces as a per-field
-// "field not found" or type-mismatch error from the underlying
-// Unmarshal call.
+// header's declared type is the caller's responsibility. A column that
+// names no field of msg's type, or a dotted column that goes through a
+// repeated, map or scalar field or into a type written as a literal,
+// fails every row bound into that type, its cells empty or not, with an
+// error at the row (draft §3.4.4). A cell that does not match its field
+// surfaces as a type-mismatch error from the underlying Unmarshal call.
 //
 // Cell-state semantics (mirrors draft §3.4.4):
 //
@@ -80,7 +87,15 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
 		MaxRepeatedCount:        tr.lim.maxRepeated,
 	}
-	return o.bindRow(msg, tr.columns, row)
+	// The column paths depend on msg's type and the header, never on the
+	// row, so they are checked once per type rather than once per row.
+	if desc := msg.ProtoReflect().Descriptor(); desc != tr.pathsChecked {
+		if msg := checkColumnPaths(desc, tr.columns); msg != "" {
+			return headerError(msg, row.Pos)
+		}
+		tr.pathsChecked = desc
+	}
+	return o.bindRow(msg, tr.columns, row, true)
 }
 
 // BindRow binds row.Cells to the fields of msg by column name. The
@@ -91,16 +106,23 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 // Result.Datasets()[i].Rows can reuse the same logic. Same cell-state
 // semantics as [DatasetReader.Scan].
 func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
-	return UnmarshalOptions{}.bindRow(msg, columns, row)
+	return UnmarshalOptions{}.bindRow(msg, columns, row, false)
 }
 
 // bindRow is [BindRow] under the options' limits. The bind-time schema
-// checks run unless the caller set SkipValidate.
-func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row DatasetRow) error {
+// checks run unless the caller set SkipValidate. The column paths are
+// checked against msg's type unless pathsChecked says the caller did.
+func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row DatasetRow, pathsChecked bool) error {
 	if len(columns) != len(row.Cells) {
 		return fmt.Errorf("pxf: BindRow: %d columns vs %d cells", len(columns), len(row.Cells))
 	}
-	body, err := rowToPXFBody(columns, row)
+	desc := msg.ProtoReflect().Descriptor()
+	if !pathsChecked {
+		if msg := checkColumnPaths(desc, columns); msg != "" {
+			return headerError(msg, row.Pos)
+		}
+	}
+	body, spans, err := rowToPXFBody(columns, row)
 	if err != nil {
 		return err
 	}
@@ -109,8 +131,8 @@ func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row Datas
 	// lookup for them, and they are what make the annotations
 	// well-defined (two spellings of one default that disagree,
 	// (pxf.required) on a oneof member).
-	if !rowNeedsPresence(msg.ProtoReflect().Descriptor()) {
-		return atRow(o.Unmarshal(body, msg), row.Pos)
+	if !rowNeedsPresence(desc) {
+		return atRow(o.Unmarshal(body, msg), row.Pos, columns, spans)
 	}
 	// The full pipeline's post-decode pass gives an empty cell (no
 	// entry) the field's (pxf.default) and rejects it for
@@ -119,19 +141,46 @@ func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row Datas
 	// row type's _null mask. It costs a presence record per row, so only
 	// a row type that needs it pays for it.
 	_, err = o.UnmarshalFull(body, msg)
-	return atRow(err, row.Pos)
+	return atRow(err, row.Pos, columns, spans)
 }
 
-// atRow moves a decode error to the row it came from. The decoder reads
-// a synthetic body of one line per non-empty cell, so its positions are
-// lines of that body, and a required field's error has no position at
-// all (1:1). A row built by hand has no position to give.
-func atRow(err error, pos Position) error {
+// headerError reports a broken column-path rule at the row being bound,
+// as a decode error is reported. A row built by hand has no position to
+// give.
+func headerError(msg string, pos Position) error {
+	if pos.Line == 0 {
+		return errors.New("pxf: " + msg)
+	}
+	return &Error{Pos: pos, Msg: msg}
+}
+
+// atRow moves a decode error to the row it came from, and names the
+// column whose entry it fell in. The decoder reads a synthetic body, so
+// its positions are lines of that body; spans says which column each
+// line belongs to. A required field's error has no position at all
+// (1:1), which is the body's empty first line, so it names no column. A
+// row built by hand has no position to give, and keeps the body's,
+// counted without that empty first line.
+func atRow(err error, pos Position, columns []string, spans []cellSpan) error {
 	pe, ok := err.(*Error)
-	if !ok || pos.Line == 0 {
+	if !ok {
 		return err
 	}
-	return &Error{Pos: pos, Msg: pe.Msg}
+	msg := pe.Msg
+	for _, sp := range spans {
+		if pe.Pos.Line >= sp.first && pe.Pos.Line <= sp.last {
+			msg = "column " + columns[sp.col] + ": " + msg
+			break
+		}
+	}
+	if pos.Line == 0 {
+		pos = pe.Pos
+		if pos.Line > 1 {
+			pos.Line--
+			pos.Offset--
+		}
+	}
+	return &Error{Pos: pos, Msg: msg}
 }
 
 // Row types [rowNeedsPresence] has answered for, memoized because
@@ -189,23 +238,131 @@ func hasDefaultOrRequired(desc protoreflect.MessageDescriptor, seen map[protoref
 	return false
 }
 
-// rowToPXFBody renders a row as a PXF body: one `<column> = <value>`
-// entry per non-nil cell, in column order. Empty cells produce no
-// entry (the field stays absent from the decoder's perspective).
-func rowToPXFBody(columns []string, row DatasetRow) ([]byte, error) {
-	var buf bytes.Buffer
+// cellSpan is the lines of a synthetic row body that hold the entry of
+// column col.
+type cellSpan struct{ col, first, last int }
+
+// bodyNode is one entry of a row body: a column's cell, or the block of
+// a path prefix that dotted columns share.
+type bodyNode struct {
+	name     string
+	col      int // the column whose cell this is; -1 for a block
+	children []*bodyNode
+}
+
+// firstCol is the column of the first cell inside block n.
+func firstCol(n *bodyNode) int {
+	for n.col < 0 {
+		n = n.children[0]
+	}
+	return n.col
+}
+
+// rowToPXFBody renders a row as a PXF body. A non-empty cell in column
+// "c" is the entry `c = <value>`. One in a dotted column "a.b.c" is the
+// entry `c = <value>` inside `a { b { ... } }`, and every cell whose
+// column starts with "a." lands in that same one `a` block, in the order
+// its first non-empty cell appears (draft §3.4.4). Two blocks for one
+// sub-message would merge, but two for one oneof member are an error.
+// Empty cells produce no entry, and a block none of whose cells is
+// non-empty is not written: the field stays absent. A header with no
+// dotted column has no blocks, and its row is written without building
+// the tree.
+//
+// The body opens with an empty line, so an error the decoder reports at
+// 1:1 (a missing required field) falls in no column's span.
+func rowToPXFBody(columns []string, row DatasetRow) ([]byte, []cellSpan, error) {
+	w := bodyWriter{cells: row.Cells, line: 2, spans: make([]cellSpan, 0, len(row.Cells))}
+	w.buf.WriteByte('\n')
+	if !slices.ContainsFunc(columns, containsDot) {
+		for i, cell := range row.Cells {
+			if cell == nil {
+				continue
+			}
+			if err := w.cell(columns[i], i); err != nil {
+				return nil, nil, err
+			}
+		}
+		return w.buf.Bytes(), w.spans, nil
+	}
+	root := &bodyNode{col: -1}
 	for i, cell := range row.Cells {
 		if cell == nil {
 			continue
 		}
-		buf.WriteString(columns[i])
-		buf.WriteString(" = ")
-		if err := writeCellValue(&buf, cell); err != nil {
-			return nil, err
+		n := root
+		segs := strings.Split(columns[i], ".")
+		for _, seg := range segs[:len(segs)-1] {
+			var next *bodyNode
+			for _, ch := range n.children {
+				if ch.col < 0 && ch.name == seg {
+					next = ch
+					break
+				}
+			}
+			if next == nil {
+				next = &bodyNode{name: seg, col: -1}
+				n.children = append(n.children, next)
+			}
+			n = next
 		}
-		buf.WriteByte('\n')
+		n.children = append(n.children, &bodyNode{name: segs[len(segs)-1], col: i})
 	}
-	return buf.Bytes(), nil
+	if err := w.block(root); err != nil {
+		return nil, nil, err
+	}
+	return w.buf.Bytes(), w.spans, nil
+}
+
+// bodyWriter writes a row body, recording the lines each column's entry
+// takes. line is the number of the next line to be written.
+type bodyWriter struct {
+	buf   bytes.Buffer
+	cells []Value
+	line  int
+	spans []cellSpan
+}
+
+// cell writes the entry `name = <value>` for the cell of column col.
+func (w *bodyWriter) cell(name string, col int) error {
+	start := w.buf.Len()
+	w.buf.WriteString(name)
+	w.buf.WriteString(" = ")
+	if err := writeCellValue(&w.buf, w.cells[col]); err != nil {
+		return err
+	}
+	w.buf.WriteByte('\n')
+	last := w.line + bytes.Count(w.buf.Bytes()[start:], []byte{'\n'}) - 1
+	w.spans = append(w.spans, cellSpan{col: col, first: w.line, last: last})
+	w.line = last + 1
+	return nil
+}
+
+// block writes the entries of n's children, each child block as
+// `name { ... }`.
+func (w *bodyWriter) block(n *bodyNode) error {
+	for _, ch := range n.children {
+		if ch.col >= 0 {
+			if err := w.cell(ch.name, ch.col); err != nil {
+				return err
+			}
+			continue
+		}
+		// An error on the block's own lines (a second oneof member, say)
+		// is laid at the first column in it. Its span comes after its
+		// cells', so a cell's wins.
+		first := w.line
+		w.buf.WriteString(ch.name)
+		w.buf.WriteString(" {\n")
+		w.line++
+		if err := w.block(ch); err != nil {
+			return err
+		}
+		w.buf.WriteString("}\n")
+		w.spans = append(w.spans, cellSpan{col: firstCol(ch), first: first, last: w.line})
+		w.line++
+	}
+	return nil
 }
 
 // writeCellValue formats a single cell value as PXF text. A list or block
