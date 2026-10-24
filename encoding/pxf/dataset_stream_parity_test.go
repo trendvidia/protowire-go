@@ -5,6 +5,7 @@ package pxf_test
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"regexp"
@@ -50,6 +51,9 @@ func TestDatasetReader_AgreesWithParse(t *testing.T) {
 		{"@ then a space", head + "@ x\n", true},
 		{"cut bytes literal in a leading entry", "x = b\"QQ\nQQ\"\n@dataset T (a, b)\n(1, 2)\n", true},
 		{"cut bytes literal in a leading directive", "@x b\"\n@dataset T (a, b)\n", true},
+		{"character no token starts with", head + "(~, 1)\n", true},
+		{"@proto body cut by a newline in a string", "@proto { string a = 1 [default = \"x\n\"]; }\n@dataset T (a, b)\n(1, 2)\n", true},
+		{"@proto body never closed", "@proto { string a = 1;\n@dataset T (a, b)\n(1, 2)\n", true},
 
 		{"clean", head + "(90, 120)\n", false},
 		{"no rows", "@dataset T (a, b)\n", false},
@@ -62,18 +66,30 @@ func TestDatasetReader_AgreesWithParse(t *testing.T) {
 		{"list cell", head + "([1], 2)\n", false},
 		{"block and map cells", "@dataset T (a, b)\n({ name = \"x)\" n = [1, 2] }, { \"k,\": \"v)\" })\n(, [])\n", false},
 		{"multi-line block cell", "@dataset T (a, b)\n({\n  name = \"x\"  # c)\n}, 1)\n", false},
+		// Tokens the lexer decides by reading two bytes past a byte that
+		// could end them: split after `1h.`, the '.' is read and the
+		// digit after it is not.
+		{"duration with a fraction after a unit", head + "(1h.5m, 1)\n", false},
+		{"micro sign duration", head + "(1\xc2\xb5s, 1)\n", false},
+		{"-inf", head + "(-inf, 1)\n", false},
+		{"timestamp ended by a comment", head + "(2026-10-23T00:00:00Z// c\n, 1)\n", false},
+		{"string escapes", head + "(\"\\x41\\101\\u00e9\\U0001F600\\\\\", 1)\n", false},
+		// An @proto body is protobuf source, which Parse skips without
+		// lexing it as PXF; a ';' in it is no PXF token.
+		{"@proto body", "@proto { string a = 1; }\n@dataset T (a, b)\n(1, 2)\n", false},
+		{"named @proto body", "@proto T { string a = 1; map<string, int32> m = 2; }\n@dataset T (a, b)\n(1, 2)\n", false},
+		{"@proto name and body on later lines", "@proto\n# c\nT\n{ string a = 1; // )\n}\n@dataset T (a, b)\n(1, 2)\n", false},
+		{"@proto body with literals and comments", "@proto { string a = 1 [default = \"})\"]; /* } */ # }\n bytes b = 2 [default = b\"}\"]; }\n@dataset T (a, b)\n(1, 2)\n", false},
+		{"@proto source form", "@proto \"\"\"\nsyntax = \"proto3\";\n\"\"\"\n@dataset T (a, b)\n(1, 2)\n", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			doc, perr := pxf.Parse([]byte(tc.in))
 			require.Equal(t, tc.wantErr, perr != nil, "Parse: %v", perr)
-			for _, r := range []struct {
-				name string
-				src  io.Reader
-			}{
+			for _, r := range append([]namedReader{
 				{"whole", strings.NewReader(tc.in)},
 				{"one byte", iotest.OneByteReader(strings.NewReader(tc.in))},
-			} {
+			}, splitReaders(tc.in)...) {
 				rows, err := readAllRows(r.src)
 				if perr != nil {
 					require.Error(t, err, "%s: stream accepted what Parse rejects: %v", r.name, perr)
@@ -85,6 +101,23 @@ func TestDatasetReader_AgreesWithParse(t *testing.T) {
 			}
 		})
 	}
+}
+
+type namedReader struct {
+	name string
+	src  io.Reader
+}
+
+// splitReaders returns, for every offset k inside in, a reader whose
+// first read ends at k: each byte boundary in turn falls on a read
+// boundary with a run of bytes before it, which one-byte reads, lexing
+// again after every byte, never give.
+func splitReaders(in string) []namedReader {
+	rs := make([]namedReader, 0, len(in))
+	for k := 1; k < len(in); k++ {
+		rs = append(rs, namedReader{fmt.Sprintf("split at %d", k), io.MultiReader(strings.NewReader(in[:k]), strings.NewReader(in[k:]))})
+	}
+	return rs
 }
 
 // readAllRows streams every row of the first @dataset in src.
@@ -221,14 +254,14 @@ func TestDatasetReader_ErrorIsSticky(t *testing.T) {
 	assert.Equal(t, err, err2)
 }
 
-// directiveStart matches the start of a directive token: '@' and a name
-// (lexDirective). A bare '@' is not one.
-var directiveStart = regexp.MustCompile(`^@[A-Za-z0-9_.]`)
+// directiveStart matches the start of a directive token, '@' and a
+// name, after the newlines and comments that precede it: the reader
+// leaves those in Tail, since Parse gives them to the directive (#149).
+var directiveStart = regexp.MustCompile(`^(?:\s|#[^\n]*|//[^\n]*|/\*(?s:.*?)\*/)*@[A-Za-z0-9_.]`)
 
 // FuzzDatasetStreamParity holds the stream to Parse on arbitrary rows
 // read one byte at a time, so every row boundary also falls on a read
-// boundary. The stream may stop early only at a directive, where Parse
-// goes on to read the next one; everything before that must agree.
+// boundary, and split in two at every offset (checkStreamAgrees).
 func FuzzDatasetStreamParity(f *testing.F) {
 	for _, s := range []string{
 		"(1, 2)\n(3, 4)\n",
@@ -244,45 +277,135 @@ func FuzzDatasetStreamParity(f *testing.F) {
 		"(\"x\ny\", 1)\n",
 		"(1, 2)\n@",
 		"(1, 2)\n@ x\n",
+		"(1h.5m, 1)\n",
+		"(1\xc2\xb5s, 1)\n",
+		"(-inf, 2)\n",
+		"(~, 1)\n",
 	} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, body string) {
-		in := "@dataset T (a, b)\n" + body
-		doc, perr := pxf.Parse([]byte(in))
+		checkStreamAgrees(t, "@dataset T (a, b)\n"+body)
+	})
+}
 
-		tr, err := pxf.NewDatasetReader(iotest.OneByteReader(strings.NewReader(in)))
+// checkStreamAgrees holds the stream to Parse on in, read one byte at a
+// time and, for inputs small enough, split in two at every offset. The
+// stream reads the first table Parse reads, or fails with Parse's error;
+// it may stop early only at a directive, where Parse goes on to read the
+// next one, and everything before that must agree.
+func checkStreamAgrees(t *testing.T, in string) {
+	doc, perr := pxf.Parse([]byte(in))
+	rs := []namedReader{{"one byte", iotest.OneByteReader(strings.NewReader(in))}}
+	if len(in) <= 512 {
+		rs = append(rs, splitReaders(in)...)
+	}
+	for _, r := range rs {
+		tr, err := pxf.NewDatasetReader(r.src)
 		if err != nil {
-			t.Fatalf("header rejected: %v", err)
+			if perr == nil || perr.Error() != err.Error() {
+				t.Fatalf("%s: header error %q, Parse error %v", r.name, err, perr)
+			}
+			continue
 		}
-		var rows []pxf.DatasetRow
-		for {
-			row, err := tr.Next()
-			if errors.Is(err, io.EOF) {
-				break
+		if perr == nil && (tr.Type() != doc.Datasets[0].Type || !reflect.DeepEqual(tr.Columns(), doc.Datasets[0].Columns)) {
+			t.Fatalf("%s: header %s %v, Parse %s %v", r.name, tr.Type(), tr.Columns(), doc.Datasets[0].Type, doc.Datasets[0].Columns)
+		}
+		rows, err := readRows(tr)
+		if err != nil {
+			if perr == nil || perr.Error() != err.Error() {
+				t.Fatalf("%s: stream error %q, Parse error %v", r.name, err, perr)
 			}
-			if err != nil {
-				if perr == nil || perr.Error() != err.Error() {
-					t.Fatalf("stream error %q, Parse error %v", err, perr)
-				}
-				return
-			}
-			rows = append(rows, row)
+			continue
 		}
 		rest, _ := io.ReadAll(tr.Tail())
 		stop := len(in) - len(rest)
 		if len(rest) > 0 && !directiveStart.Match(rest) {
-			t.Fatalf("stream ended at %q, not at a directive", rest)
+			t.Fatalf("%s: stream ended at %q, not at a directive", r.name, rest)
 		}
 		if perr != nil {
 			var pe *pxf.Error
 			if !errors.As(perr, &pe) || pe.Pos.Offset < stop {
-				t.Fatalf("stream ended cleanly at offset %d, Parse failed before it: %v", stop, perr)
+				t.Fatalf("%s: stream ended cleanly at offset %d, Parse failed before it: %v", r.name, stop, perr)
 			}
-			return
+			continue
 		}
 		if !reflect.DeepEqual(doc.Datasets[0].Rows, rows) {
-			t.Fatalf("rows differ:\nParse  %#v\nstream %#v", doc.Datasets[0].Rows, rows)
+			t.Fatalf("%s: rows differ:\nParse  %#v\nstream %#v", r.name, doc.Datasets[0].Rows, rows)
 		}
+	}
+}
+
+// FuzzDatasetHeaderParity holds the stream to Parse on arbitrary content
+// before a dataset (checkStreamAgrees): leading directives, @proto
+// bodies (raw protobuf source, which Parse does not lex as PXF) and
+// entries.
+func FuzzDatasetHeaderParity(f *testing.F) {
+	for _, s := range []string{
+		"",
+		"# c",
+		"@type T",
+		"@x { k = 1 }",
+		"@x a b { k = [1, 2] }",
+		"@proto { string a = 1; }",
+		"@proto T { string a = 1; }",
+		"@proto\nT\n{ x }",
+		"@proto { \"}\" }",
+		"@proto { /* } */ }",
+		"@proto { b\"}\" }",
+		"@proto { a\n",
+		"@proto \"\"\"syntax\"\"\"",
+		"x = 1h.5m",
+		"x = 1\xc2\xb5s",
+		"@dataset X (q)\n(1)",
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, header string) {
+		checkStreamAgrees(t, header+"\n@dataset T (a, b)\n(1, 2)\n")
 	})
+}
+
+// A reader chained on Tail sees the directives between two tables as
+// Parse does, with the comments before each one as its LeadingComments
+// (#149): the trailing comment on the last row's line, and the lines
+// before the directive. The reader used to consume them while looking
+// for the next row.
+func TestDatasetReader_TailKeepsDirectiveComments(t *testing.T) {
+	for _, in := range []string{
+		// The issue's input.
+		"@dataset A (x)\n(1) # a\n# b\n@x {}\n@dataset B (y)\n(3)\n",
+		"@dataset A (x)\n(1)\n/* block\n */ // line\n@x {}\n@y { k = 1 }\n@dataset B (y)\n(3)\n",
+		"@dataset A (x)\n(1)\n\n# only before the dataset\n@dataset B (y)\n(3)\n",
+		"@dataset A (x)\n# no rows\n@x {}\n@dataset B (y)\n",
+	} {
+		doc, err := pxf.Parse([]byte(in))
+		require.NoError(t, err, in)
+		// Parse's directives between the two tables: all of them here,
+		// since nothing precedes table A.
+		want := doc.Directives
+
+		for _, oneByte := range []bool{false, true} {
+			var src io.Reader = strings.NewReader(in)
+			if oneByte {
+				src = iotest.OneByteReader(src)
+			}
+			tr, err := pxf.NewDatasetReader(src)
+			require.NoError(t, err)
+			for {
+				if _, err := tr.Next(); err != nil {
+					require.ErrorIs(t, err, io.EOF)
+					break
+				}
+			}
+			tr2, err := pxf.NewDatasetReader(tr.Tail())
+			require.NoError(t, err, in)
+			assert.Equal(t, "B", tr2.Type())
+			if len(want) == 0 {
+				assert.Empty(t, tr2.Directives(), "%q one-byte=%v", in, oneByte)
+				continue
+			}
+			assert.Equal(t, want, tr2.Directives(), "%q one-byte=%v", in, oneByte)
+		}
+	}
 }
