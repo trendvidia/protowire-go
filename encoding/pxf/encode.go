@@ -66,6 +66,7 @@ type encoder struct {
 	buf          *bytes.Buffer
 	indent       string
 	emitDefaults bool
+	cellBodies   bool // writing a @dataset value cell: unset annotated fields follow cellUnset
 	resolver     TypeResolver
 	nullFields   *Result
 	nullMaskFd   protoreflect.FieldDescriptor // cached, top-level only
@@ -157,7 +158,20 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 			continue
 		}
 
-		if !e.emitDefaults && !msg.Has(fd) {
+		if e.cellBodies && !msg.Has(fd) && !fd.IsList() && !fd.IsMap() {
+			write, null, err := cellUnset(msg, fd, i, path)
+			switch {
+			case err != nil:
+				return err
+			case null:
+				e.writeFieldPrefix(level, fd.Name())
+				e.buf.WriteString("null\n")
+				continue
+			case !write:
+				continue
+			}
+			// The zero value, written out; falls through below.
+		} else if !e.emitDefaults && !msg.Has(fd) {
 			continue
 		}
 		val := msg.Get(fd)
