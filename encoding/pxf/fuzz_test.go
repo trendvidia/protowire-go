@@ -55,6 +55,9 @@ config { hostname = "h" }`,
 		`regions { "us-east-1" { replicas = 3 } primary { replicas = 2 } }`,
 		`children { "a" = { x = 1 } "" { } }`,
 		`"quoted" = 1`,
+		// Any blocks (draft -01 "Any Blocks"): the type entry opens a block.
+		`payload { @type = "type.googleapis.com/demo.v1.X" a = 1 }`,
+		`xs = [{ @type = "demo.v1.X" }] m = { "k": { @type = "demo.v1.X" b { c = 2 } } }`,
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))
@@ -99,6 +102,8 @@ func FuzzParseTolerant(f *testing.F) {
 		`m { "a": "b": 2 }`,
 		`children { "dup" { } "dup" { } }`,
 		`regions { "us-east-1" { replicas = `,
+		`payload { a = 1 @type = "demo.v1.X" b = 2 }`, // misplaced type entry
+		`payload { @type = `,                          // cut short
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))

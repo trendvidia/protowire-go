@@ -85,6 +85,7 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 		MaxNumericLiteralDigits: tr.lim.maxDigits,
 		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
 		MaxRepeatedCount:        tr.lim.maxRepeated,
+		TypeResolver:            tr.resolver,
 	}
 	// The column paths depend on msg's type and the header, never on the
 	// row, so they are checked once per type rather than once per row.
@@ -106,6 +107,13 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 // semantics as [DatasetReader.Scan].
 func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	return UnmarshalOptions{}.bindRow(msg, columns, row, false)
+}
+
+// BindRow is [BindRow] under the options: their limits, and their
+// TypeResolver, which a cell holding an Any block that opens with
+// `@type = "..."` needs (draft -01 "Any Blocks").
+func (o UnmarshalOptions) BindRow(msg proto.Message, columns []string, row DatasetRow) error {
+	return o.bindRow(msg, columns, row, false)
 }
 
 // bindRow is [BindRow] under the options' limits. The bind-time schema

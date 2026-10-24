@@ -560,6 +560,13 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 	}
 
 	desc := msg.Descriptor()
+	// A block bound to google.protobuf.Any may open with a type entry
+	// (draft -01 "Any Blocks", protowire#354), in every place a body is
+	// written: a singular field, a list element, a map value. Without one,
+	// the block is the Any's own fields, type_url and value.
+	if inBlock && d.current.Kind == AT_TYPE && isAny(desc) {
+		return d.decodeAnyBody(msg)
+	}
 	fields := desc.Fields()
 	var setOneofs map[string]string
 
@@ -582,6 +589,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 		}
 
 		pos := d.current.Pos
+		if d.current.Kind == AT_TYPE {
+			return errorf(pos, "%s", typeEntryMisplaced)
+		}
 		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
 			return errorf(pos, "expected identifier, string, or integer, got %s", d.tokenErrMsg())
 		}
@@ -690,13 +700,6 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 			if d.result != nil {
 				d.result.markPresent(d.pathPrefix + string(fd.Name()))
-			}
-			// Any with block syntax: name { @type = "..." ... }
-			if isAny(fd.Message()) && d.resolver != nil && d.current.Kind == AT_TYPE {
-				if err := d.decodeAnyBlock(msg, fd); err != nil {
-					return err
-				}
-				continue
 			}
 			if err := d.decodeMsgBody(msg, fd); err != nil {
 				return err
@@ -882,11 +885,6 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		d.markInnerPresent(fd, "value")
 		return nil
 	}
-	// google.protobuf.Any with sugar syntax
-	if isAny(mdesc) && d.resolver != nil && d.current.Kind == LBRACE {
-		return d.decodeAnyValue(msg, fd)
-	}
-
 	if d.current.Kind != LBRACE {
 		return errorf(d.current.Pos, "expected %s for message field %q, got %s",
 			msgValueForms(mdesc), fd.Name(), d.tokenErrMsg())
@@ -979,42 +977,43 @@ func keySuffix(k protoreflect.MapKey) string {
 	return "[" + formatMapKeyForPath(k) + "]"
 }
 
-// decodeAnyBlock decodes Any sugar when the opening { has already been consumed
-// (block syntax: `name { @type = "..." ... }`).
-func (d *directDecoder) decodeAnyBlock(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {
-	return d.decodeAnyInner(msg, fd)
-}
+// typeEntryMisplaced is the error for a type entry anywhere but the
+// start of a google.protobuf.Any block.
+const typeEntryMisplaced = `@type is allowed only as the first entry of a block bound to google.protobuf.Any (draft -01 "Any Blocks")`
 
-// decodeAnyValue decodes Any sugar from assignment syntax: `name = { @type = "..." ... }`.
-func (d *directDecoder) decodeAnyValue(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {
-	d.advance() // consume {
-	return d.decodeAnyInner(msg, fd)
-}
-
-func (d *directDecoder) decodeAnyInner(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {
-	if d.current.Kind != AT_TYPE {
-		return errorf(d.current.Pos, "Any field requires @type as first entry")
-	}
+// decodeAnyBody decodes a google.protobuf.Any block that opens with a
+// type entry, `@type = "<type-url>"`, its '{' consumed and the presence
+// path already extended for it: the rest of the block is a body of the
+// type the URL names, packed into anyMsg's value, and the URL is stored
+// verbatim in type_url (draft -01 "Any Blocks"). The body's fields are
+// recorded under the Any's own path, as `payload.code`.
+func (d *directDecoder) decodeAnyBody(anyMsg protoreflect.Message) error {
 	d.advance() // consume @type
 	if d.current.Kind != EQUALS {
-		return errorf(d.current.Pos, "expected '=' after @type")
+		return errorf(d.current.Pos, "expected '=' after @type, got %s", d.tokenErrMsg())
 	}
 	d.advance()
 	if d.current.Kind != STRING {
-		return errorf(d.current.Pos, "expected string type URL after @type =")
+		return errorf(d.current.Pos, "expected a string type URL after @type =, got %s", d.tokenErrMsg())
 	}
 	typeURL := d.current.Value
+	urlPos := d.current.Pos
 	d.advance()
 
+	if d.resolver == nil {
+		return errorf(urlPos, "cannot resolve Any type %q: no TypeResolver (UnmarshalOptions.TypeResolver)", typeURL)
+	}
 	innerDesc, err := d.resolver.FindMessageByURL(typeURL)
 	if err != nil {
-		return errorf(d.current.Pos, "cannot resolve Any type %q: %v", typeURL, err)
+		return errorf(urlPos, "cannot resolve Any type %q: %v", typeURL, err)
 	}
 
 	inner := dynamicpb.NewMessage(innerDesc)
-	saved := d.enter(fd.Name())
+	// The body shares the Any's braces, which the caller's decodeFields
+	// has already counted as one descent.
+	d.depth--
 	err = d.decodeFields(inner.ProtoReflect(), true)
-	d.pathPrefix = saved
+	d.depth++
 	if err != nil {
 		return err
 	}
@@ -1023,9 +1022,7 @@ func (d *directDecoder) decodeAnyInner(msg protoreflect.Message, fd protoreflect
 	if err != nil {
 		return fmt.Errorf("cannot marshal Any inner message: %w", err)
 	}
-
-	anyMsg := msg.Mutable(fd).Message()
-	anyDesc := fd.Message()
+	anyDesc := anyMsg.Descriptor()
 	anyMsg.Set(anyDesc.Fields().ByName("type_url"), protoreflect.ValueOfString(typeURL))
 	anyMsg.Set(anyDesc.Fields().ByName("value"), protoreflect.ValueOfBytes(packed))
 	return nil

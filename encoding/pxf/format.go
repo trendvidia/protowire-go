@@ -111,6 +111,16 @@ func (f *formatter) formatEntries(entries []Entry, level int) {
 			}
 			f.buf.WriteByte('\n')
 
+		case *TypeEntry:
+			f.writeComments(e.LeadingComments, level)
+			f.writeIndent(level)
+			fmt.Fprintf(f.buf, "@type = %q", e.URL)
+			if e.TrailingComment != "" {
+				f.buf.WriteString(" ")
+				f.buf.WriteString(e.TrailingComment)
+			}
+			f.buf.WriteByte('\n')
+
 		case *Block:
 			f.writeComments(e.LeadingComments, level)
 			f.writeIndent(level)

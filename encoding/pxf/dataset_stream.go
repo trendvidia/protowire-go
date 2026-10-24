@@ -66,10 +66,11 @@ type DatasetReader struct {
 	typ      string
 	columns  []string
 	dirs     []Directive
-	finished bool     // Next() has returned io.EOF
-	err      error    // sticky error
-	lim      limits   // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
-	base     Position // document position of pending[0], so rows and errors carry Parse's positions
+	finished bool         // Next() has returned io.EOF
+	err      error        // sticky error
+	lim      limits       // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
+	base     Position     // document position of pending[0], so rows and errors carry Parse's positions
+	resolver TypeResolver // the options' TypeResolver, for Scan: an Any cell may name its type (protowire#354)
 
 	// The header and row scans resume where the previous pull left
 	// them, so a header or a row is lexed once however many reads it
@@ -124,9 +125,11 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // buffer without bound, and the header and every row are parsed under
 // its MaxNestingDepth and MaxBytesLiteralLength, as [ParseOptions.Parse]
 // parses them. [DatasetReader.Scan] binds a row under every limit but
-// MaxMessageSize, as Unmarshal would bind the body the row stands for.
+// MaxMessageSize, as Unmarshal would bind the body the row stands for,
+// and with the options' TypeResolver, which an Any cell opening with
+// `@type = "..."` needs.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1}
+	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1, resolver: o.TypeResolver}
 	if t, ok := r.(*datasetTail); ok {
 		tr.base = t.at
 		tr.chained = true
