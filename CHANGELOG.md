@@ -30,23 +30,23 @@ format changes.
   written as a literal (Timestamp, Duration, a wrapper, `pxf.BigInt`,
   `pxf.Decimal`, `pxf.BigFloat`), through a scalar, or to a field that
   does not exist. A path may go into a `pxf.Secret`, which has a block
-  form (`pw.hint`). They reject it even when the row's cells
-  are all empty.
+  form (`pw.hint`). They reject it even when the row's cells are all
+  empty, with an error at the row. `Scan` checks the paths once per row
+  type, not once per row.
 
 ### Changed
 
 - **A `BindRow` or `Scan` error names its column**, as
   `<row position>: column <c>: <message>`. Before, it gave only the
   row's position. An error on no single column, such as a missing
-  required field, is unchanged.
+  required field, is unchanged. A row built by hand has no position, so
+  its error keeps the position in the row's body, numbered as before.
 - **A header that names the same plain column twice, `(a, a)`, is now
   rejected.** It used to parse, and for a repeated field the two cells
   were concatenated.
 - `AppendDatasetHeader` still refuses dotted columns, now with a message
   that says the writer does not support them yet
   ([#155](https://github.com/trendvidia/protowire-go/issues/155)).
-### Changed
-
 - **`check/protovalidate` requires the parent module at v1.9.0 instead of
   v1.8.1.** Keeps the nested module on the parent it ships with, the
   #134 / #139 precedent. Nothing in v1.9.0 reaches the adapter (the

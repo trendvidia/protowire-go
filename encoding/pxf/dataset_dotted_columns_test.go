@@ -289,3 +289,48 @@ func TestDottedColumns_ErrorsNameTheColumn(t *testing.T) {
 		assert.Contains(t, err.Error(), tc.want)
 	}
 }
+
+// A row built by hand has no position, so its error keeps the body's,
+// numbered as the body's entries are: the first cell's entry is line 1,
+// as it was before dotted columns.
+func TestDottedColumns_HandBuiltRowKeepsTheBodyPosition(t *testing.T) {
+	md := dottedDesc(t)
+	err := pxf.BindRow(dynamicpb.NewMessage(md), []string{"id", "plain"},
+		pxf.DatasetRow{Cells: []pxf.Value{&pxf.IntVal{Raw: "1"}, nil}})
+	require.ErrorContains(t, err, `1:6: column id: expected string for field "id"`)
+	err = pxf.BindRow(dynamicpb.NewMessage(md), []string{"id", "plain"},
+		pxf.DatasetRow{Cells: []pxf.Value{&pxf.StringVal{Value: "x"}, &pxf.StringVal{Value: "y"}}})
+	require.ErrorContains(t, err, `2:9: column plain: expected integer for field "plain"`)
+}
+
+// A column path that does not resolve fails at the row being bound, as
+// a *pxf.Error carrying the row's position, on every row. A row built
+// by hand has no position to give.
+func TestDottedColumns_HeaderErrorIsAtTheRow(t *testing.T) {
+	md := dottedDesc(t)
+	doc := "@dataset dc.v1.Event (id, desc.nope)\n(\"a\", )\n(\"b\", 1)\n"
+	tr, err := pxf.NewDatasetReader(strings.NewReader(doc))
+	require.NoError(t, err)
+	for _, line := range []int{2, 3} {
+		err := tr.Scan(dynamicpb.NewMessage(md))
+		var pe *pxf.Error
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, line, pe.Pos.Line)
+		assert.Contains(t, pe.Msg, `@dataset column "desc.nope": dc.v1.Desc has no field "nope"`)
+	}
+	err = pxf.BindRow(dynamicpb.NewMessage(md), []string{"desc.nope"}, pxf.DatasetRow{Cells: []pxf.Value{nil}})
+	require.EqualError(t, err, `pxf: @dataset column "desc.nope": dc.v1.Desc has no field "nope"`)
+}
+
+// Scan checks the column paths once per row type, so a row bound into a
+// type the paths do not resolve against is still rejected after rows of
+// a type they do.
+func TestDottedColumns_ScanChecksEachRowType(t *testing.T) {
+	md := dottedDesc(t)
+	tr, err := pxf.NewDatasetReader(strings.NewReader("@dataset dc.v1.Event (desc.energy)\n(1)\n(2)\n(3)\n"))
+	require.NoError(t, err)
+	require.NoError(t, tr.Scan(dynamicpb.NewMessage(md)))
+	pick := md.Fields().ByName("a").Message()
+	require.ErrorContains(t, tr.Scan(dynamicpb.NewMessage(pick)), `3:1: @dataset column "desc.energy": dc.v1.Pick has no field "desc"`)
+	require.NoError(t, tr.Scan(dynamicpb.NewMessage(md)))
+}

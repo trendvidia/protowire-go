@@ -30,7 +30,7 @@ func columnPathError(cols []string) (int, string) {
 			switch {
 			case prev == c:
 				return i, fmt.Sprintf("@dataset column %q appears twice (draft §3.4.4)", c)
-			case strings.HasPrefix(c, prev+"."), strings.HasPrefix(prev, c+"."):
+			case isPathPrefix(prev, c), isPathPrefix(c, prev):
 				return i, fmt.Sprintf("@dataset column %q overlaps column %q: a field and a path inside it cannot both be columns (draft §3.4.4)", c, prev)
 			}
 		}
@@ -38,45 +38,55 @@ func columnPathError(cols []string) (int, string) {
 	return -1, ""
 }
 
-// checkColumnPaths checks every dotted column against the row type desc:
-// each segment names a field, and each segment but the last names a
-// singular message field whose type is not written as a literal of its
-// own (a Timestamp, Duration, wrapper, pxf.BigInt, pxf.Decimal or
+// isPathPrefix reports whether path goes inside the field prefix names:
+// "a" is a path prefix of "a.b", and not of "ab".
+func isPathPrefix(prefix, path string) bool {
+	return len(path) > len(prefix) && path[len(prefix)] == '.' && strings.HasPrefix(path, prefix)
+}
+
+// checkColumnPaths checks every dotted column against the row type desc,
+// and returns the message for the first that breaks a rule, or "". Each
+// segment names a field, and each segment but the last names a singular
+// message field whose type is not written as a literal of its own (a
+// Timestamp, Duration, wrapper, pxf.BigInt, pxf.Decimal or
 // pxf.BigFloat). A path has no index, so it cannot go through a repeated
 // or map field. A pxf.Secret has a block form as well as its literal
-// (`pw { value = "x" hint = "h" }`), so a path may go into one. A column without a dot is left to the
-// decoder, which reports an unknown field as it does in a body.
-func checkColumnPaths(desc protoreflect.MessageDescriptor, cols []string) error {
+// (`pw { value = "x" hint = "h" }`), so a path may go into one. A column
+// without a dot is left to the decoder, which reports an unknown field
+// as it does in a body. A header that passes allocates nothing, since
+// [BindRow] checks it on every row.
+func checkColumnPaths(desc protoreflect.MessageDescriptor, cols []string) string {
 	if i, msg := columnPathError(cols); i >= 0 {
-		return fmt.Errorf("pxf: %s", msg)
+		return msg
 	}
 	for _, c := range cols {
 		if !containsDot(c) {
 			continue
 		}
 		md := desc
-		segs := strings.Split(c, ".")
-		for k, seg := range segs {
+		for rest := c; ; {
+			seg, tail, more := strings.Cut(rest, ".")
 			fd := md.Fields().ByName(protoreflect.Name(seg))
 			if fd == nil {
-				return fmt.Errorf("pxf: @dataset column %q: %s has no field %q", c, md.FullName(), seg)
+				return fmt.Sprintf("@dataset column %q: %s has no field %q", c, md.FullName(), seg)
 			}
-			if k == len(segs)-1 {
+			if !more {
 				break
 			}
-			at := strings.Join(segs[:k+1], ".")
+			at := c[:len(c)-len(tail)-1]
 			switch {
 			case fd.IsMap():
-				return fmt.Errorf("pxf: @dataset column %q: %q is a map field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
+				return fmt.Sprintf("@dataset column %q: %q is a map field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
 			case fd.IsList():
-				return fmt.Errorf("pxf: @dataset column %q: %q is a repeated field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
+				return fmt.Sprintf("@dataset column %q: %q is a repeated field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
 			case fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind:
-				return fmt.Errorf("pxf: @dataset column %q: %q is not a message field", c, at)
+				return fmt.Sprintf("@dataset column %q: %q is not a message field", c, at)
 			case isLiteralMessageType(fd.Message()) && !isSecret(fd.Message()):
-				return fmt.Errorf("pxf: @dataset column %q: %q is a %s, which is written as a literal; a column path cannot go into it (draft §3.4.4)", c, at, fd.Message().FullName())
+				return fmt.Sprintf("@dataset column %q: %q is a %s, which is written as a literal; a column path cannot go into it (draft §3.4.4)", c, at, fd.Message().FullName())
 			}
 			md = fd.Message()
+			rest = tail
 		}
 	}
-	return nil
+	return ""
 }
