@@ -11,6 +11,34 @@ format changes.
 
 ## [Unreleased]
 
+## [1.10.0] — 2026-10-24
+
+A minor release that brings decoding in line with draft `-01` at
+protowire v1.13, so the spec repo's conformance corpus can pin it. It
+fixes the known issue v1.9.0 shipped: a field set inside a block cell,
+list element or map value is now tracked under that body, so its
+default no longer overwrites it ([#156]). `(pxf.default)` and
+`(pxf.required)` now apply inside list elements, map values and `Any`
+bodies ([#161]). `@type = "<type-url>"` opens an `Any` block anywhere and
+`Parse` accepts it ([#173]). `AppendDatasetRow` writes list, map, block
+and dotted-path cells ([#155], [#159]). The streaming reader runs in
+linear time on an unclosed row ([#148]). Documents that decoded before
+can fail now: `null` on a scalar, repeated or map field ([#150]), a raw
+newline inside a `"..."` string ([#143]), a required field left unset
+inside an element, and a header that repeats a column or names no
+field. Decoded output can change where a default now applies inside an
+element, and `OnSecretField` paths name the body a Secret sits in. No
+wire-format change.
+
+[#143]: https://github.com/trendvidia/protowire-go/issues/143
+[#148]: https://github.com/trendvidia/protowire-go/issues/148
+[#150]: https://github.com/trendvidia/protowire-go/issues/150
+[#155]: https://github.com/trendvidia/protowire-go/issues/155
+[#156]: https://github.com/trendvidia/protowire-go/issues/156
+[#159]: https://github.com/trendvidia/protowire-go/issues/159
+[#161]: https://github.com/trendvidia/protowire-go/issues/161
+[#173]: https://github.com/trendvidia/protowire-go/issues/173
+
 ### Added
 
 - **`@type = "<type-url>"` opens an `Any` block everywhere, and `Parse`
