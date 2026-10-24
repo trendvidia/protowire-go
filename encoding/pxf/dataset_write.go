@@ -27,12 +27,11 @@ import (
 // AppendDatasetHeader appends the header `@dataset <type> (<columns>)`
 // for rows of type desc, and a newline, to dst.
 //
-// It returns an error, and dst unchanged, when the columns are not ones
-// a v1 row can carry: an empty list, a name that is dotted, repeated, or
-// not a field of desc, or a field whose value no v1 cell can hold (a
-// repeated or map field, or a message other than a Timestamp, Duration,
-// wrapper, pxf.BigInt, pxf.Decimal, pxf.BigFloat or pxf.Secret). A
-// (pxf.required) field missing from the columns is an error too: every
+// Any field of desc can be a column: a cell may hold a list or a block
+// (protowire#341). It returns an error, and dst unchanged, for an empty
+// column list and for a name that is dotted (protowire#342), repeated,
+// or not a field of desc. A (pxf.required) field missing from the
+// columns is an error too: every
 // row would be rejected on reading. So is a schema that
 // [ValidateDescriptor] refuses, which Unmarshal would refuse to read.
 func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, columns []string) ([]byte, error) {
@@ -85,9 +84,11 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 // (pxf.default) if they have one. A (pxf.required) field cannot be left
 // out: the column list is refused.
 //
+// A list, map or message that needs a block is written as Marshal writes
+// it, on one line, so a table keeps one row per line.
+//
 // It returns an error, and dst unchanged, for the column errors of
-// AppendDatasetHeader, for a pxf.Secret carrying a hint or fingerprint
-// (which needs a block, not a cell), and for a value Marshal refuses.
+// AppendDatasetHeader and for a value Marshal refuses.
 func AppendDatasetRow(dst []byte, msg proto.Message, columns []string) ([]byte, error) {
 	m := msg.ProtoReflect()
 	desc := m.Descriptor()
@@ -122,12 +123,15 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 		return nil
 	}
 	if m.Has(fd) {
-		if !isMsg {
+		switch {
+		case fd.IsList() || fd.IsMap():
+			return e.writeValueCell(fd, m.Get(fd), nil)
+		case !isMsg:
 			return e.writeScalar(fd, m.Get(fd))
 		}
 		sub := m.Get(fd).Message()
 		if !isLiteralMessage(sub) {
-			return errors.New("a pxf.Secret with a hint or fingerprint needs a block; v1 cells hold literals only")
+			return e.writeValueCell(fd, protoreflect.Value{}, sub)
 		}
 		return e.writeLiteralMessage(sub)
 	}
@@ -157,6 +161,42 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 	return nil
 }
 
+// writeValueCell writes a list, map or block value as one cell
+// (protowire#341): the text Marshal writes for the field, on one line, so
+// a table keeps one row per line. The field is encoded as Marshal
+// encodes it at no indent, the field name that leads it is cut, and its
+// newlines become spaces. That is safe because Marshal never writes a raw
+// newline inside a token (strings escape it, bytes are base64), so every
+// newline it writes separates tokens.
+func (e *encoder) writeValueCell(fd protoreflect.FieldDescriptor, v protoreflect.Value, sub protoreflect.Message) error {
+	var tmp bytes.Buffer
+	inner := &encoder{buf: &tmp, nullSet: e.nullSet}
+	var err error
+	switch {
+	case fd.IsMap():
+		err = inner.encodeMapField(fd, v, 0)
+	case fd.IsList():
+		err = inner.encodeListField(fd, v, 0)
+	default:
+		err = inner.encodeMessageField(fd, sub, 0)
+	}
+	if err != nil {
+		return err
+	}
+	out := tmp.Bytes()
+	out = bytes.TrimPrefix(out, []byte(fd.Name()))
+	out = bytes.TrimPrefix(out, []byte(" = "))
+	out = bytes.TrimPrefix(out, []byte(" "))
+	out = bytes.TrimSuffix(out, []byte("\n"))
+	for i, ch := range out {
+		if ch == '\n' {
+			out[i] = ' '
+		}
+	}
+	e.buf.Write(out)
+	return nil
+}
+
 // datasetColumns resolves columns against desc, refusing what a v1 row
 // cannot carry; see AppendDatasetHeader. It also returns desc's
 // cellOptions.
@@ -164,10 +204,9 @@ func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]pr
 	if len(columns) == 0 {
 		return nil, nil, errors.New("pxf: @dataset needs at least one column")
 	}
-	// The reader parses rows through Unmarshal with SkipValidate, so a
-	// schema it would refuse is refused here instead of written: a field
-	// with a reserved name makes the header unreadable, and a oneof with
-	// two defaulted members would get two null cells.
+	// A schema the reader would refuse is refused here instead of
+	// written: a field with a reserved name makes the header unreadable,
+	// and a oneof with two defaulted members would get two null cells.
 	if err := asValidationError(ValidateDescriptor(desc)); err != nil {
 		return nil, nil, fmt.Errorf("pxf: @dataset %s: %w", desc.FullName(), err)
 	}
@@ -182,14 +221,6 @@ func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]pr
 		}
 		if slices.Contains(fds[:i], fd) {
 			return nil, nil, fmt.Errorf("pxf: @dataset column %q appears twice", c)
-		}
-		switch {
-		case fd.IsMap():
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: a map field cannot be held by a v1 cell (draft §3.4.4)", c)
-		case fd.IsList():
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: a repeated field cannot be held by a v1 cell (draft §3.4.4)", c)
-		case (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) && !isLiteralMessageType(fd.Message()):
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: a %s field needs a block, which a v1 cell cannot hold (draft §3.4.4)", c, fd.Message().FullName())
 		}
 		fds[i] = fd
 	}
