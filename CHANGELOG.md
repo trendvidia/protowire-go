@@ -86,6 +86,17 @@ format changes.
   }`, as it already did for `name { value = ... }`, instead of leaving
   the plaintext on the message. `Unmarshal` without presence tracking
   is unchanged and costs the same.
+- **`OnSecretField` paths name the body a Secret sits in.** A Secret
+  field inside `db = { ... }`, a list element, a map value or an `Any`
+  body is now reported as `db.password`, `servers[0].password`,
+  `by_host["a"].password` or `payload.pw`. Before, the hook was given
+  the bare field name (`password`), so two Secrets of the same name in
+  different elements were indistinguishable. A secret store keyed on the
+  old strings has to move to the new ones.
+- **`MarshalOptions.NullFields` writes back a null from a list element,
+  map value, keyed entry or `Any` body.** `Marshal` looks a null up
+  under the same path `UnmarshalFull` records it under, so `items = [{
+  deep = null }]` re-encodes as written instead of losing the `null`.
 
 ## [1.9.0] — 2026-10-23
 

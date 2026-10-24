@@ -9,6 +9,9 @@ import "github.com/trendvidia/protowire-go/check"
 // It tracks which fields were explicitly set, which were set to null,
 // and which were absent from the input.
 // Fields are identified by dotted paths (e.g., "name", "nested.value").
+// A field inside a list element or map value is named under the element:
+// "items[0].label", "by_key[\"k\"].label" (a string key quoted, other keys
+// bare), as are the paths given to [UnmarshalOptions.OnSecretField].
 type Result struct {
 	nullFields    map[string]struct{}
 	presentFields map[string]struct{}

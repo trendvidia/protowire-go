@@ -15,10 +15,13 @@ package pxf_test
 // (its default stayed off, or its required check passed).
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/trendvidia/protocompile"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -188,5 +191,117 @@ func TestEqBlock_SecretHookInAssignmentForm(t *testing.T) {
 		sec := m.Get(desc.Fields().ByName("db_password")).Message()
 		assert.Equal(t, "", sec.Get(sec.Descriptor().Fields().ByName("value")).String(), "%s: plaintext reached the message", doc)
 		assert.Equal(t, "vault", sec.Get(sec.Descriptor().Fields().ByName("hint")).String(), doc)
+	}
+}
+
+// A null recorded under an element or Any path is written back by
+// Marshal at that element, and only there: the encoder's null lookup
+// extends its path the way the decoder does.
+func TestEqBlock_NullInsideElementRoundTrips(t *testing.T) {
+	desc := eqBlockDesc(t)
+	for _, tc := range []struct{ doc, path string }{
+		{`need = 1 items = [{ id = "a" }, { deep = null }]`, "items[1].deep"},
+		{`need = 1 by_key = { "j": { id = "a" } "k": { deep = null } }`, `by_key["k"].deep`},
+		{`need = 1 keyed { a { label = "x" } b { deep = null } }`, "keyed[1].deep"},
+	} {
+		m, res, err := decodeFull(t, desc, tc.doc)
+		require.NoError(t, err, tc.doc)
+		require.True(t, res.IsNull(tc.path), tc.doc)
+		out, err := pxf.MarshalOptions{NullFields: res}.Marshal(m)
+		require.NoError(t, err, tc.doc)
+		assert.Equal(t, 1, strings.Count(string(out), "deep = null"), "%s:\n%s", tc.doc, out)
+
+		_, back, err := decodeFull(t, desc, string(out))
+		require.NoError(t, err, "%s:\n%s", tc.doc, out)
+		assert.True(t, back.IsNull(tc.path), "%s:\n%s", tc.doc, out)
+	}
+}
+
+func TestEqBlock_NullInsideAnyRoundTrips(t *testing.T) {
+	fd, resolver := compileAnyProto(t)
+	desc := fd.Messages().ByName("Container")
+	m := dynamicpb.NewMessage(desc)
+	res, err := pxf.UnmarshalOptions{TypeResolver: resolver}.UnmarshalFull(
+		[]byte(`payload { @type = "any_test.v1.Detail" reason = null code = 1 }`), m)
+	require.NoError(t, err)
+	require.True(t, res.IsNull("payload.reason"))
+
+	out, err := pxf.MarshalOptions{TypeResolver: resolver, NullFields: res}.Marshal(m)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "reason = null")
+}
+
+const secretPathsProtoSrc = `
+syntax = "proto3";
+package secretpaths.v1;
+
+import "google/protobuf/any.proto";
+import "pxf/secret.proto";
+
+message DB {
+  pxf.Secret password = 1;
+}
+
+message Holder {
+  pxf.Secret pw = 1;
+}
+
+message Root {
+  DB db = 1;
+  repeated DB servers = 2;
+  map<string, DB> by_host = 3;
+  google.protobuf.Any payload = 4;
+  map<string, pxf.Secret> tenant_keys = 5;
+  pxf.Secret pw = 6;
+}
+`
+
+// Every row of the OnSecretField path table (options.go): a Secret is
+// reported under the body it sits in, whichever way the body is
+// written.
+func TestOnSecretField_PathNamesTheBody(t *testing.T) {
+	comp := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(&protocompile.SourceResolver{
+			Accessor: protocompile.SourceAccessorFromMap(map[string]string{
+				"test.proto":       secretPathsProtoSrc,
+				"pxf/secret.proto": secretProtoSrc,
+			}),
+		}),
+	}
+	files, err := comp.Compile(context.Background(), "test.proto")
+	require.NoError(t, err)
+	fd := files.FindFileByPath("test.proto")
+	desc := fd.Messages().ByName("Root")
+	resolver := &testResolver{descs: map[string]protoreflect.MessageDescriptor{
+		"secretpaths.v1.Holder": fd.Messages().ByName("Holder"),
+	}}
+
+	for _, tc := range []struct{ doc, path string }{
+		{`pw = "x"`, "pw"},
+		{`db { password = "x" }`, "db.password"},
+		{`db = { password = "x" }`, "db.password"},
+		{`pw { value = "x" hint = "h" }`, "pw"},
+		{`pw = { value = "x" }`, "pw"},
+		{`servers = [{ password = "x" }]`, "servers[0].password"},
+		{`by_host = { "a": { password = "x" } }`, `by_host["a"].password`},
+		{`payload { @type = "secretpaths.v1.Holder" pw = "x" }`, "payload.pw"},
+		{`tenant_keys = { "acme": "x" }`, `tenant_keys["acme"]`},
+	} {
+		for _, full := range []bool{false, true} {
+			var got []string
+			o := pxf.UnmarshalOptions{TypeResolver: resolver, OnSecretField: func(path, value string) error {
+				assert.Equal(t, "x", value, tc.doc)
+				got = append(got, path)
+				return nil
+			}}
+			m := dynamicpb.NewMessage(desc)
+			if full {
+				_, err = o.UnmarshalFull([]byte(tc.doc), m)
+			} else {
+				err = o.Unmarshal([]byte(tc.doc), m)
+			}
+			require.NoError(t, err, tc.doc)
+			assert.Equal(t, []string{tc.path}, got, "%s (full=%v)", tc.doc, full)
+		}
 	}
 }

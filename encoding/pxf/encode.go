@@ -88,6 +88,39 @@ func (e *encoder) writeFieldPrefix(level int, name protoreflect.Name) {
 	e.buf.WriteString(" = ")
 }
 
+// enter extends the null-lookup path by `name.` the way the decoder
+// extends its presence path (directDecoder.enter), so a null
+// UnmarshalFull recorded inside a body is found where it was recorded.
+// It returns the path to restore. A path is built only when there is a
+// null set to look it up in.
+func (e *encoder) enter(name protoreflect.Name) string {
+	return e.extend(name, "")
+}
+
+// enterIndex is enter for the i'th element of a list: `name[i].`.
+func (e *encoder) enterIndex(name protoreflect.Name, i int) string {
+	if e.nullSet == nil {
+		return e.pathPrefix
+	}
+	return e.extend(name, indexSuffix(i))
+}
+
+// enterKey is enter for the value of map key k: `name["k"].`.
+func (e *encoder) enterKey(name protoreflect.Name, k protoreflect.MapKey) string {
+	if e.nullSet == nil {
+		return e.pathPrefix
+	}
+	return e.extend(name, keySuffix(k))
+}
+
+func (e *encoder) extend(name protoreflect.Name, sfx string) string {
+	saved := e.pathPrefix
+	if e.nullSet != nil {
+		e.pathPrefix = saved + string(name) + sfx + "."
+	}
+	return saved
+}
+
 func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 	fields := msg.Descriptor().Fields()
 
@@ -286,7 +319,10 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 			} else {
 				e.writeIndent(level + 1)
 				e.buf.WriteString("{\n")
-				if err := e.encodeMessage(sub, level+2); err != nil {
+				saved := e.enterIndex(fd.Name(), i)
+				err := e.encodeMessage(sub, level+2)
+				e.pathPrefix = saved
+				if err != nil {
 					return err
 				}
 				e.writeIndent(level + 1)
@@ -347,7 +383,10 @@ func (e *encoder) encodeKeyedList(fd protoreflect.FieldDescriptor, list protoref
 		}
 		e.buf.WriteString(" {\n")
 		e.skipKeyFd = keyFd
-		if err := e.encodeMessage(sub, level+2); err != nil {
+		saved := e.enterIndex(fd.Name(), i)
+		err := e.encodeMessage(sub, level+2)
+		e.pathPrefix = saved
+		if err != nil {
 			return err
 		}
 		e.writeIndent(level + 1)
@@ -371,12 +410,13 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 	// allocations during sort comparisons.
 	type mapKV struct {
 		keyStr string
+		key    protoreflect.MapKey
 		val    protoreflect.Value
 	}
 	entries := make([]mapKV, 0, m.Len())
 	keyFd := fd.MapKey()
 	m.Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
-		entries = append(entries, mapKV{formatMapKey(keyFd, k), v})
+		entries = append(entries, mapKV{formatMapKey(keyFd, k), k, v})
 		return true
 	})
 	sort.Slice(entries, func(i, j int) bool {
@@ -477,7 +517,10 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 			e.writeIndent(level + 1)
 			e.buf.WriteString(kv.keyStr)
 			e.buf.WriteString(": {\n")
-			if err := e.encodeMessage(sub, level+2); err != nil {
+			saved := e.enterKey(fd.Name(), kv.key)
+			err := e.encodeMessage(sub, level+2)
+			e.pathPrefix = saved
+			if err != nil {
 				return err
 			}
 			e.writeIndent(level + 1)
@@ -636,7 +679,10 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	e.writeQuotedString(typeURL)
 	e.buf.WriteByte('\n')
 
-	if err := e.encodeMessage(inner.ProtoReflect(), level+1); err != nil {
+	saved := e.enter(fd.Name())
+	err = e.encodeMessage(inner.ProtoReflect(), level+1)
+	e.pathPrefix = saved
+	if err != nil {
 		return false, err
 	}
 

@@ -118,6 +118,7 @@ type directDecoder struct {
 	rootMsg        protoreflect.Message           // top-level message (for _null FieldMask writes)
 	nullMaskFd     protoreflect.FieldDescriptor   // cached _null field, may be nil
 	pathPrefix     string                         // dotted path prefix for nested messages
+	elemDepth      int                            // list elements / map values entered; a null under one stays out of the _null mask
 	onSecret       func(path, value string) error // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
 	keyedElem      *keyedElemState                // context for the next decodeFields call: it decodes one element of a keyed repeated field (draft -01 §3.13)
 }
@@ -616,8 +617,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 					d.result.markNull(path)
 					// A FieldMask path names fields, not list elements
 					// or map entries, so a null inside one has no place
-					// in the mask; Result still records it.
-					if d.nullMaskFd != nil && !strings.Contains(d.pathPrefix, "[") {
+					// in the mask; Result still records it. Its
+					// survival across binary is #170.
+					if d.nullMaskFd != nil && d.elemDepth == 0 {
 						addToNullMask(d.rootMsg, d.nullMaskFd, path)
 					}
 				}
@@ -685,19 +687,6 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 			if d.result != nil {
 				d.result.markPresent(d.pathPrefix + string(fd.Name()))
-			}
-			// pxf.Secret block form with hook: route `value` through
-			// d.onSecret the same way scalar shorthand does, leaving
-			// Secret.value empty on the proto message. Hint and
-			// fingerprint subfields are assigned normally — they are
-			// diagnostic, not sensitive.
-			if d.onSecret != nil && isSecret(fd.Message()) {
-				sub := msg.Mutable(fd).Message()
-				path := d.pathPrefix + string(fd.Name())
-				if err := d.decodeSecretBlockInto(sub, path); err != nil {
-					return err
-				}
-				continue
 			}
 			// Any with block syntax: name { @type = "..." ... }
 			if isAny(fd.Message()) && d.resolver != nil && d.current.Kind == AT_TYPE {
@@ -771,10 +760,9 @@ func (d *directDecoder) decodeFieldValue(msg protoreflect.Message, fd protorefle
 // produces — `pw = "x"` and `pw { value = "x" }` both leave
 // `pw.value` marked present.
 //
-// Only meaningful for top-level decodeMsgValue. consumeListMsg and
-// decodeMapInline don't track per-element inner-field presence
-// (the parent list/map field is the unit of presence in those
-// contexts).
+// The WKT shorthands of list elements and map values do not call it:
+// the element itself is the unit there, recorded when its body is a
+// block (see enterIndex and enterKey).
 func (d *directDecoder) markInnerPresent(fd protoreflect.FieldDescriptor, names ...string) {
 	if d.result == nil {
 		return
@@ -857,9 +845,9 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		d.advance()
 		return nil
 	}
-	// pxf.Secret: scalar shorthand `pw = "x"`. Block form is intercepted
-	// in decodeFields' LBRACE case (and for repeated/map elements in
-	// consumeListMsg / decodeMapInline) — when OnSecretField is set,
+	// pxf.Secret: scalar shorthand `pw = "x"`. Block form, in either
+	// spelling, is routed by decodeMsgBody (and for repeated/map elements
+	// in consumeListMsg / decodeMapInline) — when OnSecretField is set,
 	// the inner `value` assignment routes through the hook the same
 	// way scalar shorthand does, closing the plaintext-in-heap window
 	// for both surface forms.
@@ -919,7 +907,7 @@ func (d *directDecoder) decodeMsgBody(msg protoreflect.Message, fd protoreflect.
 		return d.decodeSecretBlockInto(sub, d.pathPrefix+string(fd.Name()))
 	}
 	sub := msg.Mutable(fd).Message()
-	saved := d.enter(fd.Name(), "")
+	saved := d.enter(fd.Name())
 	err := d.decodeFields(sub, true)
 	d.pathPrefix = saved
 	return err
@@ -932,28 +920,60 @@ func (d *directDecoder) tracksPaths() bool {
 	return d.result != nil || d.onSecret != nil
 }
 
-// enter extends the presence path by name, the element suffix sfx
-// (`[2]`, `["k"]`, or "" for a singular field) and a dot, and returns
-// the path to restore once the body is decoded. Every descent into a
-// message body goes through here, so the presence and null marks made
-// inside it are recorded under the message they belong to, never under
-// its parent, where they would satisfy the parent's (pxf.required) or
-// keep its (pxf.default) off (#156).
-func (d *directDecoder) enter(name protoreflect.Name, sfx string) string {
+// enter extends the presence path by `name.` and returns the path to
+// restore once the body is decoded. Every descent into a message body
+// goes through enter, enterIndex or enterKey, so the presence and null
+// marks made inside it are recorded under the message they belong to,
+// never under its parent, where they would satisfy the parent's
+// (pxf.required) or keep its (pxf.default) off (#156). The encoder's
+// null lookup extends its path the same way (encoder.enter).
+func (d *directDecoder) enter(name protoreflect.Name) string {
 	saved := d.pathPrefix
 	if d.tracksPaths() {
-		d.pathPrefix = saved + string(name) + sfx + "."
+		d.pathPrefix = saved + string(name) + "."
 	}
 	return saved
 }
 
-// indexSuffix is the element suffix of the i'th element of a list,
-// built only when a path is tracked.
-func (d *directDecoder) indexSuffix(i int) string {
-	if !d.tracksPaths() {
-		return ""
+// enterIndex is enter for the i'th element of a list: `name[i].`.
+// Pair it with leaveElem.
+func (d *directDecoder) enterIndex(name protoreflect.Name, i int) string {
+	saved := d.pathPrefix
+	d.elemDepth++
+	if d.tracksPaths() {
+		d.pathPrefix = saved + string(name) + indexSuffix(i) + "."
 	}
+	return saved
+}
+
+// enterKey is enter for the value of map key k: `name["k"].`. Pair it
+// with leaveElem.
+func (d *directDecoder) enterKey(name protoreflect.Name, k protoreflect.MapKey) string {
+	saved := d.pathPrefix
+	d.elemDepth++
+	if d.tracksPaths() {
+		d.pathPrefix = saved + string(name) + keySuffix(k) + "."
+	}
+	return saved
+}
+
+// leaveElem undoes enterIndex or enterKey.
+func (d *directDecoder) leaveElem(saved string) {
+	d.pathPrefix = saved
+	d.elemDepth--
+}
+
+// indexSuffix is the path suffix of the i'th element of a list, `[i]`.
+// Presence paths, OnSecretField paths and the encoder's null lookup all
+// build it here.
+func indexSuffix(i int) string {
 	return "[" + strconv.Itoa(i) + "]"
+}
+
+// keySuffix is the path suffix of a map value, `[<key>]`, the key
+// rendered by formatMapKeyForPath. Shared like indexSuffix.
+func keySuffix(k protoreflect.MapKey) string {
+	return "[" + formatMapKeyForPath(k) + "]"
 }
 
 // decodeAnyBlock decodes Any sugar when the opening { has already been consumed
@@ -989,7 +1009,7 @@ func (d *directDecoder) decodeAnyInner(msg protoreflect.Message, fd protoreflect
 	}
 
 	inner := dynamicpb.NewMessage(innerDesc)
-	saved := d.enter(fd.Name(), "")
+	saved := d.enter(fd.Name())
 	err = d.decodeFields(inner.ProtoReflect(), true)
 	d.pathPrefix = saved
 	if err != nil {
@@ -1149,7 +1169,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 			if !utf8.ValidString(value) {
 				return protoreflect.Value{}, errorf(pos, "invalid UTF-8 in pxf.Secret value for field %q", fd.Name())
 			}
-			path := fmt.Sprintf("%s%s[%d]", d.pathPrefix, fd.Name(), list.Len())
+			path := d.pathPrefix + string(fd.Name()) + indexSuffix(list.Len())
 			if err := d.onSecret(path, value); err != nil {
 				return protoreflect.Value{}, errorf(pos, "pxf.Secret hook for %q: %v", path, err)
 			}
@@ -1168,7 +1188,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	// pxf.Secret block form in repeated context — route value
 	// through the hook the same way scalar shorthand does.
 	if d.onSecret != nil && isSecret(mdesc) && d.current.Kind == LBRACE {
-		path := fmt.Sprintf("%s%s[%d]", d.pathPrefix, fd.Name(), list.Len())
+		path := d.pathPrefix + string(fd.Name()) + indexSuffix(list.Len())
 		d.advance() // consume {
 		sub := list.NewElement().Message()
 		if err := d.decodeSecretBlockInto(sub, path); err != nil {
@@ -1186,9 +1206,9 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	if keyFd != nil {
 		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name()}
 	}
-	saved := d.enter(fd.Name(), d.indexSuffix(list.Len()))
+	saved := d.enterIndex(fd.Name(), list.Len())
 	err := d.decodeFields(sub, true)
-	d.pathPrefix = saved
+	d.leaveElem(saved)
 	if err != nil {
 		return protoreflect.Value{}, err
 	}
@@ -1267,9 +1287,9 @@ func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd
 		sub := list.NewElement().Message()
 		fastSet(sub, keyFd, protoreflect.ValueOfString(name))
 		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name(), entryName: name, named: true}
-		saved := d.enter(fd.Name(), d.indexSuffix(list.Len()))
+		saved := d.enterIndex(fd.Name(), list.Len())
 		err := d.decodeFields(sub, true)
-		d.pathPrefix = saved
+		d.leaveElem(saved)
 		if err != nil {
 			return err
 		}
@@ -1405,7 +1425,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 					if !utf8.ValidString(value) {
 						return errorf(pos, "invalid UTF-8 in pxf.Secret value for field %q", fd.Name())
 					}
-					path := fmt.Sprintf("%s%s[%s]", d.pathPrefix, fd.Name(), formatMapKeyForPath(k))
+					path := d.pathPrefix + string(fd.Name()) + keySuffix(k)
 					if err := d.onSecret(path, value); err != nil {
 						return errorf(pos, "pxf.Secret hook for %q: %v", path, err)
 					}
@@ -1426,7 +1446,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			// pxf.Secret block form in map-value context — route value
 			// through the hook so plaintext never lands on Secret.value.
 			if d.onSecret != nil && isSecret(mdesc) && d.current.Kind == LBRACE {
-				path := fmt.Sprintf("%s%s[%s]", d.pathPrefix, fd.Name(), formatMapKeyForPath(k))
+				path := d.pathPrefix + string(fd.Name()) + keySuffix(k)
 				d.advance() // consume {
 				sub := m.NewValue().Message()
 				if err := d.decodeSecretBlockInto(sub, path); err != nil {
@@ -1442,13 +1462,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 			}
 			d.advance()
 			sub := m.NewValue().Message()
-			var sfx string
-			if d.tracksPaths() {
-				sfx = "[" + formatMapKeyForPath(k) + "]"
-			}
-			saved := d.enter(fd.Name(), sfx)
+			saved := d.enterKey(fd.Name(), k)
 			err := d.decodeFields(sub, true)
-			d.pathPrefix = saved
+			d.leaveElem(saved)
 			if err != nil {
 				return err
 			}
