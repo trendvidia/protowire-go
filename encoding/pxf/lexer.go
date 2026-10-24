@@ -16,6 +16,17 @@ type lexer struct {
 	pos   int
 	line  int
 	col   int
+	// sawEnd records that the lexer stopped where more input could
+	// still change the token it returned: it ran out of input inside the
+	// token, or it stopped a byte or two short of the end, where its
+	// lookahead ('.' then a digit, "µ", `""` then '"', '/' then '/' or
+	// '*') could not see. Each token sets it where it stops, once, not
+	// in the per-byte loops, which Parse runs on every byte. The dataset
+	// scan (DatasetReader.nextToken) reads it, with a lexer per token, to
+	// tell a token a read cut short from a finished one; the parser
+	// never reads it.
+	sawEnd bool
+
 	// noValue skips copying a string literal's plain characters into the
 	// token's Value: the dataset row scan (DatasetReader.nextToken) only
 	// needs where a token ends, not what it holds. Escapes are still
@@ -68,6 +79,34 @@ func (l *lexer) peekAt(offset int) byte {
 		return 0
 	}
 	return l.input[i]
+}
+
+// more reports whether the input holds a byte n bytes past the cursor,
+// recording in sawEnd when it does not. For the lexer's cold paths
+// (signs, escapes); the hot ones set sawEnd where the token stops.
+func (l *lexer) more(n int) bool {
+	if l.pos+n < len(l.input) {
+		return true
+	}
+	l.sawEnd = true
+	return false
+}
+
+// runCut reports whether a token that runs until a byte that cannot
+// continue it (a number, duration, timestamp, identifier or directive
+// name) and stopped at the cursor could still go on with more input:
+// the input ends at the cursor, or the cursor is on its last byte and
+// that byte is one whose meaning the lexer reads from the byte after it
+// ('.' before a digit, the first byte of "µ", '/' before '/' or '*').
+func (l *lexer) runCut() bool {
+	switch len(l.input) - l.pos {
+	case 0:
+		return true
+	case 1:
+		ch := l.input[l.pos]
+		return ch == '.' || ch == 0xC2 || ch == '/'
+	}
+	return false
 }
 
 func (l *lexer) advance() byte {
@@ -123,8 +162,12 @@ func (l *lexer) Next() Token {
 		return l.lexBlockComment(pos)
 
 	case ch == '"':
-		if l.peekAt(1) == '"' && l.peekAt(2) == '"' {
-			return l.lexTripleString(pos)
+		if l.peekAt(1) == '"' {
+			if l.peekAt(2) == '"' {
+				return l.lexTripleString(pos)
+			}
+			// `""` is the empty string unless a third '"' follows.
+			l.sawEnd = l.pos+2 >= len(l.input)
 		}
 		return l.lexString(pos)
 	case ch == 'b' && l.peekAt(1) == '"':
@@ -180,8 +223,14 @@ func (l *lexer) Next() Token {
 // An invalid encoding names no character, so its lead byte is reported
 // as a hex value.
 func (l *lexer) lexIllegalRune(pos Position) Token {
+	if l.input[l.pos] == '/' && l.pos+1 == len(l.input) {
+		l.sawEnd = true // a '/' may open a comment
+	}
 	r, size := utf8.DecodeRune(l.input[l.pos:])
 	if r == utf8.RuneError && size <= 1 {
+		if !utf8.FullRune(l.input[l.pos:]) {
+			l.sawEnd = true // the rest of the rune may still arrive
+		}
 		return Token{Kind: ILLEGAL, Value: fmt.Sprintf("unexpected byte %#02x", l.advance()), Pos: pos}
 	}
 	for i := 0; i < size; i++ {
@@ -195,6 +244,7 @@ func (l *lexer) lexLineComment(pos Position) Token {
 	for l.pos < len(l.input) && l.input[l.pos] != '\n' {
 		l.advance()
 	}
+	l.sawEnd = l.pos == len(l.input)
 	return Token{Kind: COMMENT, Value: string(l.input[start:l.pos]), Pos: pos}
 }
 
@@ -210,6 +260,7 @@ func (l *lexer) lexBlockComment(pos Position) Token {
 		}
 		l.advance()
 	}
+	l.sawEnd = true
 	if l.tolerant {
 		for l.pos < len(l.input) {
 			l.advance()
@@ -246,6 +297,7 @@ func (l *lexer) lexString(pos Position) Token {
 			continue
 		}
 		if l.pos >= len(l.input) {
+			l.sawEnd = true
 			if tolerant {
 				l.reportErr(pos, "unterminated escape sequence")
 				return Token{Kind: STRING, Value: sb.String(), Pos: pos}
@@ -331,6 +383,7 @@ func (l *lexer) lexString(pos Position) Token {
 			return Token{Kind: ILLEGAL, Value: `unknown escape sequence \` + string(esc), Pos: pos}
 		}
 	}
+	l.sawEnd = true
 	if tolerant {
 		l.reportErr(pos, "unterminated string")
 		return Token{Kind: STRING, Value: sb.String(), Pos: pos}
@@ -353,6 +406,7 @@ func (l *lexer) lexTripleString(pos Position) Token {
 		}
 		l.advance()
 	}
+	l.sawEnd = true
 	if l.tolerant {
 		for l.pos < len(l.input) {
 			l.advance()
@@ -395,7 +449,7 @@ func (l *lexer) lexBytes(pos Position) Token {
 	start := l.pos
 	for l.pos < len(l.input) {
 		ch := l.peek()
-		if l.maxBytesLiteral > 0 && (l.pos-start)/4*3 > l.maxBytesLiteral {
+		if bytesLiteralOver(l.pos-start, l.maxBytesLiteral) {
 			// Decoded base64 is three bytes per four characters; judged from
 			// the length so the literal is neither scanned to its end nor
 			// decoded before it is refused.
@@ -425,6 +479,7 @@ func (l *lexer) lexBytes(pos Position) Token {
 		}
 		l.advance()
 	}
+	l.sawEnd = true
 	if l.tolerant {
 		l.reportErr(pos, "unterminated bytes literal")
 		return Token{Kind: BYTES, Value: string(l.input[start:l.pos]), Pos: pos}
@@ -438,6 +493,7 @@ func (l *lexer) lexDirective(pos Position) Token {
 	for l.pos < len(l.input) && isIdentPart(l.input[l.pos]) {
 		l.advance()
 	}
+	l.sawEnd = l.pos == len(l.input)
 	name := string(l.input[start:l.pos])
 	if name == "" {
 		return Token{Kind: ILLEGAL, Value: `"@" must be followed by a directive name`, Pos: pos}
@@ -511,6 +567,7 @@ func (l *lexer) lexNumber(pos Position) Token {
 		return l.lexFloat(pos, start)
 	}
 
+	l.sawEnd = l.runCut()
 	return Token{Kind: INT, Value: l.viewString(start, l.pos), Pos: pos}
 }
 
@@ -530,6 +587,7 @@ func (l *lexer) lexFloat(pos Position, start int) Token {
 			l.advance()
 		}
 	}
+	l.sawEnd = l.runCut()
 	return Token{Kind: FLOAT, Value: l.viewString(start, l.pos), Pos: pos}
 }
 
@@ -537,8 +595,7 @@ func (l *lexer) lexTimestamp(pos Position, start int) Token {
 	// Read characters that can be part of an RFC 3339 timestamp.
 	for l.pos < len(l.input) {
 		ch := l.peek()
-		if ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r' ||
-			ch == ',' || ch == ']' || ch == '}' || ch == ')' || ch == '#' {
+		if endsRun(ch) {
 			break
 		}
 		if ch == '/' && (l.peekAt(1) == '/' || l.peekAt(1) == '*') {
@@ -546,6 +603,7 @@ func (l *lexer) lexTimestamp(pos Position, start int) Token {
 		}
 		l.advance()
 	}
+	l.sawEnd = l.runCut()
 	raw := l.viewString(start, l.pos)
 	if _, err := time.Parse(time.RFC3339Nano, raw); err != nil {
 		if _, err2 := time.Parse(time.RFC3339, raw); err2 != nil {
@@ -599,6 +657,7 @@ scan:
 			break scan
 		}
 	}
+	l.sawEnd = l.runCut()
 	raw := l.viewString(start, l.pos)
 	if _, err := time.ParseDuration(raw); err != nil {
 		return Token{Kind: ILLEGAL, Value: "invalid duration: " + raw, Pos: pos}
@@ -611,6 +670,7 @@ func (l *lexer) lexIdent(pos Position) Token {
 	for l.pos < len(l.input) && isIdentPart(l.input[l.pos]) {
 		l.advance()
 	}
+	l.sawEnd = l.pos == len(l.input)
 	val := l.viewString(start, l.pos)
 	if val == "true" || val == "false" {
 		return Token{Kind: BOOL, Value: val, Pos: pos}
@@ -623,16 +683,22 @@ func (l *lexer) lexIdent(pos Position) Token {
 
 // hasIdent reports whether the input at the current position reads
 // exactly the identifier word (not a prefix of a longer identifier).
-// Does not advance.
+// Does not advance. Input that ends inside word, or right after it,
+// sets sawEnd: more of it could still make, or unmake, the word.
 func (l *lexer) hasIdent(word string) bool {
 	end := l.pos + len(word)
 	if end > len(l.input) {
+		l.sawEnd = strings.HasPrefix(word, l.viewString(l.pos, len(l.input)))
 		return false
 	}
 	if string(l.input[l.pos:end]) != word {
 		return false
 	}
-	return end == len(l.input) || !isIdentPart(l.input[end])
+	if end == len(l.input) {
+		l.sawEnd = true
+		return true
+	}
+	return !isIdentPart(l.input[end])
 }
 
 // viewString returns a zero-copy string view into the input buffer.
@@ -655,6 +721,27 @@ func isDurationUnit(ch byte) bool {
 }
 func isLowerAlpha(ch byte) bool { return ch >= 'a' && ch <= 'z' }
 
+// endsRun reports whether ch ends a timestamp: whitespace, a separator
+// or closer, or '#'. lexTimestamp stops at these (and at "//" or "/*");
+// every other run token (number, duration, identifier, directive name)
+// stops at a superset of them. The dataset scan reads the same set to
+// know when a timestamp a read cut short can have ended.
+func endsRun(ch byte) bool {
+	switch ch {
+	case ' ', '\n', '\t', '\r', ',', ']', '}', ')', '#':
+		return true
+	}
+	return false
+}
+
+// bytesLiteralOver reports whether a bytes literal whose base64 body has
+// n characters decodes to more than limit bytes (three per four
+// characters); limit 0 means no limit. lexBytes refuses the literal on
+// it, and the dataset scan stops waiting for one on the same rule.
+func bytesLiteralOver(n, limit int) bool {
+	return limit > 0 && n/4*3 > limit
+}
+
 func hexVal(ch byte) (int, bool) {
 	switch {
 	case ch >= '0' && ch <= '9':
@@ -669,7 +756,7 @@ func hexVal(ch byte) (int, bool) {
 
 // readHexByte reads exactly 2 hex digits and returns the assembled byte.
 func (l *lexer) readHexByte() (byte, bool) {
-	if l.pos+1 >= len(l.input) {
+	if !l.more(1) {
 		return 0, false
 	}
 	hi, ok1 := hexVal(l.input[l.pos])
@@ -685,7 +772,7 @@ func (l *lexer) readHexByte() (byte, bool) {
 // readHexRune reads exactly n hex digits and returns the assembled rune.
 // Validity (range, surrogates) is checked by the caller via utf8.ValidRune.
 func (l *lexer) readHexRune(n int) (rune, bool) {
-	if l.pos+n > len(l.input) {
+	if !l.more(n - 1) {
 		return 0, false
 	}
 	var r rune
@@ -704,7 +791,7 @@ func (l *lexer) readHexRune(n int) (rune, bool) {
 // as part of the escape (\nnn — exactly 3 octal digits total). Restricted to
 // leading 0-3 by the caller so the value can never overflow a byte.
 func (l *lexer) readOctRest(first byte) (byte, bool) {
-	if l.pos+1 >= len(l.input) {
+	if !l.more(1) {
 		return 0, false
 	}
 	d1, ok1 := octVal(l.input[l.pos])

@@ -34,6 +34,10 @@ func TestDatasetReader_ScanIsLinear(t *testing.T) {
 		{"one long number", func(n int) string { return strings.Repeat("7", n) }},
 		{"line comment", func(n int) string { return "1 # " + strings.Repeat("x", n) }},
 		{"unterminated block comment", func(n int) string { return "1 /* " + strings.Repeat("/ * x", n/5) }},
+		// A timestamp runs to a byte that ends a run; '=' and '/' are
+		// not one, and must not make the scan lex it again.
+		{"one long timestamp", func(n int) string { return "2026-10-23T" + strings.Repeat("0=/", n/3) }},
+		{"one long identifier", func(n int) string { return "a" + strings.Repeat("b.", n/2) }},
 	}
 	// The issue's sizes, 4 and 8 MiB. Under -race, 256 and 512 KiB: the
 	// count is what is checked, and a quadratic scan already lexes about
@@ -86,9 +90,21 @@ func TestDatasetReader_CompleteRowIsNotHeldBack(t *testing.T) {
 		`({ k = [1, 2] })`,
 		"(\"\"\"\nx\n\"\"\")",
 		`(1 /* c */)`,
+		`(1h.5m)`,
+		"(1\xc2\xb5s)",
+		`(-inf)`,
+		`("\x41\U0001F600")`,
+		`(aaaaaaaaaaaa)`,
 	} {
+		// One write per byte, so every byte of the row ends a read.
 		pr, pw := io.Pipe()
-		go func() { _, _ = pw.Write([]byte("@dataset T (a)\n" + row)) }()
+		go func() {
+			for _, b := range []byte("@dataset T (a)\n" + row) {
+				if _, err := pw.Write([]byte{b}); err != nil {
+					return
+				}
+			}
+		}()
 
 		got := make(chan error, 1)
 		go func() {
@@ -107,6 +123,57 @@ func TestDatasetReader_CompleteRowIsNotHeldBack(t *testing.T) {
 			// Generous: the row is a few bytes. Reaching this means the
 			// reader is blocked in Read waiting for more input.
 			t.Errorf("%s: the complete row was not returned while the stream stayed open", row)
+		}
+		_ = pw.Close()
+	}
+}
+
+// A row the bytes read so far already show to be malformed fails at
+// once, with Parse's error for those bytes, while the stream stays open:
+// a token the lexer has rejected is not held back for input that cannot
+// change it.
+func TestDatasetReader_DecidedErrorIsNotHeldBack(t *testing.T) {
+	opts := UnmarshalOptions{MaxBytesLiteralLength: 4}
+	for _, writes := range [][]string{
+		{"(~"},
+		{"(1, ", "~"},
+		{"(aaaaaaaaaaaa", "~"},
+		{"(1h", ".", "~"},
+		// The cap refuses a bytes literal before its closing quote.
+		{`(b"`, "QUFBQUFBQUFBQUFBQUFB"},
+		{`(b"QUFB`, "QUFBQUFBQUFBQUFB"},
+	} {
+		in := "@dataset T (a)\n" + strings.Join(writes, "")
+		_, perr := ParseOptions{MaxBytesLiteralLength: 4}.Parse([]byte(in))
+		if perr == nil {
+			t.Fatalf("%q: Parse accepted it", writes)
+		}
+		pr, pw := io.Pipe()
+		go func() {
+			if _, err := pw.Write([]byte("@dataset T (a)\n")); err != nil {
+				return
+			}
+			for _, w := range writes {
+				if _, err := pw.Write([]byte(w)); err != nil {
+					return
+				}
+			}
+		}()
+		got := make(chan error, 1)
+		go func() {
+			tr, err := opts.NewDatasetReader(pr)
+			if err == nil {
+				_, err = tr.Next()
+			}
+			got <- err
+		}()
+		select {
+		case err := <-got:
+			if err == nil || err.Error() != perr.Error() {
+				t.Errorf("%q: got %v, want Parse's %v", writes, err, perr)
+			}
+		case <-time.After(10 * time.Second):
+			t.Errorf("%q: the malformed row was not reported while the stream stayed open", writes)
 		}
 		_ = pw.Close()
 	}

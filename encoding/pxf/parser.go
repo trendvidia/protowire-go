@@ -755,54 +755,140 @@ prefixesDone:
 // string / comment handling so braces inside literals don't confuse
 // the brace count.
 func findMatchingBrace(input []byte, openOffset int) int {
-	depth := 1
-	i := openOffset + 1
-	for i < len(input) {
+	m := braceMatch{depth: 1}
+	if i, st := m.scan(input, openOffset+1); st == braceClosed {
+		return i
+	}
+	return -1
+}
+
+// braceMatch is findMatchingBrace's scan, resumable: fed a buffer that
+// grows, it picks up where the previous call stopped, so the dataset
+// header scan (DatasetReader.scanHeader) finds the end of an @proto body
+// read in many pieces in time linear in its size, with the rule Parse
+// uses.
+type braceMatch struct {
+	depth int
+	mode  braceMode
+	// esc is set in a simple string after a backslash, which escapes
+	// the next byte whatever it is.
+	esc bool
+	// run counts the quotes just seen in a triple-quoted string, or is 1
+	// after a '*' in a block comment.
+	run int
+}
+
+type braceMode int
+
+const (
+	braceCode         braceMode = iota // between literals and comments
+	braceString                        // "..."
+	braceTripleString                  // """..."""
+	braceBytes                         // b"..."
+	braceLineComment                   // # or // to the end of the line
+	braceBlockComment                  // /* ... */
+)
+
+// braceState is what braceMatch.scan found.
+type braceState int
+
+const (
+	braceOpen   braceState = iota // the input ended first; scan again from the offset returned
+	braceClosed                   // the offset returned is the matching '}'
+	braceFailed                   // the body can never close: a simple string or bytes literal met a newline
+)
+
+// scan advances the match over input from offset i. It stops before a
+// byte whose meaning depends on bytes not yet in input (a '"' that may
+// open `"""`, a 'b' or '/' that may open a literal or a comment), so
+// scanning again from the offset it returns once more input arrives
+// gives the answer one call over all of it gives. In a call over the
+// whole input such a stop is at its last two bytes, where the body is
+// unterminated whatever the stopped byte means.
+func (m *braceMatch) scan(input []byte, i int) (int, braceState) {
+	for ; i < len(input); i++ {
 		ch := input[i]
-		switch {
-		case ch == '{':
-			depth++
-			i++
-		case ch == '}':
-			depth--
-			if depth == 0 {
-				return i
+		switch m.mode {
+		case braceString:
+			switch {
+			case m.esc:
+				m.esc = false
+			case ch == '\\':
+				m.esc = true
+			case ch == '"':
+				m.mode = braceCode
+			case ch == '\n':
+				return i, braceFailed
 			}
-			i++
-		case ch == '"':
-			i = skipDirString(input, i)
-			if i < 0 {
-				return -1
+			continue
+		case braceTripleString:
+			if ch != '"' {
+				m.run = 0
+			} else if m.run++; m.run == 3 {
+				m.mode, m.run = braceCode, 0
 			}
-		case ch == 'b' && i+1 < len(input) && input[i+1] == '"':
-			i = skipDirBytes(input, i)
-			if i < 0 {
-				return -1
+			continue
+		case braceBytes:
+			switch ch {
+			case '"':
+				m.mode = braceCode
+			case '\n':
+				return i, braceFailed
 			}
-		case ch == '#':
-			i = skipDirEOL(input, i+1)
-		case ch == '/' && i+1 < len(input) && input[i+1] == '/':
-			i = skipDirEOL(input, i+2)
-		case ch == '/' && i+1 < len(input) && input[i+1] == '*':
-			j := i + 2
-			closed := false
-			for j+1 < len(input) {
-				if input[j] == '*' && input[j+1] == '/' {
-					j += 2
-					closed = true
-					break
-				}
-				j++
+			continue
+		case braceLineComment:
+			if ch == '\n' {
+				m.mode = braceCode
 			}
-			if !closed {
-				return -1
+			continue
+		case braceBlockComment:
+			switch {
+			case ch == '/' && m.run == 1:
+				m.mode, m.run = braceCode, 0
+			case ch == '*':
+				m.run = 1
+			default:
+				m.run = 0
 			}
-			i = j
-		default:
+			continue
+		}
+		switch ch {
+		case '{':
+			m.depth++
+		case '}':
+			if m.depth--; m.depth == 0 {
+				return i, braceClosed
+			}
+		case '"':
+			if i+2 >= len(input) {
+				return i, braceOpen
+			}
+			if input[i+1] == '"' && input[i+2] == '"' {
+				m.mode = braceTripleString
+				i += 2
+			} else {
+				m.mode = braceString
+			}
+		case '#':
+			m.mode = braceLineComment
+		case 'b', '/':
+			if i+1 >= len(input) {
+				return i, braceOpen
+			}
+			switch next := input[i+1]; {
+			case ch == 'b' && next == '"':
+				m.mode = braceBytes
+			case ch == '/' && next == '/':
+				m.mode = braceLineComment
+			case ch == '/' && next == '*':
+				m.mode = braceBlockComment
+			default:
+				continue
+			}
 			i++
 		}
 	}
-	return -1
+	return i, braceOpen
 }
 
 func skipDirString(input []byte, i int) int {
@@ -834,27 +920,6 @@ func skipDirString(input []byte, i int) int {
 		j++
 	}
 	return -1
-}
-
-func skipDirBytes(input []byte, i int) int {
-	j := i + 2 // past `b"`
-	for j < len(input) {
-		if input[j] == '"' {
-			return j + 1
-		}
-		if input[j] == '\n' {
-			return -1
-		}
-		j++
-	}
-	return -1
-}
-
-func skipDirEOL(input []byte, i int) int {
-	for i < len(input) && input[i] != '\n' {
-		i++
-	}
-	return i
 }
 
 // parseEntry, parseValue, parseList, parseBlockVal, and parseBody thread an
