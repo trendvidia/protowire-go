@@ -461,17 +461,15 @@ func (p *parser) parseDatasetDirective() (*DatasetDirective, int, error) {
 	if p.current.Kind != IDENT {
 		return nil, 0, errorf(p.current.Pos, "@dataset column list must contain at least one field name, got %s", p.current.Kind)
 	}
+	var colPos []Position
 	for {
 		if p.current.Kind != IDENT {
 			return nil, 0, errorf(p.current.Pos, "expected column field name, got %s", p.current.Kind)
 		}
-		colName := p.current.Value
-		// v1: column entries are unqualified field names; dotted paths
-		// reserved for a future revision.
-		if containsDot(colName) {
-			return nil, 0, errorf(p.current.Pos, "@dataset column %q: dotted column paths are not supported in v1 (draft §3.4.4)", colName)
-		}
-		ds.Columns = append(ds.Columns, colName)
+		// A column is a field name or a dotted path to a field inside a
+		// sub-message (protowire#342).
+		ds.Columns = append(ds.Columns, p.current.Value)
+		colPos = append(colPos, p.current.Pos)
 		p.advance()
 		if p.current.Kind == COMMA {
 			p.advance()
@@ -481,6 +479,9 @@ func (p *parser) parseDatasetDirective() (*DatasetDirective, int, error) {
 			break
 		}
 		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @dataset column list, got %s", p.current.Kind)
+	}
+	if i, msg := columnPathError(ds.Columns); i >= 0 {
+		return nil, 0, errorf(colPos[i], "%s", msg)
 	}
 	endOffset := p.current.Pos.Offset + 1 // past `)`
 	p.advance()                           // consume )

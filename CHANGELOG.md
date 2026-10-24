@@ -11,6 +11,29 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`@dataset` dotted column paths** (trendvidia/protowire#342, draft
+  `-01` §3.4.4). A column may be a path into a sub-message, such as
+  `descriptor.energy`. A row binds as the body that groups its non-empty
+  cells by path prefix: every cell under `descriptor.` lands in one
+  `descriptor { ... }` block, so two columns can fill one oneof member.
+  A block none of whose cells is non-empty is not written, so the
+  sub-message stays absent. `null` applies to the leaf and makes the
+  parent present. `(pxf.required)` and `(pxf.default)` apply under a
+  present parent, as in a body.
+- **Header rules for column paths.** `Parse`, `UnmarshalFull` and
+  `NewDatasetReader` reject a header that names the same path twice, a
+  field next to a path inside it (`a` with `a.b`), or a path with an
+  empty segment. The error is at that column. `BindRow` and `Scan`
+  reject a path that goes through a repeated or map field, into a type
+  written as a literal (Timestamp, Duration, a wrapper, `pxf.BigInt`,
+  `pxf.Decimal`, `pxf.BigFloat`), through a scalar, or to a field that
+  does not exist. A path may go into a `pxf.Secret`, which has a block
+  form (`pw.hint`). They reject it even when the row's cells are all
+  empty, with an error at the row. `Scan` checks the paths once per row
+  type, not once per row.
+
 ### Changed
 
 - **A raw newline inside a simple string is an error**
@@ -22,9 +45,67 @@ format changes.
   """triple-quoted""" string`. `ParseTolerant` still ends the
   string at the newline and parses on. The conformance row is
   [protowire#350](https://github.com/trendvidia/protowire/issues/350).
+- **A `BindRow` or `Scan` error names its column**, as
+  `<row position>: column <c>: <message>`. Before, it gave only the
+  row's position. An error on no single column, such as a missing
+  required field, is unchanged. A row built by hand has no position, so
+  its error keeps the position in the row's body, numbered as before.
+- **A header that names the same plain column twice, `(a, a)`, is now
+  rejected.** It used to parse, and for a repeated field the two cells
+  were concatenated.
+- **A plain column that names no field of the row type fails `BindRow`
+  and `Scan` on every row, its cells empty or not**, as a dotted column
+  that names no field does (draft §3.4.4: each column entry names a field
+  declared on the type). Before, a row whose cell in that column was
+  empty bound without error.
+- `AppendDatasetHeader` and `AppendDatasetRow` apply the reader's header
+  rules first, with its messages, so the writer cannot write a header
+  its reader rejects.
+- `AppendDatasetHeader` still refuses dotted columns, now with a message
+  that says the writer does not support them yet
+  ([#155](https://github.com/trendvidia/protowire-go/issues/155)).
+- **`check/protovalidate` requires the parent module at v1.9.0 instead of
+  v1.8.1.** Keeps the nested module on the parent it ships with, the
+  #134 / #139 precedent. Nothing in v1.9.0 reaches the adapter (the
+  release is `@dataset` reading and writing); `go.sum` changes only the
+  parent's two lines and stays at 26 modules. Tagged
+  `check/protovalidate/v1.4.4` at that commit.
 
 ### Fixed
 
+- **`UnmarshalFull` keeps track of fields set inside `name = { ... }`,
+  list elements, map values, keyed entries and `Any` bodies**
+  ([#156](https://github.com/trendvidia/protowire-go/issues/156)). Only
+  the block-tail form `name { ... }` recorded a body's fields under
+  `name.`. Every other way into a message body recorded them under the
+  parent, with three consequences. A value set inside `one = { label =
+  "x" }` was overwritten by `label`'s `(pxf.default)`. A nested
+  `(pxf.required)` field in that form was never checked. And a field of
+  a list element, map value or keyed entry stood in for the parent's
+  field of the same name: `items = [{ need = 5 }]` satisfied the
+  parent's required `need`, and kept a parent default off. Every
+  `@dataset` block cell is bound in the `= { ... }` form, so v1.9.0 value
+  cells lost such values. Fields are now recorded under the body they
+  belong to (`one.label`, `items[0].label`, `by_key["k"].label`), which
+  is also what `Result.PresentFields` and `Result.IsNull` report. A
+  `null` inside a list element or map value no longer adds the parent's
+  field to the root `_null` mask; a FieldMask path cannot name an
+  element, so the null is recorded in the `Result` only. The
+  `OnSecretField` hook now sees a Secret written `name = { value = ...
+  }`, as it already did for `name { value = ... }`, instead of leaving
+  the plaintext on the message. `Unmarshal` without presence tracking
+  is unchanged and costs the same.
+- **`OnSecretField` paths name the body a Secret sits in.** A Secret
+  field inside `db = { ... }`, a list element, a map value or an `Any`
+  body is now reported as `db.password`, `servers[0].password`,
+  `by_host["a"].password` or `payload.pw`. Before, the hook was given
+  the bare field name (`password`), so two Secrets of the same name in
+  different elements were indistinguishable. A secret store keyed on the
+  old strings has to move to the new ones.
+- **`MarshalOptions.NullFields` writes back a null from a list element,
+  map value, keyed entry or `Any` body.** `Marshal` looks a null up
+  under the same path `UnmarshalFull` records it under, so `items = [{
+  deep = null }]` re-encodes as written instead of losing the `null`.
 - **`DatasetReader` finds rows with the lexer, in time linear in the
   input** ([#148](https://github.com/trendvidia/protowire-go/issues/148),
   [#149](https://github.com/trendvidia/protowire-go/issues/149)). After

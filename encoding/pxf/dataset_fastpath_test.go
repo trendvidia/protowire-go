@@ -82,8 +82,8 @@ func TestUnmarshalFull_Table_ErrorPaths(t *testing.T) {
 		{"missing_lparen", `@dataset T col )
 ( "x" )`, "expected '('"},
 		{"empty_column_list", `@dataset T ( )`, "at least one field name"},
-		{"dotted_column", `@dataset T ( a.b )
-( "x" )`, "dotted column paths"},
+		{"overlapping_columns", `@dataset T ( a, a.b )
+( "x", "y" )`, `column "a.b" overlaps column "a"`},
 		{"bad_column_separator", `@dataset T ( a b )`, "expected ',' or ')'"},
 		{"row_arity_short", `@dataset T ( a, b, c )
 ( "x", "y" )`, "2 cells, expected 3"},
