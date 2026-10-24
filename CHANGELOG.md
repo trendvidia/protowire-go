@@ -45,6 +45,14 @@ format changes.
 - `AppendDatasetHeader` still refuses dotted columns, now with a message
   that says the writer does not support them yet
   ([#155](https://github.com/trendvidia/protowire-go/issues/155)).
+### Changed
+
+- **`check/protovalidate` requires the parent module at v1.9.0 instead of
+  v1.8.1.** Keeps the nested module on the parent it ships with, the
+  #134 / #139 precedent. Nothing in v1.9.0 reaches the adapter (the
+  release is `@dataset` reading and writing); `go.sum` changes only the
+  parent's two lines and stays at 26 modules. Tagged
+  `check/protovalidate/v1.4.4` at that commit.
 
 ## [1.9.0] — 2026-10-23
 
