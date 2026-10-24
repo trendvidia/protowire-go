@@ -108,6 +108,22 @@ message Keyed {
 message Inner {
   int32 x = 1;
   string label = 2;
+  Deep deep = 3;
+}
+
+message Deep {
+  int32 n = 1;
+}
+
+// Required fields below the root, for dotted columns (#155).
+message ReqParent {
+  string id = 1;
+  ReqChild child = 2 [(pxf.required) = true];
+}
+
+message ReqChild {
+  int32 n = 1 [(pxf.required) = true];
+  int32 m = 2;
 }
 
 message Pick {
@@ -627,12 +643,15 @@ func TestDatasetWrite_RefusesWhatACellCannotHold(t *testing.T) {
 		want string
 	}{
 		{nil, "at least one column"},
-		{[]string{"inner.x"}, "does not write dotted column paths yet"},
-		{[]string{"nope"}, "dsw.v1.Row has no such field"},
+		{[]string{"inner", "inner.x"}, `overlaps column "inner"`},
+		{[]string{"list.x"}, "a column path cannot go through one"},
+		{[]string{"ts.seconds"}, "written as a literal"},
+		{[]string{"inner.nope"}, "has no field"},
+		{[]string{"nope"}, `dsw.v1.Row has no field "nope"`},
 		{[]string{"s", "s"}, `column "s" appears twice`},
 		// The reader's header rules, applied before any column resolves.
 		{[]string{"inner", "inner.x"}, `column "inner.x" overlaps column "inner"`},
-		{[]string{"S"}, "no such field"}, // proto names, exactly
+		{[]string{"S"}, `has no field "S"`}, // proto names, exactly
 	} {
 		t.Run(strings.Join(tc.cols, ","), func(t *testing.T) {
 			dst := []byte("keep")
@@ -680,4 +699,138 @@ func withDefaults(t *testing.T, desc protoreflect.MessageDescriptor, m *dynamicp
 		require.NoError(t, pxf.ApplyDefault(out, fd, def))
 	}
 	return out
+}
+
+// Dotted columns (protowire#342) write the leaf through its parents; a
+// row reads back as the message it came from, except that a
+// sub-message whose cells all come out empty reads back unset: the
+// accepted loss (owner decision on #155).
+func TestDatasetWrite_DottedRoundTrip(t *testing.T) {
+	desc := compileDatasetWrite(t, "Row")
+	cols := []string{"s", "inner.x", "inner.label", "inner.deep.n", "i32"}
+	innerFd := desc.Fields().ByName("inner")
+	r := rand.New(rand.NewPCG(342, 155))
+	var wrote, want []*dynamicpb.Message
+	for range 500 {
+		m := dynamicpb.NewMessage(desc)
+		var parts []string
+		if r.IntN(2) == 0 {
+			parts = append(parts, fmt.Sprintf("s = %q", trickyStrings[r.IntN(len(trickyStrings))]))
+		}
+		if r.IntN(4) > 0 {
+			var in []string
+			if r.IntN(2) == 0 {
+				in = append(in, fmt.Sprintf("x = %d", r.IntN(5)))
+			}
+			if r.IntN(2) == 0 {
+				in = append(in, fmt.Sprintf("label = %q", trickyStrings[r.IntN(len(trickyStrings))]))
+			}
+			if r.IntN(2) == 0 {
+				in = append(in, fmt.Sprintf("deep { %s }", []string{"", "n = 0", "n = 4"}[r.IntN(3)]))
+			}
+			parts = append(parts, "inner { "+strings.Join(in, " ")+" }")
+		}
+		require.NoError(t, pxf.Unmarshal([]byte(strings.Join(parts, "\n")), m))
+		makeWritable(m, cols)
+		wrote = append(wrote, m)
+
+		// What reads back: a sub-message is present only if a cell under
+		// it is non-empty. A proto3 int32 of 0 and an empty string are
+		// unset, so they write empty cells.
+		exp := proto.Clone(m).(*dynamicpb.Message)
+		if exp.Has(innerFd) {
+			in := exp.Mutable(innerFd).Message()
+			deepFd := in.Descriptor().Fields().ByName("deep")
+			if in.Has(deepFd) && !in.Get(deepFd).Message().Has(deepFd.Message().Fields().ByName("n")) {
+				in.Clear(deepFd)
+			}
+			empty := true
+			in.Range(func(protoreflect.FieldDescriptor, protoreflect.Value) bool { empty = false; return false })
+			if empty {
+				exp.Clear(innerFd)
+			}
+		}
+		want = append(want, withDefaults(t, desc, exp, cols))
+	}
+	assertTableReadsBack(t, desc, writeTable(t, desc, cols, wrote), want)
+}
+
+func TestDatasetWrite_DottedText(t *testing.T) {
+	desc := compileDatasetWrite(t, "Row")
+	cols := []string{"inner.x", "inner.deep.n", "s"}
+	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
+	require.NoError(t, err)
+	assert.Equal(t, "@dataset dsw.v1.Row (inner.x, inner.deep.n, s)\n", string(h))
+
+	for doc, want := range map[string]string{
+		`inner { x = 3 deep { n = 4 } } s = "a"`: `(3, 4, "a")`,
+		`inner { x = 3 } s = "a"`:                `(3, , "a")`,
+		`s = "a"`:                                `(, , "a")`,
+		// Present but empty: all-empty cells, read back unset.
+		`inner { deep {} }`: `(, , )`,
+	} {
+		m := dynamicpb.NewMessage(desc)
+		require.NoError(t, pxf.Unmarshal([]byte(doc), m))
+		row, err := pxf.AppendDatasetRow(nil, m, cols)
+		require.NoError(t, err, doc)
+		assert.Equal(t, want+"\n", string(row), doc)
+	}
+}
+
+// A required field below the root is the one way a dotted column can
+// make a row the reader rejects; the writer refuses such a row.
+func TestDatasetWrite_DottedRequired(t *testing.T) {
+	desc := compileDatasetWrite(t, "ReqParent")
+	set := func(doc string) *dynamicpb.Message {
+		m := dynamicpb.NewMessage(desc)
+		require.NoError(t, pxf.Unmarshal([]byte(doc), m))
+		return m
+	}
+
+	// The required child is covered by a path, but this row's cells
+	// under it are all empty, so it would read back unset.
+	_, err := pxf.AppendDatasetRow(nil, set(`child { n = 1 }`), []string{"id", "child.m"})
+	require.ErrorContains(t, err, `columns under "child" are all empty in this row`)
+
+	// The child reads back present, but its required n is no column.
+	_, err = pxf.AppendDatasetRow(nil, set(`child { n = 1 m = 5 }`), []string{"id", "child.m"})
+	require.ErrorContains(t, err, `"child" reads back present, and its (pxf.required) field "child.n" is not a column`)
+
+	// Covered: n = 0 is written as 0 (a required proto3 scalar), so the
+	// child reads back present and complete.
+	cols := []string{"id", "child.n", "child.m"}
+	m := set(`child { m = 2 }`)
+	row, err := pxf.AppendDatasetRow(nil, m, cols)
+	require.NoError(t, err)
+	assert.Equal(t, "(, 0, 2)\n", string(row))
+	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
+	require.NoError(t, err)
+	assertTableReadsBack(t, desc, append(h, row...), []*dynamicpb.Message{m})
+
+	// The root's required child is not covered at all: every row fails.
+	_, err = pxf.AppendDatasetHeader(nil, desc, []string{"id"})
+	require.ErrorContains(t, err, `omit "child", which is (pxf.required)`)
+}
+
+// A column path may go into a pxf.Secret, which has a block form
+// (protowire#342): each of its fields is a cell, and the row reads back
+// as written. A present Secret with every cell empty reads back absent,
+// the loss every dotted parent takes (TestDatasetWrite_Dotted*).
+func TestDatasetWrite_DottedIntoSecret(t *testing.T) {
+	desc := compileDatasetWrite(t, "Row")
+	cols := append([]string{"sec.value", "sec.hint"}, defaultedColumns...)
+	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
+	require.NoError(t, err)
+	for _, doc := range []string{
+		`sec { value = "pw" hint = "vault" }`,
+		`sec { value = "pw" }`,
+		`sec = "pw"`,
+		``,
+	} {
+		m := dynamicpb.NewMessage(desc)
+		require.NoError(t, pxf.Unmarshal([]byte(doc+` d_opt = 1 o_s = "x"`), m), doc)
+		row, err := pxf.AppendDatasetRow(nil, m, cols)
+		require.NoError(t, err, doc)
+		assertTableReadsBack(t, desc, append(slices.Clone(h), row...), []*dynamicpb.Message{withDefaults(t, desc, m, cols)})
+	}
 }

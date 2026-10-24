@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -28,14 +29,18 @@ import (
 // for rows of type desc, and a newline, to dst.
 //
 // Any field of desc can be a column: a cell may hold a list or a block
-// (protowire#341). It returns an error, and dst unchanged, for an empty
-// column list and for a name that is dotted (protowire#342), repeated,
-// or not a field of desc. A (pxf.required) field missing from the
-// columns is an error too: every
-// row would be rejected on reading. So is a schema that
+// (protowire#341). A column may also be a path into a sub-message, such
+// as `inner.x` (protowire#342), through singular message fields only. It
+// returns an error, and dst unchanged, for an empty column list and for
+// a column the reader would refuse: a name that is not a field, a path
+// with an empty segment, a column twice, a field beside a path inside it
+// (`inner` with `inner.x`), or a path through a repeated or map field or
+// into a type written as a literal. A (pxf.required) field of desc that
+// is neither a column nor under one is an error too: every row would be
+// rejected on reading. So is a schema that
 // [ValidateDescriptor] refuses, which Unmarshal would refuse to read.
 func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, columns []string) ([]byte, error) {
-	if _, _, err := datasetColumns(desc, columns); err != nil {
+	if _, err := datasetColumns(desc, columns); err != nil {
 		return dst, err
 	}
 	dst = append(dst, "@dataset "...)
@@ -79,6 +84,16 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 // written as if the mask did not name it, since the draft rejects
 // `null` on a scalar field (trendvidia/protowire#339).
 //
+// A dotted column is written through its parents: an unset parent makes
+// the cell empty, and the leaf follows the rules above inside its
+// parent. A sub-message is present on reading exactly when a cell under
+// it is non-empty (protowire#342), so one that is set but has every
+// column under it empty reads back unset; that loss is accepted, as for
+// a field outside the columns. A row that the reader would reject for
+// it is refused instead: a required sub-message whose cells are all
+// empty, or a sub-message that reads back present while one of its
+// required fields is not a column.
+//
 // Fields not among the columns are not written, so a table can export a
 // subset of a message's fields. They read back absent, taking their
 // (pxf.default) if they have one. A (pxf.required) field cannot be left
@@ -92,7 +107,7 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 func AppendDatasetRow(dst []byte, msg proto.Message, columns []string) ([]byte, error) {
 	m := msg.ProtoReflect()
 	desc := m.Descriptor()
-	fds, opts, err := datasetColumns(desc, columns)
+	cols, err := datasetColumns(desc, columns)
 	if err != nil {
 		return dst, err
 	}
@@ -101,24 +116,119 @@ func AppendDatasetRow(dst []byte, msg proto.Message, columns []string) ([]byte, 
 	if nfd := findNullMaskField(desc); nfd != nil && m.Has(nfd) {
 		enc.nullSet = readNullMask(m, nfd)
 	}
+	filled := make(map[string]bool) // path prefixes with a non-empty cell
 	buf.WriteByte('(')
-	for i, fd := range fds {
+	for i, c := range cols {
 		if i > 0 {
 			buf.WriteString(", ")
 		}
-		if err := enc.writeCell(m, fd, fds, opts[fd.Index()]); err != nil {
-			return dst, fmt.Errorf("pxf: @dataset column %q: %w", fd.Name(), err)
+		parent, ok := c.parentIn(m)
+		if !ok {
+			continue // a parent is unset: an empty cell, and it reads back unset
+		}
+		leaf := c.path[len(c.path)-1]
+		before := buf.Len()
+		opts := datasetCellOptions(parent.Descriptor())
+		if err := enc.writeCell(parent, leaf, c.name, c.siblings, opts[leaf.Index()]); err != nil {
+			return dst, fmt.Errorf("pxf: @dataset column %q: %w", c.name, err)
+		}
+		if buf.Len() > before {
+			for _, p := range c.prefixes() {
+				filled[p] = true
+			}
 		}
 	}
 	buf.WriteString(")\n")
+	if err := checkRowPresence(m, cols, filled); err != nil {
+		return dst, err
+	}
 	return buf.Bytes(), nil
+}
+
+// datasetColumn is one resolved column: its name as written and the
+// fields from the row type down to the leaf (one for a plain column).
+type datasetColumn struct {
+	name     string
+	path     []protoreflect.FieldDescriptor
+	siblings []protoreflect.FieldDescriptor // leaves of the columns with the same parent, this one included
+}
+
+// parentIn walks c's path in m to the message holding the leaf. It
+// reports false when a parent on the way is unset.
+func (c datasetColumn) parentIn(m protoreflect.Message) (protoreflect.Message, bool) {
+	for _, fd := range c.path[:len(c.path)-1] {
+		if !m.Has(fd) {
+			return nil, false
+		}
+		m = m.Get(fd).Message()
+	}
+	return m, true
+}
+
+// prefixes is the dotted names of c's parents: "a" and "a.b" for "a.b.c".
+func (c datasetColumn) prefixes() []string {
+	segs := strings.Split(c.name, ".")
+	out := make([]string, 0, len(segs)-1)
+	for k := 1; k < len(segs); k++ {
+		out = append(out, strings.Join(segs[:k], "."))
+	}
+	return out
+}
+
+// checkRowPresence refuses a row that the reader would reject for a
+// missing (pxf.required) field below the root, the one way a dotted
+// column can make a row unreadable. A sub-message is present on reading
+// exactly when one of the cells under it is non-empty (draft §3.4.4,
+// protowire#342 decision 1). So a sub-message that is present in msg but
+// whose cells all come out empty reads back absent: that loss is
+// accepted (owner decision on #155) unless the sub-message is required,
+// and then the row is refused. And a sub-message that reads back present
+// needs each of its required fields as a column, or under one.
+func checkRowPresence(m protoreflect.Message, cols []datasetColumn, filled map[string]bool) error {
+	covered := func(path string) (exact, prefix bool) {
+		for _, c := range cols {
+			if c.name == path {
+				return true, false
+			}
+			if strings.HasPrefix(c.name, path+".") {
+				prefix = true
+			}
+		}
+		return false, prefix
+	}
+	var check func(md protoreflect.MessageDescriptor, at string) error
+	check = func(md protoreflect.MessageDescriptor, at string) error {
+		opts := datasetCellOptions(md)
+		fields := md.Fields()
+		for i := range fields.Len() {
+			fd := fields.Get(i)
+			path := string(fd.Name())
+			if at != "" {
+				path = at + "." + path
+			}
+			exact, prefix := covered(path)
+			if prefix && !filled[path] && opts[i].required {
+				return fmt.Errorf("pxf: @dataset columns under %q are all empty in this row, so it reads back unset, and it is (pxf.required)", path)
+			}
+			if at != "" && opts[i].required && !exact && !prefix {
+				return fmt.Errorf("pxf: @dataset %q reads back present, and its (pxf.required) field %q is not a column: the row would be rejected", at, path)
+			}
+			if prefix && filled[path] {
+				if err := check(fd.Message(), path); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return check(m.Descriptor(), "")
 }
 
 // writeCell writes the cell for fd of m, in a row of the columns cols;
 // see AppendDatasetRow.
-func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescriptor, cols []protoreflect.FieldDescriptor, o cellOptions) error {
+func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescriptor, path string, cols []protoreflect.FieldDescriptor, o cellOptions) error {
 	isMsg := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
-	if isMsg && e.nullSet[string(fd.Name())] {
+	if isMsg && e.nullSet[path] {
 		e.buf.WriteString("null")
 		return nil
 	}
@@ -200,39 +310,56 @@ func (e *encoder) writeValueCell(fd protoreflect.FieldDescriptor, v protoreflect
 // datasetColumns resolves columns against desc, refusing what a v1 row
 // cannot carry; see AppendDatasetHeader. It also returns desc's
 // cellOptions.
-func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]protoreflect.FieldDescriptor, []cellOptions, error) {
+func datasetColumns(desc protoreflect.MessageDescriptor, columns []string) ([]datasetColumn, error) {
 	if len(columns) == 0 {
-		return nil, nil, errors.New("pxf: @dataset needs at least one column")
+		return nil, errors.New("pxf: @dataset needs at least one column")
 	}
 	// A schema the reader would refuse is refused here instead of
 	// written: a field with a reserved name makes the header unreadable,
 	// and a oneof with two defaulted members would get two null cells.
 	if err := asValidationError(ValidateDescriptor(desc)); err != nil {
-		return nil, nil, fmt.Errorf("pxf: @dataset %s: %w", desc.FullName(), err)
+		return nil, fmt.Errorf("pxf: @dataset %s: %w", desc.FullName(), err)
 	}
-	// The header rules every reader applies, so the writer cannot write
-	// a header its own reader rejects.
-	if i, msg := columnPathError(columns); i >= 0 {
-		return nil, nil, errors.New("pxf: " + msg)
+	// The reader's rules for column paths (protowire#342), with its
+	// messages, so the writer cannot write a header its reader rejects:
+	// no empty segment, no path twice, no field beside a path inside it,
+	// and each path through singular message fields only.
+	if msg := checkColumnPaths(desc, columns); msg != "" {
+		return nil, errors.New("pxf: " + msg)
 	}
-	fds := make([]protoreflect.FieldDescriptor, len(columns))
+	cols := make([]datasetColumn, len(columns))
 	for i, c := range columns {
-		if containsDot(c) {
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: the writer does not write dotted column paths yet (trendvidia/protowire-go#155)", c)
+		md := desc
+		segs := strings.Split(c, ".")
+		path := make([]protoreflect.FieldDescriptor, len(segs))
+		for k, seg := range segs {
+			// checkColumnPaths resolved every segment.
+			fd := md.Fields().ByName(protoreflect.Name(seg))
+			path[k] = fd
+			if k < len(segs)-1 {
+				md = fd.Message()
+			}
 		}
-		fd := desc.Fields().ByName(protoreflect.Name(c))
-		if fd == nil {
-			return nil, nil, fmt.Errorf("pxf: @dataset column %q: %s has no such field", c, desc.FullName())
+		cols[i] = datasetColumn{name: c, path: path}
+	}
+	for i := range cols {
+		for _, o := range cols {
+			if len(o.path) == len(cols[i].path) && slices.Equal(o.path[:len(o.path)-1], cols[i].path[:len(cols[i].path)-1]) {
+				cols[i].siblings = append(cols[i].siblings, o.path[len(o.path)-1])
+			}
 		}
-		fds[i] = fd
 	}
 	opts := datasetCellOptions(desc)
 	for i, o := range opts {
-		if fd := desc.Fields().Get(i); o.required && !slices.Contains(fds, fd) {
-			return nil, nil, fmt.Errorf("pxf: @dataset columns omit %q, which is (pxf.required): every row would be rejected", fd.Name())
+		fd := desc.Fields().Get(i)
+		if !o.required {
+			continue
+		}
+		if !slices.ContainsFunc(cols, func(c datasetColumn) bool { return c.path[0] == fd }) {
+			return nil, fmt.Errorf("pxf: @dataset columns omit %q, which is (pxf.required): every row would be rejected", fd.Name())
 		}
 	}
-	return fds, opts, nil
+	return cols, nil
 }
 
 // cellOptions is what a row needs of a field's PXF annotations.
