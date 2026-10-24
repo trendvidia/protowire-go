@@ -34,6 +34,12 @@ format changes.
   holding an `Any` block with a type entry binds. A row type that
   reaches an `Any` field takes the full decoder, so the defaults of the
   type a cell names apply (#161).
+- **One document packs an `Any` body to the same bytes every time.** The
+  decoder packed a typed `Any` body with a plain `proto.Marshal`, which
+  orders a dynamic message's fields differently from run to run: over
+  300 decodes of one document, main produced two encodings of `value`,
+  so two decodes of one document were not `proto.Equal`. It packs
+  deterministically now.
 - **`AppendDatasetRow` writes list, map and block cells**
   ([#155](https://github.com/trendvidia/protowire-go/issues/155)). Since
   value cells (v1.9.0, protowire#341) the reader accepts a repeated

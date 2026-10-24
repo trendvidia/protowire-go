@@ -1027,7 +1027,11 @@ func (d *directDecoder) decodeAnyBody(anyMsg protoreflect.Message) error {
 		return err
 	}
 
-	packed, err := proto.Marshal(inner)
+	// Deterministic, so one document always packs to the same bytes: a
+	// dynamicpb message ranges its fields in no fixed order, and the
+	// plain Marshal wrote `code` before or after `reason` from run to run,
+	// so two decodes of one document were not proto.Equal.
+	packed, err := proto.MarshalOptions{Deterministic: true}.Marshal(inner)
 	if err != nil {
 		return fmt.Errorf("cannot marshal Any inner message: %w", err)
 	}

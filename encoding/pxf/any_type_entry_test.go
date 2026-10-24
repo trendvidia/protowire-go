@@ -219,3 +219,24 @@ func TestAnyTypeEntry_DatasetCell(t *testing.T) {
 	require.NoError(t, opts.BindRow(dynamicpb.NewMessage(desc), ds.Columns, ds.Rows[0]))
 	require.ErrorContains(t, pxf.BindRow(dynamicpb.NewMessage(desc), ds.Columns, ds.Rows[0]), "no TypeResolver")
 }
+
+// One document packs its Any body to the same bytes every time, so two
+// decodes of it are proto.Equal. A plain proto.Marshal of the dynamicpb
+// body ordered its fields differently from run to run (measured on main
+// a6fa212: two encodings over 300 decodes).
+func TestAnyTypeEntry_PacksDeterministically(t *testing.T) {
+	desc, opts := anyEntrySetup(t)
+	const doc = `payload { @type = "anyentry.v1.Leaf" tag = "t" n = 2 }`
+	var first []byte
+	for i := range 200 {
+		m := dynamicpb.NewMessage(desc)
+		require.NoError(t, opts.Unmarshal([]byte(doc), m))
+		a := m.Get(desc.Fields().ByName("payload")).Message()
+		got := a.Get(a.Descriptor().Fields().ByName("value")).Bytes()
+		if i == 0 {
+			first = got
+			continue
+		}
+		require.Equal(t, first, got, "decode %d", i)
+	}
+}
