@@ -16,6 +16,12 @@ type lexer struct {
 	pos   int
 	line  int
 	col   int
+	// noValue skips copying a string literal's plain characters into the
+	// token's Value: the dataset row scan (DatasetReader.nextToken) only
+	// needs where a token ends, not what it holds. Escapes are still
+	// decoded, so every error is the same as with values.
+	noValue bool
+
 	// base is added to every reported Offset. It is non-zero only when
 	// the input is a window into a larger document (the streaming
 	// dataset reader parses one row, or a chained table's header, at a
@@ -219,6 +225,7 @@ func (l *lexer) lexString(pos Position) Token {
 	var sb strings.Builder
 	var buf [utf8.UTFMax]byte
 	tolerant := l.tolerant // hoisted: checked once per byte below
+	noValue := l.noValue
 	for l.pos < len(l.input) {
 		if tolerant && l.peek() == '\n' {
 			// Recovery for mid-edit buffers: treat the newline as the
@@ -233,7 +240,9 @@ func (l *lexer) lexString(pos Position) Token {
 			return Token{Kind: STRING, Value: sb.String(), Pos: pos}
 		}
 		if ch != '\\' {
-			sb.WriteByte(ch)
+			if !noValue {
+				sb.WriteByte(ch)
+			}
 			continue
 		}
 		if l.pos >= len(l.input) {

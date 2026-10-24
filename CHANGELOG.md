@@ -11,6 +11,26 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DatasetReader` finds rows with the lexer, in time linear in the
+  input** ([#148](https://github.com/trendvidia/protowire-go/issues/148),
+  [#149](https://github.com/trendvidia/protowire-go/issues/149)). After
+  every read the reader scanned its whole buffer again for the row's
+  closing `)`, so one unclosed row of n bytes cost about n²/8192 byte
+  visits: 4.79 s for 4 MiB, and minutes near the 64 MiB
+  `MaxMessageSize`, on untrusted input. The scan now resumes where the
+  last read left it, and a token that runs past the end of the buffer
+  is not lexed again until bytes arrive that could end it. A 4 MiB
+  unclosed row takes 35 ms, and one long unterminated string 21 ms
+  (it took 4.75 s). The boundary comes from the lexer `Parse` uses
+  rather than from hand-copied lexer rules, which were where all three
+  stream/`Parse` disagreements the fuzzer found in #144 came from; the
+  `malformed @dataset row` fallback error is gone with them. A row
+  already in the buffer is parsed in one pass, so ordinary streaming is
+  13% faster than before (100k rows in 4 KiB reads, n=8). A reader fed
+  one byte per `Read` no longer allocates a 4 KiB buffer per call.
+
 ## [1.9.0] — 2026-10-23
 
 A minor release: `@dataset` grows from a read-only, scalar-cell table

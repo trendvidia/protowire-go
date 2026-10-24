@@ -67,6 +67,28 @@ type DatasetReader struct {
 	err      error    // sticky error
 	lim      limits   // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
 	base     Position // document position of pending[0], so rows and errors carry Parse's positions
+
+	// The row scan resumes where the previous pull left it, so a row is
+	// lexed once however many reads it arrives in (#148). scanPos is the
+	// start of the first token not yet known to be complete; rowStart is
+	// the offset of the current row's '(' , or -1 between rows. Both
+	// are offsets into pending.
+	scanPos  int
+	rowStart int
+
+	// While a token runs past the buffer's end, the scan does not lex it
+	// again until bytes arrive that could end it (mayEndToken): waitAt is
+	// the token's start and waitFrom the buffer length already checked,
+	// or 0 when no token is waiting. Without this, one long literal costs
+	// a re-lex of the whole literal on every read.
+	waitAt   int
+	waitFrom int
+
+	// scanned counts the bytes the row scan has lexed, for the tests
+	// that hold it linear in the input.
+	scanned int
+
+	lx lexer // the scan's lexer, reset for each token (nextToken)
 }
 
 // NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
@@ -93,7 +115,7 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // parses them. [DatasetReader.Scan] binds a row under every limit but
 // MaxMessageSize, as Unmarshal would bind the body the row stands for.
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}}
+	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1}
 	if t, ok := r.(*datasetTail); ok {
 		tr.base = t.at
 	}
@@ -165,18 +187,26 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 	if tr.finished {
 		return DatasetRow{}, io.EOF
 	}
+	if row, end, ok := tr.tryWholeRow(); ok {
+		tr.consume(end)
+		return row, nil
+	}
 	for {
-		kind, start, end := findNextRow(tr.pending)
+		kind, start, end := tr.scanRow()
 		switch kind {
 		case scanRow:
-			row, err := tr.parseRow(start, end+1)
-			tr.consume(end + 1)
+			row, err := tr.parseRow(start, end)
+			tr.consume(end)
 			if err != nil {
 				return tr.fail(err)
 			}
 			return *row, nil
 		case scanBad:
-			return tr.fail(tr.rowError(start, end+1))
+			// Parse the rest of the buffer, not just through the token
+			// that stopped the scan: the lexer may reject a token before
+			// its end (an oversized bytes literal), and cut there, it
+			// would read as unterminated instead.
+			return tr.fail(tr.rowError(start, len(tr.pending)))
 		case scanEnd:
 			tr.consume(start)
 			tr.finished = true
@@ -198,6 +228,30 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 			return tr.fail(perr)
 		}
 	}
+}
+
+// tryWholeRow is the fast path for a row already in the buffer: the
+// row parser runs on the buffer directly, so the row is lexed once. If
+// it parses a complete row, every token in it ended before its ')', so
+// the row is the one Parse reads; it returns that row and the offset
+// past it. Anything else (a row cut by a read, a malformed row, no row)
+// returns ok=false, and scanRow finds the boundary with the lexer. It
+// is tried once per row, before the scan starts on it, so a row that
+// spans many reads is still lexed in linear time.
+func (tr *DatasetReader) tryWholeRow() (row DatasetRow, end int, ok bool) {
+	if tr.rowStart >= 0 || tr.waitFrom > 0 {
+		return DatasetRow{}, 0, false
+	}
+	at := tr.posAt(tr.scanPos)
+	p := newParserAt(tr.pending[tr.scanPos:], at, tr.lim)
+	if p.current.Kind != LPAREN {
+		return DatasetRow{}, 0, false
+	}
+	r, endOffset, err := p.parseDatasetRow(len(tr.columns))
+	if err != nil {
+		return DatasetRow{}, 0, false
+	}
+	return *r, tr.scanPos + endOffset - at.Offset, true
 }
 
 // fail records err as the reader's sticky error and returns it.
@@ -225,6 +279,13 @@ func (tr *DatasetReader) posAt(i int) Position {
 func (tr *DatasetReader) consume(n int) {
 	tr.base = tr.posAt(n)
 	tr.pending = tr.pending[n:]
+	tr.scanPos = max(tr.scanPos-n, 0)
+	if tr.rowStart >= 0 {
+		tr.rowStart -= n
+		if tr.rowStart < 0 {
+			tr.rowStart = -1
+		}
+	}
 }
 
 // parseRow parses pending[start:end] as one row with the parser Parse
@@ -240,15 +301,19 @@ func (tr *DatasetReader) parseRow(start, end int) (*DatasetRow, error) {
 	return row, err
 }
 
-// rowError reports why the row in pending[start:end] is malformed. The
-// scan has already seen that it is (an unclosed row at the end of the
-// source, a '(' inside a row, a broken literal), so parsing it fails at
-// the same token Parse fails at.
+// rowError reports why the row starting at pending[start] is malformed.
+// The scan has seen every token from the row's '(' up to the one that
+// stopped it (a stray '(', a token the lexer rejects, or the end of the
+// input), and no ')' that closes the row. parseDatasetRow fails on
+// pending[start:end] at the token where Parse fails on the whole
+// document, because the tokens before it are the same.
 func (tr *DatasetReader) rowError(start, end int) error {
-	if _, err := tr.parseRow(start, end); err != nil {
-		return err
+	_, err := tr.parseRow(start, end)
+	if err == nil {
+		// Unreachable: the slice has no closing ')'.
+		err = io.ErrUnexpectedEOF
 	}
-	return errorf(tr.posAt(start), "malformed @dataset row")
+	return err
 }
 
 // pull reads up to n bytes from src into pending. Sets srcEOF when
@@ -258,10 +323,19 @@ func (tr *DatasetReader) pull(n int) error {
 	if tr.srcEOF {
 		return nil
 	}
-	buf := make([]byte, n)
-	read, err := tr.src.Read(buf)
+	// Read into the buffer's spare capacity: a fresh buffer per read
+	// costs an allocation per call, which a reader returning a byte at a
+	// time turns into one per byte. Growing only ever writes past the
+	// current end, so rows already returned (which may view these bytes)
+	// are untouched.
+	if cap(tr.pending)-len(tr.pending) < n {
+		grown := make([]byte, len(tr.pending), 2*len(tr.pending)+n)
+		copy(grown, tr.pending)
+		tr.pending = grown
+	}
+	read, err := tr.src.Read(tr.pending[len(tr.pending) : len(tr.pending)+n])
 	if read > 0 {
-		tr.pending = append(tr.pending, buf[:read]...)
+		tr.pending = tr.pending[:len(tr.pending)+read]
 		if len(tr.pending) > tr.lim.maxMessageSize {
 			return fmt.Errorf("dataset input holds %d bytes without a row boundary, MaxMessageSize=%d", len(tr.pending), tr.lim.maxMessageSize)
 		}
@@ -278,14 +352,14 @@ func (tr *DatasetReader) pull(n int) error {
 // columns, and any preceding side-channel directives.
 func (tr *DatasetReader) readHeader() error {
 	for {
-		headerEnd, found, err := scanHeaderEnd(tr.pending)
-		if err != nil {
-			// The scan found a literal that can never close. Every token
-			// before it is complete, so Parse fails at or before it.
+		headerEnd, found, bad := tr.scanHeader()
+		if bad > 0 {
+			// The lexer rejected a token before the header ended. Every
+			// token before it is complete, so Parse fails at or before
+			// it (the whole buffer, for the reason scanBad gives).
 			if _, perr := tr.parseHeader(tr.pending); perr != nil {
 				return perr
 			}
-			return err
 		}
 		if found {
 			// Parse the header prefix as a (rowless) PXF document.
@@ -293,12 +367,12 @@ func (tr *DatasetReader) readHeader() error {
 			// no rows yet, and validates everything we care about
 			// (leading-directive shape, @type / @dataset conflict,
 			// dotted columns, etc.).
-			doc, perr := tr.parseHeader(tr.pending[:headerEnd+1])
+			doc, perr := tr.parseHeader(tr.pending[:headerEnd])
 			if perr != nil {
 				return perr
 			}
 			if len(doc.Datasets) == 0 {
-				// Should not happen — scanHeaderEnd found an @dataset,
+				// Should not happen — scanHeader found an @dataset,
 				// but defensive.
 				return ErrNoDataset
 			}
@@ -306,7 +380,7 @@ func (tr *DatasetReader) readHeader() error {
 			tr.typ = ds.Type
 			tr.columns = ds.Columns
 			tr.dirs = doc.Directives
-			tr.consume(headerEnd + 1)
+			tr.consume(headerEnd)
 			return nil
 		}
 		if tr.srcEOF {
@@ -334,262 +408,18 @@ func (tr *DatasetReader) parseHeader(input []byte) (*Document, error) {
 	return newParserAt(input, tr.base, tr.lim).parseDocument()
 }
 
-// scanHeaderEnd searches input for the first complete `@dataset TYPE (
-// cols )` directive and returns the index of the `)` that closes its
-// column list. Returns (0, false, nil) if the input ends before the
-// header is complete (caller should pull more bytes).
-//
-// This is a byte-level scan, not a full parse: it walks the input
-// looking for the literal byte sequence "@dataset", then for the next
-// `(`, then for the matching `)`, with string / bytes-literal /
-// comment awareness so embedded parens or `@dataset` substrings inside
-// strings or comments don't trip the scan.
-func scanHeaderEnd(input []byte) (int, bool, error) {
-	// Find the start of an `@dataset` token outside strings/comments.
-	atIdx, found, err := findAtTable(input)
-	if err != nil {
-		return 0, false, err
-	}
-	if !found {
-		return 0, false, nil
-	}
-	// Find the next `(` after the @dataset keyword (skipping the type
-	// identifier and whitespace).
-	lparen, found, err := findNextChar(input, atIdx+len("@dataset"), '(')
-	if err != nil {
-		return 0, false, err
-	}
-	if !found {
-		return 0, false, nil
-	}
-	// Find the matching `)`.
-	end, ok, err := findMatchingParenSafe(input, lparen)
-	if err != nil {
-		return 0, false, err
-	}
-	if !ok {
-		return 0, false, nil
-	}
-	return end, true, nil
-}
-
-// findAtTable returns the byte offset of the next `@dataset` keyword
-// outside of strings/comments. The match must be followed by a
-// non-identifier byte (so we don't false-match `@tableau`).
-func findAtTable(input []byte) (int, bool, error) {
-	i := 0
-	for i < len(input) {
-		j, err := skipStringOrComment(input, i)
-		if err != nil {
-			return 0, false, err
-		}
-		if j == -1 {
-			// Incomplete string/comment — need more bytes.
-			return 0, false, nil
-		}
-		if j != i {
-			i = j
-			continue
-		}
-		if input[i] == '@' && i+len("@dataset") <= len(input) &&
-			string(input[i:i+len("@dataset")]) == "@dataset" {
-			// Confirm the next char (if present) isn't an ident-part.
-			after := i + len("@dataset")
-			if after == len(input) {
-				// Could be `@dataset` followed by more bytes we haven't
-				// seen yet — be conservative.
-				return 0, false, nil
-			}
-			if !isIdentPart(input[after]) {
-				return i, true, nil
-			}
-		}
-		i++
-	}
-	return 0, false, nil
-}
-
-// findNextChar returns the offset of the next occurrence of `ch`
-// outside strings/comments, starting at startFrom.
-func findNextChar(input []byte, startFrom int, ch byte) (int, bool, error) {
-	i := startFrom
-	for i < len(input) {
-		j, err := skipStringOrComment(input, i)
-		if err != nil {
-			return 0, false, err
-		}
-		if j == -1 {
-			return 0, false, nil
-		}
-		if j != i {
-			i = j
-			continue
-		}
-		if input[i] == ch {
-			return i, true, nil
-		}
-		i++
-	}
-	return 0, false, nil
-}
-
-// skipStringOrComment returns the index past a string / bytes literal
-// / comment starting at i, if i is positioned at the opener. Returns
-// i unchanged if the byte at i is not an opener. Returns -1 if the
-// construct is incomplete (caller should treat as "need more bytes").
-// Returns a non-nil error, with the index of the offending byte, if the
-// construct is malformed in a way that can't be fixed by more bytes (a
-// bytes literal broken by a newline).
-func skipStringOrComment(input []byte, i int) (int, error) {
-	if i >= len(input) {
-		return i, nil
-	}
-	ch := input[i]
-	switch {
-	case ch == '"':
-		// Triple-quoted vs. single-quoted.
-		if i+2 < len(input) && input[i+1] == '"' && input[i+2] == '"' {
-			return skipTripleString(input, i)
-		}
-		return skipSimpleString(input, i)
-	case ch == 'b' && i+1 < len(input) && input[i+1] == '"' && (i == 0 || !isIdentPart(input[i-1])):
-		// The lexer reads b" as a bytes literal only at a token start;
-		// inside an identifier (`Ab"`) the quote opens a string.
-		return skipBytesLiteral(input, i)
-	case ch == '#':
-		return skipLineComment(input, i+1), nil
-	case ch == '/' && i+1 < len(input) && input[i+1] == '/':
-		return skipLineComment(input, i+2), nil
-	case ch == '/' && i+1 < len(input) && input[i+1] == '*':
-		return skipBlockComment(input, i+2)
-	}
-	return i, nil
-}
-
-func skipSimpleString(input []byte, i int) (int, error) {
-	// i is at the opening `"`.
-	j := i + 1
-	for j < len(input) {
-		switch input[j] {
-		case '\\':
-			if j+1 >= len(input) {
-				return -1, nil // need more bytes
-			}
-			j += 2
-		case '"':
-			return j + 1, nil
-		default:
-			// A raw LF does not end the scan: the strict lexer keeps it
-			// in the literal, and the parser, not this scan, decides
-			// whether a row is valid.
-			j++
-		}
-	}
-	return -1, nil
-}
-
-func skipTripleString(input []byte, i int) (int, error) {
-	j := i + 3
-	for j+2 < len(input) {
-		if input[j] == '"' && input[j+1] == '"' && input[j+2] == '"' {
-			return j + 3, nil
-		}
-		j++
-	}
-	return -1, nil
-}
-
-func skipBytesLiteral(input []byte, i int) (int, error) {
-	j := i + 2 // past `b"`
-	for j < len(input) {
-		switch input[j] {
-		case '"':
-			return j + 1, nil
-		case '\n':
-			return j, errors.New("pxf: unterminated bytes literal")
-		default:
-			j++
-		}
-	}
-	return -1, nil
-}
-
-func skipLineComment(input []byte, from int) int {
-	j := from
-	for j < len(input) && input[j] != '\n' {
-		j++
-	}
-	return j
-}
-
-func skipBlockComment(input []byte, from int) (int, error) {
-	j := from
-	for j+1 < len(input) {
-		if input[j] == '*' && input[j+1] == '/' {
-			return j + 2, nil
-		}
-		j++
-	}
-	return -1, nil
-}
-
-// findMatchingParenSafe finds the index of the `)` matching the `(`
-// at openIdx. Returns:
-//   - (index, true, nil) on success.
-//   - (0, false, nil) if the matching paren isn't in the buffer yet
-//     (caller should pull more bytes).
-//   - (0, false, err) on a malformed string / bytes / comment inside
-//     the parens (unrecoverable — surfaces to the caller).
-//
-// String / bytes-literal / comment aware.
-func findMatchingParenSafe(input []byte, openIdx int) (int, bool, error) {
-	depth := 1
-	i := openIdx + 1
-	for i < len(input) {
-		// Try to skip past any string/bytes/comment construct.
-		j, err := skipStringOrComment(input, i)
-		if err != nil {
-			return 0, false, err
-		}
-		if j == -1 {
-			// Incomplete construct — pull more bytes.
-			return 0, false, nil
-		}
-		if j != i {
-			i = j
-			continue
-		}
-		switch input[i] {
-		case '(':
-			depth++
-			i++
-		case ')':
-			depth--
-			if depth == 0 {
-				return i, true, nil
-			}
-			i++
-		default:
-			i++
-		}
-	}
-	return 0, false, nil
-}
-
-// rowScan classifies what findNextRow found at the head of the input.
+// rowScan classifies what scanRow found.
 type rowScan int
 
 const (
-	// scanNeedMore: the input ends before the next row closes. start is
-	// where the unfinished construct begins, or -1 if only whitespace
-	// and comments were seen.
+	// scanNeedMore: the input ends before the scan could decide. start
+	// is the current row's '(' , or -1 between rows.
 	scanNeedMore rowScan = iota
-	// scanRow: input[start:end+1] is a complete `( ... )` row.
+	// scanRow: pending[start:end] is a complete `( ... )` row.
 	scanRow
-	// scanBad: the row at start can never close well (a '(' inside it,
-	// or a bytes literal broken across a line, at end). Parsing
-	// input[start:end+1] fails where Parse fails: every token in it is
-	// complete, so a cut at the buffer's end cannot change the error.
+	// scanBad: the row at start cannot close well; pending[start:end]
+	// ends at the token that shows it (a stray '(' or a token the
+	// lexer rejects). Parse it for the error.
 	scanBad
 	// scanEnd: a directive starts at start; the row sequence is over.
 	scanEnd
@@ -598,89 +428,173 @@ const (
 	scanNotRow
 )
 
-// findNextRow finds the next `( ... )` row in input, skipping leading
-// whitespace and comments. It is a byte-level scan, aware of strings,
-// bytes literals and comments; the row itself is parsed by the caller.
-func findNextRow(input []byte) (kind rowScan, start, end int) {
-	i := 0
-	for i < len(input) {
-		ch := input[i]
-		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
-			i++
+// nextToken lexes the token at pending[from:] and returns it with the
+// offset just past it, or ok=false when the token runs to the end of
+// the buffer and more input could still extend it (an identifier, a
+// number, a string or a comment without its end). Offsets are into
+// pending. This is the lexer Parse uses, so the scan and Parse can
+// never disagree about where a token ends (#149).
+func (tr *DatasetReader) nextToken(from int) (tok Token, end int, ok bool) {
+	// One lexer value, reset per token, so the scan allocates nothing
+	// per token beyond what the token itself holds.
+	tr.lx = lexer{input: tr.pending[from:], line: 1, col: 1, base: from, maxBytesLiteral: tr.lim.maxBytesLiteral, noValue: true}
+	lx := &tr.lx
+	tok = lx.Next()
+	end = from + lx.pos
+	tr.scanned += end - from
+	if tr.srcEOF {
+		return tok, end, true
+	}
+	return tok, end, tokenComplete(tok, tr.pending, end)
+}
+
+// illegalNearEnd is how close to the buffer's end a token the lexer
+// rejects must stop for the rejection to be possibly the lexer running
+// out of input rather than a defect: an unterminated triple-quoted
+// string stops two bytes short of the end, a block comment one, an
+// escape sequence up to its own length (`\U` and eight hex digits).
+const illegalNearEnd = 16
+
+// tokenComplete reports whether more input could change tok, which the
+// lexer produced from buf and which ends at end. Punctuation and a
+// newline are whole as soon as they are read. A closed string is whole,
+// except `""` at the very end, which may open a triple-quoted string.
+// Any other token ending at the buffer's end may continue (an
+// identifier, a number, a line comment, an unterminated literal), and a
+// rejected token close to the end may be the lexer running out of
+// input. Treating a token as incomplete only delays the scan's decision
+// to the next read or the end of input; it never changes it.
+func tokenComplete(tok Token, buf []byte, end int) bool {
+	switch tok.Kind {
+	case EOF:
+		return false
+	case LPAREN, RPAREN, LBRACE, RBRACE, LBRACKET, RBRACKET, COMMA, EQUALS, COLON, NEWLINE:
+		return true
+	case STRING, BYTES:
+		return !(end == len(buf) && string(buf[tok.Pos.Offset:end]) == `""`)
+	case ILLEGAL:
+		return end < len(buf)-illegalNearEnd
+	}
+	return end < len(buf)
+}
+
+// scanRow finds the next row with the lexer, resuming at scanPos: a
+// token known complete is never lexed again, so a row costs time linear
+// in its size however many reads it arrives in (#148). Between rows it
+// skips newlines and comments; '(' starts a row, a directive ends the
+// sequence, and anything else is not a row. Inside a row it stops at
+// the ')' that closes it, at a '(' (no value holds one), or at a token
+// the lexer rejects.
+func (tr *DatasetReader) scanRow() (kind rowScan, start, end int) {
+	if tr.waitFrom > 0 && !tr.srcEOF && !tr.mayEndToken() {
+		tr.waitFrom = len(tr.pending)
+		return scanNeedMore, tr.rowStart, 0
+	}
+	tr.waitFrom = 0
+	for {
+		tok, tokEnd, ok := tr.nextToken(tr.scanPos)
+		if !ok {
+			tr.waitAt, tr.waitFrom = tok.Pos.Offset, len(tr.pending)
+			return scanNeedMore, tr.rowStart, 0
+		}
+		if tok.Kind == EOF {
+			// Only at the end of the source (nextToken).
+			return scanNeedMore, tr.rowStart, 0
+		}
+		if tok.Kind == NEWLINE || tok.Kind == COMMENT {
+			tr.scanPos = tokEnd
 			continue
 		}
-		if ch == '#' || (ch == '/' && i+1 < len(input) && (input[i+1] == '/' || input[i+1] == '*')) {
-			j, _ := skipStringOrComment(input, i)
-			if j == -1 {
-				return scanNeedMore, i, 0
+		at := tok.Pos.Offset
+		if tr.rowStart < 0 {
+			switch tok.Kind {
+			case LPAREN:
+				tr.rowStart = at
+				tr.scanPos = tokEnd
+				continue
+			case AT_TYPE, AT_DIRECTIVE, AT_DATASET, AT_PROTO:
+				return scanEnd, at, 0
+			default:
+				return scanNotRow, at, 0
 			}
-			i = j
-			continue
 		}
-		if ch == '/' && i+1 == len(input) {
-			return scanNeedMore, i, 0 // could be a comment opener
+		switch tok.Kind {
+		case RPAREN:
+			start = tr.rowStart
+			tr.rowStart, tr.scanPos = -1, tokEnd
+			return scanRow, start, tokEnd
+		case LPAREN, ILLEGAL:
+			return scanBad, tr.rowStart, tokEnd
 		}
-		break
+		tr.scanPos = tokEnd
 	}
-	if i >= len(input) {
-		return scanNeedMore, -1, 0
-	}
-	switch input[i] {
-	case '(':
-	case '@':
-		// A directive name follows its '@' directly (lexDirective). A
-		// bare '@' is no directive; Parse rejects it as a top-level
-		// entry.
-		if i+1 == len(input) {
-			return scanNeedMore, i, 0
-		}
-		if !isIdentPart(input[i+1]) {
-			return scanNotRow, i, 0
-		}
-		return scanEnd, i, 0
-	default:
-		return scanNotRow, i, 0
-	}
-	for j := i + 1; j < len(input); {
-		k, err := skipStringOrComment(input, j)
-		if err != nil {
-			return scanBad, i, k
-		}
-		if k == -1 {
-			return scanNeedMore, i, 0
-		}
-		if k != j {
-			j = k
-			continue
-		}
-		switch input[j] {
-		case ')':
-			return scanRow, i, j
-		case '(':
-			// No PXF value holds a '(' outside a string, list and block
-			// cells included, so this row is malformed however the input
-			// continues. The
-			// '(' may sit inside a malformed token, though (`0000-(0`
-			// lexes as one bad timestamp), so the error is only Parse's
-			// once that token is complete: end at the byte before the
-			// next one that ends every token.
-			// (The set is lexTimestamp's, the longest-running token.)
-			for k := j + 1; k < len(input); k++ {
-				switch input[k] {
-				case ' ', '\t', '\r', '\n', ',', ')', ']', '}', '#':
-					return scanBad, i, k - 1
-				case '/':
-					if k+1 == len(input) {
-						return scanNeedMore, i, 0
-					}
-					if input[k+1] == '/' || input[k+1] == '*' {
-						return scanBad, i, k - 1
-					}
+}
+
+// mayEndToken reports whether the bytes read since the waiting token was
+// last lexed could end it: a closing quote for a string (one not
+// escaped by an odd run of backslashes), `"""` for a triple-quoted one,
+// a quote or newline for a bytes literal, a newline for a line comment,
+// `*/` for a block comment, and for anything else a byte that cannot
+// continue an identifier, number, timestamp or duration. It only
+// decides when the lexer looks again, never what the token is; a byte
+// that ends a row, ')', always counts, so a complete row is never left
+// waiting for input.
+func (tr *DatasetReader) mayEndToken() bool {
+	buf, at, from := tr.pending, tr.waitAt, tr.waitFrom
+	tok, fresh := buf[at:], buf[from:]
+	switch {
+	case bytes.HasPrefix(tok, []byte(`"""`)):
+		return bytes.Contains(buf[max(from-2, at+3):], []byte(`"""`))
+	case bytes.HasPrefix(tok, []byte(`"`)) && from-at > 2:
+		for i, ch := range fresh {
+			if ch == '"' {
+				n := 0
+				for j := from + i - 1; j > at && buf[j] == '\\'; j-- {
+					n++
+				}
+				if n%2 == 0 {
+					return true
 				}
 			}
-			return scanNeedMore, i, 0
 		}
-		j++
+		return false
+	case bytes.HasPrefix(tok, []byte(`b"`)):
+		return bytes.ContainsAny(fresh, "\"\n")
+	case bytes.HasPrefix(tok, []byte("#")), bytes.HasPrefix(tok, []byte("//")):
+		return bytes.IndexByte(fresh, '\n') >= 0
+	case bytes.HasPrefix(tok, []byte("/*")):
+		return bytes.Contains(buf[max(from-1, at+2):], []byte("*/"))
 	}
-	return scanNeedMore, i, 0
+	for _, ch := range fresh {
+		if !(isIdentPart(ch) || ch == '.' || ch == ':' || ch == '+' || ch == '-' || ch >= 0x80) {
+			return true
+		}
+	}
+	return false
+}
+
+// scanHeader finds the end of the first `@dataset TYPE ( cols )` header
+// with the lexer: the offset just past the ')' that closes the column
+// list, the first ')' after an @dataset token. It returns found=false
+// when the input ends first. bad is the offset just past a complete
+// token the lexer rejected before the header ended, or 0; a header is
+// at most defaultHeaderMaxBytes, so it is lexed from the start on every
+// pull.
+func (tr *DatasetReader) scanHeader() (end int, found bool, bad int) {
+	inDataset := false
+	for at := 0; ; {
+		tok, tokEnd, ok := tr.nextToken(at)
+		if !ok || tok.Kind == EOF {
+			return 0, false, 0
+		}
+		switch {
+		case tok.Kind == ILLEGAL:
+			return 0, false, tokEnd
+		case tok.Kind == AT_DATASET:
+			inDataset = true
+		case inDataset && tok.Kind == RPAREN:
+			return tokEnd, true, 0
+		}
+		at = tokEnd
+	}
 }

@@ -20,7 +20,7 @@ import (
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
 
-// --- skipBlockComment: /* ... */ between rows ---
+// --- /* ... */ between rows ---
 
 func TestTableReader_BlockCommentBetweenRows(t *testing.T) {
 	in := `@dataset T (a)
@@ -42,7 +42,7 @@ func TestTableReader_BlockCommentBetweenRows(t *testing.T) {
 	assert.Equal(t, 2, count)
 }
 
-// --- skipBlockComment: /* ... */ inside the header area ---
+// --- /* ... */ inside the header area ---
 
 func TestTableReader_BlockCommentInHeader(t *testing.T) {
 	in := `@dataset /* row type */ T /* cols follow */ (a, b)
@@ -53,7 +53,7 @@ func TestTableReader_BlockCommentInHeader(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, tr.Columns())
 }
 
-// --- findAtTable: leading block comment before @dataset ---
+// --- leading block comment before @dataset ---
 
 func TestTableReader_LeadingBlockComment(t *testing.T) {
 	in := `/* document preamble explaining the
@@ -65,7 +65,7 @@ func TestTableReader_LeadingBlockComment(t *testing.T) {
 	assert.Equal(t, "T", tr.Type())
 }
 
-// --- findAtTable: leading line comments before @dataset ---
+// --- leading line comments before @dataset ---
 
 func TestTableReader_LeadingLineComments(t *testing.T) {
 	in := `# preamble line
@@ -77,7 +77,7 @@ func TestTableReader_LeadingLineComments(t *testing.T) {
 	assert.Equal(t, "T", tr.Type())
 }
 
-// --- findAtTable: false-match guard — "@dataset" appearing INSIDE a string
+// --- false-match guard — "@dataset" appearing INSIDE a string
 // in a leading directive must not be confused with the @dataset keyword.
 
 func TestTableReader_AtTableSubstringInsideStringDoesNotFalseMatch(t *testing.T) {
@@ -91,7 +91,7 @@ func TestTableReader_AtTableSubstringInsideStringDoesNotFalseMatch(t *testing.T)
 	assert.Equal(t, "header", tr.Directives()[0].Name)
 }
 
-// --- findAtTable: false-match guard — "@tableau" (ident-continuation
+// --- false-match guard — "@tableau" (ident-continuation
 // after @dataset) must not match as the @dataset keyword.
 
 func TestTableReader_AtTableauDoesNotFalseMatch(t *testing.T) {
@@ -107,7 +107,7 @@ func TestTableReader_AtTableauDoesNotFalseMatch(t *testing.T) {
 	assert.Equal(t, "tableau", tr.Directives()[0].Name)
 }
 
-// --- skipSimpleString: escape sequences inside string cells ---
+// --- escape sequences inside string cells ---
 
 func TestTableReader_EscapedQuoteInStringCell(t *testing.T) {
 	in := `@dataset T (s, n)
@@ -230,10 +230,9 @@ func TestTableReader_TailWhenPendingEmpty(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
-// --- Byte-at-a-time reader with strings / comments in rows. Exercises
-// the need-more-bytes branches of skipSimpleString, skipBytesLiteral,
-// skipBlockComment, and findMatchingParenSafe — they trigger when the
-// row scanner hits the end of the buffer mid-construct.
+// --- Byte-at-a-time reader with strings / comments in rows. Every
+// literal and comment is cut by a read, so the scan meets each one
+// unfinished at the buffer's end and must wait for the rest (#148).
 
 func TestTableReader_ChunkedReader_StringInRow(t *testing.T) {
 	in := `@dataset T (s, n)
@@ -311,8 +310,7 @@ content""")
 
 // --- Malformed leading directive: an unterminated string before
 // @dataset surfaces as a parse error from the header reader, not as
-// ErrNoDataset. Covers the error-propagation paths in scanHeaderEnd /
-// findAtTable / findNextChar.
+// ErrNoDataset.
 
 func TestTableReader_UnterminatedStringInLeadingDirective(t *testing.T) {
 	// The `\n` inside `"open` makes the string unterminated; the
@@ -340,30 +338,24 @@ func TestTableReader_AtTableWithoutOpenParen_ReportsParseError(t *testing.T) {
 	assert.Equal(t, perr.Error(), err.Error())
 }
 
-// --- Unterminated string AFTER @dataset but BEFORE `(`. Covers the
-// findNextChar error-propagation path in scanHeaderEnd (the previous
-// "leading directive" test triggers the findAtTable error path, not
-// findNextChar's).
+// --- Unterminated string AFTER @dataset but BEFORE `(`: the header
+// reader reports Parse's error, not ErrNoDataset.
 
 func TestTableReader_UnterminatedStringBetweenAtTableAndLParen(t *testing.T) {
 	// The `"open\n` sits between the `@dataset` keyword and the column
-	// list's `(`. findNextChar walks past `T` looking for `(`, hits the
-	// `"`, descends into skipSimpleString, and errors on the embedded
-	// newline.
+	// list's `(`.
 	in := "@dataset T \"open\n (a)\n(\"x\")"
 	_, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, pxf.ErrNoDataset)
 }
 
-// --- Malformed string BETWEEN rows. Covers findNextRow's error
-// propagation: the leading-whitespace/comment skip loop encounters
-// an unterminated string before the next `(`.
+// --- Malformed string BETWEEN rows: something other than a row or a
+// directive where the next row could begin.
 
 func TestTableReader_UnterminatedStringBetweenRows(t *testing.T) {
-	// First row reads cleanly. Second "row" position starts with a
-	// `"` that's unterminated by a newline — findNextRow's whitespace/
-	// comment skip loop hits skipStringOrComment which errors.
+	// First row reads cleanly. Where the second row could begin there
+	// is a string instead.
 	in := "@dataset T (a)\n(\"x\")\n\"open\n(\"y\")"
 	tr, err := pxf.NewDatasetReader(strings.NewReader(in))
 	require.NoError(t, err)
