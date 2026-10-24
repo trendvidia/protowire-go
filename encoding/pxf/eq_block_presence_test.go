@@ -217,18 +217,26 @@ func TestEqBlock_NullInsideElementRoundTrips(t *testing.T) {
 	}
 }
 
+// The Any body here is a Container, whose payload is a message field and
+// so can hold null; a scalar in an Any body cannot (#150).
 func TestEqBlock_NullInsideAnyRoundTrips(t *testing.T) {
 	fd, resolver := compileAnyProto(t)
 	desc := fd.Messages().ByName("Container")
+	resolver.descs["any_test.v1.Container"] = desc
+	opts := pxf.UnmarshalOptions{TypeResolver: resolver}
 	m := dynamicpb.NewMessage(desc)
-	res, err := pxf.UnmarshalOptions{TypeResolver: resolver}.UnmarshalFull(
-		[]byte(`payload { @type = "any_test.v1.Detail" reason = null code = 1 }`), m)
+	res, err := opts.UnmarshalFull(
+		[]byte(`payload { @type = "any_test.v1.Container" payload = null name = "x" }`), m)
 	require.NoError(t, err)
-	require.True(t, res.IsNull("payload.reason"))
+	require.True(t, res.IsNull("payload.payload"))
 
 	out, err := pxf.MarshalOptions{TypeResolver: resolver, NullFields: res}.Marshal(m)
 	require.NoError(t, err)
-	assert.Contains(t, string(out), "reason = null")
+	assert.Equal(t, 1, strings.Count(string(out), "payload = null"), "%s", out)
+
+	_, err = opts.UnmarshalFull(
+		[]byte(`payload { @type = "any_test.v1.Detail" reason = null code = 1 }`), dynamicpb.NewMessage(desc))
+	require.ErrorContains(t, err, `null is not allowed on scalar field "reason"`)
 }
 
 const secretPathsProtoSrc = `

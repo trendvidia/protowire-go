@@ -46,6 +46,27 @@ format changes.
 
 ### Changed
 
+- **`null` is a decode error on a field that cannot hold it; `Marshal`
+  writes `null` only where it can**
+  ([#150](https://github.com/trendvidia/protowire-go/issues/150),
+  [#151](https://github.com/trendvidia/protowire-go/issues/151);
+  [protowire#339](https://github.com/trendvidia/protowire/issues/339)).
+  The draft requires a decoder to reject `null` bound to a singular
+  scalar that is not a wrapper, or to a repeated field; this decoder
+  accepted both and left the field unset, following the README's `_null`
+  convention, which the spec repo has now narrowed to fields that can
+  hold `null`. `Unmarshal` and `UnmarshalFull` (and so `Scan`/`BindRow`)
+  now fail at the `null` with `null is not allowed on scalar field "age":
+  declare it as a wrapper type (google.protobuf.Int32Value or similar)
+  to make it nullable`, and likewise for a repeated or map field. A
+  proto3 `optional` scalar and a oneof's scalar member are scalars for
+  this rule. A singular message field, wrappers included, still accepts
+  `null` and records it in `Result` and the `_null` mask. `Marshal`
+  writes `field = null` only for such a field: a scalar named in a
+  `_null` mask (from another producer, or a mask written before this
+  release) is written as its value, so `Marshal`'s output decodes. A
+  document carrying `null` on a scalar, repeated or map field decoded
+  before and is rejected now; declare the field as its wrapper type.
 - **A raw newline inside a simple string is an error**
   ([#143](https://github.com/trendvidia/protowire-go/issues/143)). The
   draft says decoders MUST reject an unescaped LF in a `"..."` string
