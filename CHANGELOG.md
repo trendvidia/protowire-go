@@ -124,6 +124,14 @@ format changes.
   already in the buffer is parsed in one pass, so ordinary streaming is
   13% faster than before (100k rows in 4 KiB reads, n=8). A reader fed
   one byte per `Read` no longer allocates a 4 KiB buffer per call.
+- **A reader chained on `Tail()` keeps the comments before the next
+  directive** ([#149](https://github.com/trendvidia/protowire-go/issues/149)).
+  `Parse` gives the comments between a table's last row and the next
+  directive (a trailing `# c` on the row's line included) to that
+  directive as its `LeadingComments`. `Next` consumed them while
+  looking for another row, so `NewDatasetReader(tr.Tail()).Directives()`
+  had none. They now stay in the `Tail`, and a reader built on a `Tail`
+  files them under the directive, as `Parse` does.
 
 ## [1.9.0] — 2026-10-23
 
