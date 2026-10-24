@@ -138,7 +138,7 @@ tr1, _ := pxf.NewDatasetReader(src)
 tr2, err := pxf.NewDatasetReader(tr1.Tail())
 ```
 
-A cell may hold any value, lists (`[...]`) and blocks (`{...}`) included; it binds as `<column> = <value>` would in a body. Per-row arity and cell errors surface as the offending row is consumed, not deferred to end-of-input; a dotted column (not yet supported) is a header error, returned by `NewDatasetReader` — see the [Streaming consumption](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) note in draft §3.4.4.
+A cell may hold any value, lists (`[...]`) and blocks (`{...}`) included; it binds as `<column> = <value>` would in a body. Per-row arity and cell errors surface as the offending row is consumed, not deferred to end-of-input; a column may be a dotted path into a sub-message (`descriptor.energy`), and the cells sharing a prefix bind into one block. A header that repeats a path or names a field beside a path inside it is an error, returned by `NewDatasetReader` — see the [Streaming consumption](https://github.com/trendvidia/protowire/blob/main/docs/draft-trendvidia-protowire-00.txt) note in draft §3.4.4.
 
 ### `Scan` and `BindRow`: per-row binding
 
@@ -180,7 +180,7 @@ for _, t := range batch {
 }
 ```
 
-A row depends only on its message and the columns, so appending to an existing file never rewrites earlier bytes. Both functions refuse what a v1 cell cannot hold (dotted, repeated, map or block-valued columns) and a column list that omits a `(pxf.required)` field. An unset field is an empty cell, except where an empty cell would read back as something else: a field with `(pxf.default)` is written `null` if it is message-typed, or its zero value if it is a proto3 scalar, so the default does not replace it. An unset `optional` scalar with a default is an empty cell and reads back as its default, since the draft rejects `null` on a scalar. A message-typed field named in the message's `_null` mask is written `null`, as `Marshal` writes it. The columns may be any subset of the message's fields, as long as every `(pxf.required)` field is among them. A schema that `ValidateDescriptor` refuses is refused, since `Unmarshal` would not read the table back.
+A row depends only on its message and the columns, so appending to an existing file never rewrites earlier bytes. Both functions refuse dotted columns and repeated, map or block-valued columns, which the reader accepts but the writer does not write yet ([#155](https://github.com/trendvidia/protowire-go/issues/155)), and a column list that omits a `(pxf.required)` field. An unset field is an empty cell, except where an empty cell would read back as something else: a field with `(pxf.default)` is written `null` if it is message-typed, or its zero value if it is a proto3 scalar, so the default does not replace it. An unset `optional` scalar with a default is an empty cell and reads back as its default, since the draft rejects `null` on a scalar. A message-typed field named in the message's `_null` mask is written `null`, as `Marshal` writes it. The columns may be any subset of the message's fields, as long as every `(pxf.required)` field is among them. A schema that `ValidateDescriptor` refuses is refused, since `Unmarshal` would not read the table back.
 
 ### Schema bind-time checks
 

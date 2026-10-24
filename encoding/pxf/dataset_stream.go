@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // defaultHeaderMaxBytes caps the byte budget for the @dataset header
@@ -91,6 +93,10 @@ type DatasetReader struct {
 	lx lexer // the scan's lexer, reset for each token (nextToken)
 
 	chained bool // built on another reader's Tail, so it starts mid-document
+
+	// pathsChecked is the last row type Scan checked columns against
+	// (checkColumnPaths), so a table of one type checks them once.
+	pathsChecked protoreflect.MessageDescriptor
 }
 
 // NewDatasetReader consumes any leading directives (`@type`, `@<name>`,
@@ -371,7 +377,7 @@ func (tr *DatasetReader) readHeader() error {
 			// parseDocument is happy with an @dataset directive that has
 			// no rows yet, and validates everything we care about
 			// (leading-directive shape, @type / @dataset conflict,
-			// dotted columns, etc.).
+			// repeated or overlapping column paths, etc.).
 			doc, perr := tr.parseHeader(tr.pending[:headerEnd])
 			if perr != nil {
 				return perr
