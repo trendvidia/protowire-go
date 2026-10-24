@@ -305,3 +305,34 @@ func TestOnSecretField_PathNamesTheBody(t *testing.T) {
 		}
 	}
 }
+
+const nullMaskNumberProtoSrc = `
+syntax = "proto3";
+package nullnum.v1;
+
+import "google/protobuf/field_mask.proto";
+
+message Root {
+  repeated Elem items = 1;
+  map<string, Elem> by_key = 2;
+  Elem one = 3;
+  google.protobuf.FieldMask _null = 15;
+}
+
+message Elem {
+  int32 x = 15;
+}
+`
+
+// Only the root's _null field is skipped by Marshal. An element field
+// that shares its number is data and is written.
+func TestMarshal_ElementFieldWithNullMaskNumberIsWritten(t *testing.T) {
+	desc := compilePlacementSrc(t, nullMaskNumberProtoSrc, "nullnum.v1", "Root")
+	m := dynamicpb.NewMessage(desc)
+	require.NoError(t, pxf.Unmarshal([]byte(`items = [{ x = 7 }] by_key = { "k": { x = 8 } } one { x = 9 }`), m))
+	out, err := pxf.Marshal(m)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "x = 7")
+	assert.Contains(t, string(out), "x = 8")
+	assert.Contains(t, string(out), "x = 9")
+}

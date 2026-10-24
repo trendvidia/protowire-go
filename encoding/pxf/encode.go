@@ -137,8 +137,11 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 			continue
 		}
 
-		// Skip the _null FieldMask field itself.
-		if e.nullMaskFd != nil && e.pathPrefix == "" && fd.Number() == e.nullMaskFd.Number() {
+		// Skip the root's _null FieldMask field itself. Level 0 is the
+		// root: a list element, map value or Any body has an empty path
+		// too when no null set is tracked, and its field of the same
+		// number is data.
+		if e.nullMaskFd != nil && level == 0 && fd.Number() == e.nullMaskFd.Number() {
 			continue
 		}
 
@@ -226,12 +229,12 @@ func (e *encoder) encodeMessageField(fd protoreflect.FieldDescriptor, sub protor
 	e.writeIndent(level)
 	e.buf.WriteString(string(fd.Name()))
 	e.buf.WriteString(" {\n")
-	saved := e.pathPrefix
-	e.pathPrefix = e.pathPrefix + string(fd.Name()) + "."
-	if err := e.encodeMessage(sub, level+1); err != nil {
+	saved := e.enter(fd.Name())
+	err := e.encodeMessage(sub, level+1)
+	e.pathPrefix = saved
+	if err != nil {
 		return err
 	}
-	e.pathPrefix = saved
 	e.writeIndent(level)
 	e.buf.WriteString("}\n")
 	return nil
