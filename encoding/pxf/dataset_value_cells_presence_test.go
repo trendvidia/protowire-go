@@ -46,10 +46,7 @@ func TestValueCells_BlockCellAppliesNestedDefault(t *testing.T) {
 	// Row's own fields carry no annotation; Inner's label does. An empty
 	// block cell is a present, empty Inner, so label takes its default,
 	// as it does for the body `inner = {}`.
-	//
-	// A set value inside a block cell, and a nested (pxf.required), are
-	// not tested here: the body decoder mishandles both in the
-	// `field = { ... }` form the cell is bound through (#156).
+
 	table := "@dataset nestedpres.v1.Row (id, inner)\n(\"r\", {})\n"
 
 	want := dynamicpb.NewMessage(desc)
@@ -69,4 +66,32 @@ func TestValueCells_BlockCellAppliesNestedDefault(t *testing.T) {
 	scanned := dynamicpb.NewMessage(desc)
 	require.NoError(t, tr.Scan(scanned))
 	require.True(t, proto.Equal(want, scanned), "Scan %v, body %v", scanned, want)
+}
+
+// A value set inside a block cell survives, and a required field inside
+// one is enforced: the cell is bound as `inner = { ... }`, which records
+// presence under `inner.` like the block-tail form (#156).
+func TestValueCells_BlockCellKeepsValuesAndEnforcesRequired(t *testing.T) {
+	desc := compilePlacementSrc(t, nestedPresenceProtoSrc, "nestedpres.v1", "Row")
+	label := desc.Fields().ByName("inner").Message().Fields().ByName("label")
+
+	table := "@dataset nestedpres.v1.Row (id, inner)\n(\"r\", { label = \"x\" })\n"
+	tr, err := pxf.NewDatasetReader(strings.NewReader(table))
+	require.NoError(t, err)
+	m := dynamicpb.NewMessage(desc)
+	require.NoError(t, tr.Scan(m))
+	require.Equal(t, "x", m.Get(desc.Fields().ByName("inner")).Message().Get(label).String())
+
+	doc, err := pxf.Parse([]byte(table))
+	require.NoError(t, err)
+	b := dynamicpb.NewMessage(desc)
+	require.NoError(t, pxf.BindRow(b, doc.Datasets[0].Columns, doc.Datasets[0].Rows[0]))
+	require.True(t, proto.Equal(m, b), "Scan %v, BindRow %v", m, b)
+
+	bad := "@dataset nestedpres.v1.Row (id, inner)\n(\"s\", { deep {} })\n"
+	tr, err = pxf.NewDatasetReader(strings.NewReader(bad))
+	require.NoError(t, err)
+	err = tr.Scan(dynamicpb.NewMessage(desc))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `required field "inner.deep.n" is absent`)
 }
