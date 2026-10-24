@@ -62,7 +62,8 @@ func TestIllegalTokenDiagnosticAtEveryValuePosition(t *testing.T) {
 		{"stray character", "string_field = $\n", `unexpected character '$'`, "1:16"},
 		{"bare @", "string_field = @\n", `"@" must be followed by a directive name`, "1:16"},
 		{"string escape", `string_field = "\z"` + "\n", `unknown escape sequence \z`, "1:16"},
-		{"unterminated string", "string_field = \"abc\n", "unterminated string", "1:16"},
+		{"unterminated string", "string_field = \"abc", "unterminated string", "1:16"},
+		{"newline in a string", "string_field = \"abc\n", "newline in string literal", "1:16"},
 		{"bytes literal", `bytes_field = b"!!!"` + "\n", "invalid base64 in bytes literal", "1:15"},
 	}
 
