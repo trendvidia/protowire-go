@@ -550,7 +550,8 @@ func (tr *DatasetReader) scanRow() (kind rowScan, start, end int) {
 
 // mayEndToken reports whether the bytes read since the waiting token was
 // last lexed could end it: a closing quote for a string (one not
-// escaped by an odd run of backslashes), `"""` for a triple-quoted one,
+// escaped by an odd run of backslashes) or a newline, which a simple
+// string cannot hold, `"""` for a triple-quoted one,
 // a quote or newline for a bytes literal, a newline for a line comment,
 // `*/` for a block comment, and for anything else a byte that cannot
 // continue an identifier, number, timestamp or duration. It only
@@ -565,6 +566,9 @@ func (tr *DatasetReader) mayEndToken() bool {
 		return bytes.Contains(buf[max(from-2, at+3):], []byte(`"""`))
 	case bytes.HasPrefix(tok, []byte(`"`)) && from-at > 2:
 		for i, ch := range fresh {
+			if ch == '\n' {
+				return true // a simple string cannot hold one (#143)
+			}
 			if ch == '"' {
 				n := 0
 				for j := from + i - 1; j > at && buf[j] == '\\'; j-- {

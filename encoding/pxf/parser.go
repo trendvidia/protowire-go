@@ -278,10 +278,10 @@ func (o ParseOptions) Parse(input []byte) (*Document, error) {
 //   - Unclosed blocks and lists are closed at EOF with their parsed
 //     contents intact; one in a @dataset cell is closed at the row's
 //     ')' instead, so the rows after it still parse.
-//   - An unterminated string ends at the newline (or EOF). Note this
-//     differs from [Parse], which permits a raw newline inside a
-//     simple-quoted string; in tolerant mode the newline is taken as
-//     evidence of a mid-edit literal.
+//   - An unterminated string ends at the newline (or EOF). [Parse]
+//     rejects a raw newline inside a simple-quoted string (draft
+//     § Strings); in tolerant mode it is taken as evidence of a
+//     mid-edit literal, and the next line parses on.
 //   - Unterminated triple-quoted strings, bytes literals, and block
 //     comments end at EOF (bytes literals at the newline).
 //   - A malformed directive is skipped to the next directive or body
