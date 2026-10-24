@@ -13,6 +13,16 @@ format changes.
 
 ### Added
 
+- **`AppendDatasetRow` writes list, map and block cells**
+  ([#155](https://github.com/trendvidia/protowire-go/issues/155)). Since
+  value cells (v1.9.0, protowire#341) the reader accepts a repeated
+  field, a map or a sub-message in a cell, but the writer still refused
+  such a column as one "a v1 cell cannot hold". Any field can now be a
+  column: the cell is the text `Marshal` writes for the field, on one
+  line, so a table keeps one row per line. A `pxf.Secret` with a hint or
+  fingerprint is written as its block instead of refused. The writer
+  still refuses dotted columns. Covered by the seeded round trip,
+  now over lists, maps, sub-messages, message lists and keyed lists.
 - **`@dataset` dotted column paths** (trendvidia/protowire#342, draft
   `-01` §3.4.4). A column may be a path into a sub-message, such as
   `descriptor.energy`. A row binds as the body that groups its non-empty
