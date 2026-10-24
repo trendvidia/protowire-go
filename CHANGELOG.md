@@ -20,9 +20,17 @@ format changes.
   such a column as one "a v1 cell cannot hold". Any field can now be a
   column: the cell is the text `Marshal` writes for the field, on one
   line, so a table keeps one row per line. A `pxf.Secret` with a hint or
-  fingerprint is written as its block instead of refused. The writer
-  still refuses dotted columns. Covered by the seeded round trip,
-  now over lists, maps, sub-messages, message lists and keyed lists.
+  fingerprint is written as its block instead of refused. Columns
+  may be paths too: `AppendDatasetHeader` accepts the column paths the
+  reader accepts (protowire#342, #159), and `AppendDatasetRow` writes a
+  leaf through its parents, an unset parent giving an empty cell; a path may
+  go into a `pxf.Secret` (`sec.hint`), as the reader allows. A
+  sub-message that is set but has every column under it empty reads
+  back unset, which is accepted (owner decision on #155), unless that
+  makes the row unreadable: a required sub-message whose cells are all
+  empty, or a present one whose required field is not a column, is
+  refused. Covered by the seeded round trip, now over lists, maps,
+  sub-messages, message lists, keyed lists and dotted paths.
 - **`@dataset` dotted column paths** (trendvidia/protowire#342, draft
   `-01` §3.4.4). A column may be a path into a sub-message, such as
   `descriptor.energy`. A row binds as the body that groups its non-empty
@@ -92,9 +100,6 @@ format changes.
 - `AppendDatasetHeader` and `AppendDatasetRow` apply the reader's header
   rules first, with its messages, so the writer cannot write a header
   its reader rejects.
-- `AppendDatasetHeader` still refuses dotted columns, now with a message
-  that says the writer does not support them yet
-  ([#155](https://github.com/trendvidia/protowire-go/issues/155)).
 - **`check/protovalidate` requires the parent module at v1.9.0 instead of
   v1.8.1.** Keeps the nested module on the parent it ships with, the
   #134 / #139 precedent. Nothing in v1.9.0 reaches the adapter (the
