@@ -45,13 +45,12 @@ import (
 //
 // msg's descriptor MUST resolve the field names this reader's
 // Columns() list refers to. Type compatibility against the @dataset
-// header's declared type is the caller's responsibility. A dotted
-// column that does not resolve against msg's type, or that goes
-// through a repeated, map or scalar field or into a type written as a
-// literal, fails every row bound into that type, its cells empty or
-// not, with an error at the row (draft §3.4.4). A plain column whose
-// cell does not match msg's field surfaces as an unknown-field or
-// type-mismatch error from the underlying Unmarshal call.
+// header's declared type is the caller's responsibility. A column that
+// names no field of msg's type, or a dotted column that goes through a
+// repeated, map or scalar field or into a type written as a literal,
+// fails every row bound into that type, its cells empty or not, with an
+// error at the row (draft §3.4.4). A cell that does not match its field
+// surfaces as a type-mismatch error from the underlying Unmarshal call.
 //
 // Cell-state semantics (mirrors draft §3.4.4):
 //

@@ -44,6 +44,14 @@ format changes.
 - **A header that names the same plain column twice, `(a, a)`, is now
   rejected.** It used to parse, and for a repeated field the two cells
   were concatenated.
+- **A plain column that names no field of the row type fails `BindRow`
+  and `Scan` on every row, its cells empty or not**, as a dotted column
+  that names no field does (draft §3.4.4: each column entry names a field
+  declared on the type). Before, a row whose cell in that column was
+  empty bound without error.
+- `AppendDatasetHeader` and `AppendDatasetRow` apply the reader's header
+  rules first, with its messages, so the writer cannot write a header
+  its reader rejects.
 - `AppendDatasetHeader` still refuses dotted columns, now with a message
   that says the writer does not support them yet
   ([#155](https://github.com/trendvidia/protowire-go/issues/155)).

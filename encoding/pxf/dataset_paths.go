@@ -44,25 +44,24 @@ func isPathPrefix(prefix, path string) bool {
 	return len(path) > len(prefix) && path[len(prefix)] == '.' && strings.HasPrefix(path, prefix)
 }
 
-// checkColumnPaths checks every dotted column against the row type desc,
-// and returns the message for the first that breaks a rule, or "". Each
+// checkColumnPaths checks every column against the row type desc, and
+// returns the message for the first that breaks a rule, or "". Each
 // segment names a field, and each segment but the last names a singular
 // message field whose type is not written as a literal of its own (a
 // Timestamp, Duration, wrapper, pxf.BigInt, pxf.Decimal or
 // pxf.BigFloat). A path has no index, so it cannot go through a repeated
 // or map field. A pxf.Secret has a block form as well as its literal
-// (`pw { value = "x" hint = "h" }`), so a path may go into one. A column
-// without a dot is left to the decoder, which reports an unknown field
-// as it does in a body. A header that passes allocates nothing, since
-// [BindRow] checks it on every row.
+// (`pw { value = "x" hint = "h" }`), so a path may go into one. A plain
+// column is a path of one segment, so naming no field of desc is a
+// header error for it too, whether its cells are empty or not (draft
+// §3.4.4: each column entry names a field declared on the type). A
+// header that passes allocates nothing, since [BindRow] checks it on
+// every row.
 func checkColumnPaths(desc protoreflect.MessageDescriptor, cols []string) string {
 	if i, msg := columnPathError(cols); i >= 0 {
 		return msg
 	}
 	for _, c := range cols {
-		if !containsDot(c) {
-			continue
-		}
 		md := desc
 		for rest := c; ; {
 			seg, tail, more := strings.Cut(rest, ".")

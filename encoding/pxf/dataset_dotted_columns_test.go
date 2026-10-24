@@ -169,7 +169,7 @@ func TestDottedColumns_NullAppliesToTheLeaf(t *testing.T) {
 
 // A path through a repeated or map field, into a type with a literal
 // spelling, through a scalar, or naming no field is rejected (decisions
-// 3 and 6). The check is on the header: a row of empty cells is
+// 3 and 6), and so is a plain column naming no field. The check is on the header: a row of empty cells is
 // rejected too.
 func TestDottedColumns_HeaderPathsAreCheckedAgainstTheType(t *testing.T) {
 	md := dottedDesc(t)
@@ -181,6 +181,8 @@ func TestDottedColumns_HeaderPathsAreCheckedAgainstTheType(t *testing.T) {
 		{"plain.x", `"plain" is not a message field`},
 		{"desc.nope", `dc.v1.Desc has no field "nope"`},
 		{"desc.tempo.nope", `dc.v1.Tempo has no field "nope"`},
+		// A plain column is a path of one segment.
+		{"nope", `dc.v1.Event has no field "nope"`},
 	} {
 		t.Run(tc.col, func(t *testing.T) {
 			for _, row := range []string{`("x", 1)`, `("x", )`} {
