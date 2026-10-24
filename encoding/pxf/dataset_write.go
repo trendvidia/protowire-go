@@ -100,7 +100,13 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 // out: the column list is refused.
 //
 // A list, map or message that needs a block is written as Marshal writes
-// it, on one line, so a table keeps one row per line.
+// it, on one line, so a table keeps one row per line. Inside it, an
+// unset field with (pxf.default) or (pxf.required) follows the rules
+// above, since the reader applies both in every body of a cell (#161):
+// a scalar without presence is written as its zero value, a
+// message-typed field `null`, an `optional` or oneof scalar not at all
+// (it reads back as its default), and an unset required field with
+// presence is an error.
 //
 // It returns an error, and dst unchanged, for the column errors of
 // AppendDatasetHeader and for a value Marshal refuses.
@@ -271,6 +277,32 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 	return nil
 }
 
+// cellUnset decides how a value cell writes fd, the i'th field of msg,
+// which msg does not set. Inside a cell, as in a row, the reader applies
+// (pxf.default) to an absent field and checks (pxf.required) (#161), so
+// an unset annotated field is written the way writeCell writes one: a
+// field without presence as its zero value (write), a message-typed
+// field as null, and an optional or oneof scalar not at all, which reads
+// back as its default. A oneof member is not written when a sibling is
+// set: the sibling keeps its default off. An unset required field with
+// presence cannot be written. An unannotated field is not written.
+func cellUnset(msg protoreflect.Message, fd protoreflect.FieldDescriptor, i int, path string) (write, null bool, err error) {
+	o := datasetCellOptions(msg.Descriptor())[i]
+	switch {
+	case !o.hasDefault && !o.required:
+		return false, false, nil
+	case !fd.HasPresence():
+		return true, false, nil
+	case o.required:
+		return false, false, fmt.Errorf("%s is unset, and the field is (pxf.required)", path)
+	}
+	if od := fd.ContainingOneof(); od != nil && !od.IsSynthetic() && msg.WhichOneof(od) != nil {
+		return false, false, nil
+	}
+	isMsg := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
+	return false, isMsg, nil
+}
+
 // writeValueCell writes a list, map or block value as one cell
 // (protowire#341): the text Marshal writes for the field, on one line, so
 // a table keeps one row per line. The field is encoded as Marshal
@@ -280,7 +312,7 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 // newline it writes separates tokens.
 func (e *encoder) writeValueCell(fd protoreflect.FieldDescriptor, v protoreflect.Value, sub protoreflect.Message) error {
 	var tmp bytes.Buffer
-	inner := &encoder{buf: &tmp, nullSet: e.nullSet}
+	inner := &encoder{buf: &tmp, nullSet: e.nullSet, cellBodies: true}
 	var err error
 	switch {
 	case fd.IsMap():

@@ -136,7 +136,7 @@ message EveryAcceptedPlacement {
 }
 `
 
-func compilePlacementSrc(t *testing.T, src, pkg, name string) protoreflect.MessageDescriptor {
+func compilePlacementSrc(t testing.TB, src, pkg, name string) protoreflect.MessageDescriptor {
 	t.Helper()
 	sources := map[string]string{
 		"test.proto":            src,

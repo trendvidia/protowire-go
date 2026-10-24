@@ -6,6 +6,7 @@ package pxf
 import (
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -121,6 +122,7 @@ type directDecoder struct {
 	elemDepth      int                            // list elements / map values entered; a null under one stays out of the _null mask
 	onSecret       func(path, value string) error // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
 	keyedElem      *keyedElemState                // context for the next decodeFields call: it decodes one element of a keyed repeated field (draft -01 §3.13)
+	postDecodeAny  bool                           // run postDecode on each Any body before packing it (UnmarshalFull without SkipPostDecode)
 }
 
 func (d *directDecoder) advance() {
@@ -214,6 +216,7 @@ func unmarshalDirectFull(data []byte, msg protoreflect.Message, o UnmarshalOptio
 	d.result = newResult()
 	d.rootMsg = msg
 	d.nullMaskFd = findNullMaskField(msg.Descriptor())
+	d.postDecodeAny = !o.SkipPostDecode
 	d.advance()
 
 	if err := d.consumeDirectives(d.result); err != nil {
@@ -1014,6 +1017,12 @@ func (d *directDecoder) decodeAnyInner(msg protoreflect.Message, fd protoreflect
 	inner := dynamicpb.NewMessage(innerDesc)
 	saved := d.enter(fd.Name())
 	err = d.decodeFields(inner.ProtoReflect(), true)
+	// The body is packed to bytes below, out of reach of the post-decode
+	// pass over the root, so it takes the pass here, under its own path
+	// (#161).
+	if err == nil && d.postDecodeAny {
+		err = postDecode(inner.ProtoReflect(), d.result, nil, d.pathPrefix)
+	}
 	d.pathPrefix = saved
 	if err != nil {
 		return err
@@ -1876,11 +1885,20 @@ func addToNullMask(rootMsg protoreflect.Message, nullMaskFd protoreflect.FieldDe
 }
 
 // postDecode validates required fields and applies defaults, recursing into
-// nested messages that were present in the input.
+// the message bodies the input wrote: present singular message fields,
+// and the elements of present lists and the values of present maps, each
+// under the path the decoder recorded its fields at (`items[0].`,
+// `by_key["k"].`). The draft's rules have no exception for elements
+// (#161). Any bodies take the pass when they are decoded (decodeAnyInner).
 func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflect.FieldDescriptor, pathPrefix string) error {
 	desc := msg.Descriptor()
 	fields := desc.Fields()
+	plan := postDecodePlan(desc)
 	for i := range fields.Len() {
+		p := plan[i]
+		if !p.annotated && !p.visit {
+			continue // nothing to check here or below
+		}
 		fd := fields.Get(i)
 		if nullMaskFd != nil && fd.Number() == nullMaskFd.Number() {
 			continue
@@ -1888,11 +1906,12 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 		path := pathPrefix + string(fd.Name())
 		_, isPresent := result.presentFields[path]
 		if !isPresent {
-			// One options pass for both annotations, in both their
-			// spellings — see [pxfFieldOptions]. This used to be an
-			// IsRequired call plus a Default call, i.e. two full passes
-			// over the field's options for every absent field.
-			opts := pxfFieldOptions(fd)
+			if !p.annotated {
+				continue
+			}
+			// Both annotations, in both their spellings, read once per
+			// message type ([postDecodePlan], [pxfFieldOptions]).
+			opts := p.opts
 			if opts.required {
 				return errorf(Position{Line: 1, Column: 1}, "required field %q is absent", path)
 			}
@@ -1901,15 +1920,55 @@ func postDecode(msg protoreflect.Message, result *Result, nullMaskFd protoreflec
 					return err
 				}
 			}
-		} else if (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) &&
-			!fd.IsList() && !fd.IsMap() && !result.IsNull(path) && msg.Has(fd) {
-			// Recurse into present, non-null message fields.
-			sub := msg.Mutable(fd).Message()
-			if err := postDecode(sub, result, nil, path+"."); err != nil {
+		} else if p.visit && !result.IsNull(path) && msg.Has(fd) {
+			if err := postDecodeBodies(msg, fd, result, path); err != nil {
 				return err
 			}
 		}
 		// null + default → do NOT apply default (null is intentional)
+	}
+	return nil
+}
+
+// postDecodeBodies runs postDecode on the message bodies held by fd, a
+// present, non-null field of msg at path: the message itself, each list
+// element, or each map value. Scalar fields hold none. Map values go in
+// key order, so the first error is the same on every run.
+func postDecodeBodies(msg protoreflect.Message, fd protoreflect.FieldDescriptor, result *Result, path string) error {
+	switch {
+	case fd.IsMap():
+		if vk := fd.MapValue().Kind(); vk != protoreflect.MessageKind && vk != protoreflect.GroupKind {
+			return nil
+		}
+		m := msg.Mutable(fd).Map()
+		type entry struct {
+			path string
+			body protoreflect.Message
+		}
+		entries := make([]entry, 0, m.Len())
+		m.Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
+			entries = append(entries, entry{path + keySuffix(k), v.Message()})
+			return true
+		})
+		slices.SortFunc(entries, func(a, b entry) int { return strings.Compare(a.path, b.path) })
+		for _, e := range entries {
+			if result.IsNull(e.path) {
+				continue
+			}
+			if err := postDecode(e.body, result, nil, e.path+"."); err != nil {
+				return err
+			}
+		}
+	case fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind:
+	case fd.IsList():
+		l := msg.Mutable(fd).List()
+		for i := range l.Len() {
+			if err := postDecode(l.Get(i).Message(), result, nil, path+indexSuffix(i)+"."); err != nil {
+				return err
+			}
+		}
+	default:
+		return postDecode(msg.Mutable(fd).Message(), result, nil, path+".")
 	}
 	return nil
 }
