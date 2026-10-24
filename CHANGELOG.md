@@ -11,6 +11,18 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A raw newline inside a simple string is an error**
+  ([#143](https://github.com/trendvidia/protowire-go/issues/143)). The
+  draft says decoders MUST reject an unescaped LF in a `"..."` string
+  (§ Strings), and `Parse`, `Unmarshal`, `UnmarshalFull` and
+  `DatasetReader` kept it in the literal instead. They now fail at the
+  string with `newline in string literal: write it as \n, or use a
+  """triple-quoted""" string`. `ParseTolerant` still ends the
+  string at the newline and parses on. The conformance row is
+  [protowire#350](https://github.com/trendvidia/protowire/issues/350).
+
 ### Fixed
 
 - **`DatasetReader` finds rows with the lexer, in time linear in the

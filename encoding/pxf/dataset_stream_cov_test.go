@@ -128,9 +128,8 @@ func TestTableReader_EscapedQuoteInStringCell(t *testing.T) {
 }
 
 // --- A raw LF inside a simple string: the stream decides exactly as
-// Parse does, because the row goes through the same parser. (Parse
-// accepts it today although draft §3.5 says MUST reject; when the
-// lexer is fixed both reject together.)
+// Parse does, because the row goes through the same lexer and parser.
+// Both reject it (draft § Strings; #143).
 
 func TestTableReader_NewlineInsideStringInRow(t *testing.T) {
 	in := "@dataset T (s)\n(\"open\n\")"
