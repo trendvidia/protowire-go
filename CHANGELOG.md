@@ -13,6 +13,33 @@ format changes.
 
 ### Added
 
+- **`@type = "<type-url>"` opens an `Any` block everywhere, and `Parse`
+  accepts it** ([#173](https://github.com/trendvidia/protowire-go/issues/173),
+  draft `-01` "Any Blocks",
+  [protowire#354](https://github.com/trendvidia/protowire/issues/354)).
+  `Unmarshal` accepted the type entry in a singular `Any` field only,
+  `Parse` rejected it everywhere, and `Marshal` with a `TypeResolver`
+  wrote it, so `Marshal`'s output did not parse and a `@dataset` cell
+  could not hold an `Any` body. The draft now specifies the form, and:
+  `Parse` and `ParseTolerant` accept a type entry as the first entry of
+  any block, as the new AST node `TypeEntry`, which `FormatDocument`
+  writes back; `Unmarshal` accepts it in list elements and map values
+  too; the URL is stored verbatim in `type_url`. A type entry anywhere
+  else is an error naming the rule, and one with no `TypeResolver` says
+  so instead of reporting a syntax error. An `Any` block without a type
+  entry is the `Any`'s own fields in both spellings: `payload = {
+  type_url = ... }` used to fail when a resolver was set.
+  `DatasetReader.Scan` binds with the reader's `TypeResolver`, and the
+  new `UnmarshalOptions.BindRow` is `BindRow` under options, so a cell
+  holding an `Any` block with a type entry binds. A row type that
+  reaches an `Any` field takes the full decoder, so the defaults of the
+  type a cell names apply (#161).
+- **One document packs an `Any` body to the same bytes every time.** The
+  decoder packed a typed `Any` body with a plain `proto.Marshal`, which
+  orders a dynamic message's fields differently from run to run: over
+  300 decodes of one document, main produced two encodings of `value`,
+  so two decodes of one document were not `proto.Equal`. It packs
+  deterministically now.
 - **`AppendDatasetRow` writes list, map and block cells**
   ([#155](https://github.com/trendvidia/protowire-go/issues/155)). Since
   value cells (v1.9.0, protowire#341) the reader accepts a repeated

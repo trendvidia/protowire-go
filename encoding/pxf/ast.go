@@ -231,6 +231,24 @@ func (*Block) entryNode()      {}
 func (b *Block) pos() Position { return b.Pos }
 func (b *Block) end() Position { return b.End }
 
+// TypeEntry is the type entry `@type = "<type-url>"` that may open a
+// block bound to google.protobuf.Any (draft -01 "Any Blocks",
+// trendvidia/protowire#354). The rest of the block is a body of the type
+// the URL names. A parser cannot tell which blocks the schema binds to
+// Any, so it accepts a TypeEntry as the first entry of any block, and
+// only there; binding checks the rest.
+type TypeEntry struct {
+	Pos             Position
+	End             Position // just past the URL string
+	URL             string   // the type URL as written, unquoted
+	LeadingComments []Comment
+	TrailingComment string
+}
+
+func (*TypeEntry) entryNode()      {}
+func (e *TypeEntry) pos() Position { return e.Pos }
+func (e *TypeEntry) end() Position { return e.End }
+
 // Value is an expression on the right side of = or :.
 type Value interface {
 	valueNode()

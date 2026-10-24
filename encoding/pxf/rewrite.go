@@ -781,6 +781,8 @@ func writeEntryInline(buf *bytes.Buffer, e Entry) {
 		}
 		buf.WriteString(": ")
 		f.formatValue(n.Value, 0)
+	case *TypeEntry:
+		fmt.Fprintf(buf, "@type = %q", n.URL)
 	case *Block:
 		if n.NameQuoted {
 			fmt.Fprintf(buf, "%q", n.Name)

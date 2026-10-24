@@ -85,6 +85,7 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 		MaxNumericLiteralDigits: tr.lim.maxDigits,
 		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
 		MaxRepeatedCount:        tr.lim.maxRepeated,
+		TypeResolver:            tr.resolver,
 	}
 	// The column paths depend on msg's type and the header, never on the
 	// row, so they are checked once per type rather than once per row.
@@ -106,6 +107,13 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 // semantics as [DatasetReader.Scan].
 func BindRow(msg proto.Message, columns []string, row DatasetRow) error {
 	return UnmarshalOptions{}.bindRow(msg, columns, row, false)
+}
+
+// BindRow is [BindRow] under the options: their limits, and their
+// TypeResolver, which a cell holding an Any block that opens with
+// `@type = "..."` needs (draft -01 "Any Blocks").
+func (o UnmarshalOptions) BindRow(msg proto.Message, columns []string, row DatasetRow) error {
+	return o.bindRow(msg, columns, row, false)
 }
 
 // bindRow is [BindRow] under the options' limits. The bind-time schema
@@ -216,14 +224,17 @@ func rowNeedsPresence(desc protoreflect.MessageDescriptor) bool {
 // reachable from desc through message fields, list elements or map
 // values, carries (pxf.default) or (pxf.required): the fields postDecode
 // visits (#161). A list or block cell (protowire#341) fills such
-// bodies. An Any field adds nothing: a cell cannot hold the `@type`
-// sugar (Parse rejects it, #173), so an Any cell is its raw type_url and
-// value, whose bytes take no defaults. seen guards recursive types.
+// bodies. An Any field counts too: a cell may open an Any block with
+// `@type = "..."` (#173), and the type it names is known only from the
+// row. seen guards recursive types.
 func hasDefaultOrRequired(desc protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) bool {
 	if seen[desc.FullName()] {
 		return false
 	}
 	seen[desc.FullName()] = true
+	if isAny(desc) {
+		return true
+	}
 	fields := desc.Fields()
 	for i := range fields.Len() {
 		fd := fields.Get(i)

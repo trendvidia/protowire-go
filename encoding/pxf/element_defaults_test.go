@@ -66,6 +66,13 @@ message Q {
   repeated Strict strict = 1;
 }
 
+// No annotation of its own, and Any fields only: what an Any body names
+// is the only source of defaults.
+message S {
+  google.protobuf.Any payload = 1;
+  repeated google.protobuf.Any anys = 2;
+}
+
 // No _null mask and no annotation of its own: only its elements' fields
 // make BindRow take the full decoder.
 message R {
@@ -271,4 +278,20 @@ func TestElementDefaults_BindRowReachesElements(t *testing.T) {
 	require.NoError(t, tr.Scan(m))
 	assert.Equal(t, "item-dflt", get(t, m, "items", "0", "label").String())
 	assert.Equal(t, "leaf-dflt", get(t, m, "by_key", "k", "leaves", "0", "tag").String())
+}
+
+// A row type whose only annotations sit behind an Any is bound with
+// defaults applied: a cell may open an Any block with @type (#173), so
+// BindRow takes the full decoder for any row type that reaches an Any.
+func TestElementDefaults_BindRowReachesAny(t *testing.T) {
+	desc, opts := elemDefaultsSetup(t)
+	const table = "@dataset elemdefaults.v1.S (payload, anys)\n" +
+		"({ @type = \"elemdefaults.v1.Leaf\" }, [{ @type = \"elemdefaults.v1.Leaf\" }])\n"
+	s := desc.ParentFile().Messages().ByName("S")
+	tr, err := opts.NewDatasetReader(strings.NewReader(table))
+	require.NoError(t, err)
+	m := dynamicpb.NewMessage(s)
+	require.NoError(t, tr.Scan(m))
+	assert.Equal(t, "leaf-dflt", get(t, unpack(t, desc, get(t, m, "payload").Message(), "Leaf"), "tag").String())
+	assert.Equal(t, "leaf-dflt", get(t, unpack(t, desc, get(t, m, "anys", "0").Message(), "Leaf"), "tag").String())
 }

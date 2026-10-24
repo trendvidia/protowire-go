@@ -1217,6 +1217,16 @@ func (p *parser) parseBlockVal(depth int) (Value, error) {
 func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 	entries := make([]Entry, 0, 4)
 	for p.current.Kind != RBRACE && p.current.Kind != EOF && !p.tolerantRowClose() {
+		if p.current.Kind == AT_TYPE {
+			entry, err := p.parseTypeEntry(len(entries) == 0)
+			if err != nil {
+				return nil, Position{}, err
+			}
+			if entry != nil {
+				entries = append(entries, entry)
+			}
+			continue
+		}
 		// Inside a '{ ... }' block we don't know whether the surrounding
 		// field is a message or a map<K,V>; both forms are accepted and
 		// disambiguated by the schema layer.
@@ -1245,6 +1255,46 @@ func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 	end := p.tokenEnd()
 	p.advance()
 	return entries, end, nil
+}
+
+// parseTypeEntry parses `@type = "<type-url>"`, the type entry of a
+// google.protobuf.Any block (draft -01 "Any Blocks"). first reports
+// whether it opens its block, the only place it may stand. Tolerant mode
+// records a misplaced or malformed type entry and skips its tokens.
+func (p *parser) parseTypeEntry(first bool) (Entry, error) {
+	leading := p.flushComments()
+	pos := p.current.Pos
+	// Tolerant mode records the error and skips what is left of the
+	// entry, `@type`, `=` and the string, as far as each is there.
+	fail := func(err error) (Entry, error) {
+		if !p.tolerant {
+			return nil, err
+		}
+		p.record(err)
+		p.comments = append(leading, p.comments...)
+		for _, k := range []TokenKind{AT_TYPE, EQUALS, STRING} {
+			if p.current.Kind == k {
+				p.advance()
+			}
+		}
+		return nil, nil
+	}
+	if !first {
+		return fail(errorf(pos, "%s", typeEntryMisplaced))
+	}
+	p.advance() // consume @type
+	if p.current.Kind != EQUALS {
+		return fail(errorf(p.current.Pos, "expected '=' after @type, got %s", p.tokenErrMsg()))
+	}
+	p.advance()
+	if p.current.Kind != STRING {
+		return fail(errorf(p.current.Pos, "expected a string type URL after @type =, got %s", p.tokenErrMsg()))
+	}
+	url := p.current.Value
+	end := p.tokenEnd()
+	p.advance()
+	trailing := p.takeTrailingComment(end)
+	return &TypeEntry{Pos: pos, End: end, URL: url, LeadingComments: leading, TrailingComment: trailing}, nil
 }
 
 // decodeBase64Lenient decodes a bytes-literal payload accepting both
