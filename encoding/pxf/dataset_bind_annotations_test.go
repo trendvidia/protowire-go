@@ -92,9 +92,7 @@ func bindRows(t *testing.T, desc protoreflect.MessageDescriptor, table string) (
 
 	if bindErr != nil {
 		require.Error(t, streamErr)
-		// The message, not the position: the stream reports every row at
-		// 1:1 until #144 gives its rows document positions.
-		require.Equal(t, errMsg(bindErr), errMsg(streamErr))
+		require.Equal(t, bindErr.Error(), streamErr.Error())
 		return nil, bindErr
 	}
 	require.ErrorContains(t, streamErr, "EOF")
@@ -103,14 +101,6 @@ func bindRows(t *testing.T, desc protoreflect.MessageDescriptor, table string) (
 		require.True(t, proto.Equal(streamed[i], bound[i]), "row %d: Scan %v, BindRow %v", i, streamed[i], bound[i])
 	}
 	return bound, nil
-}
-
-// errMsg is err's text without its position.
-func errMsg(err error) string {
-	if pe, ok := err.(*pxf.Error); ok {
-		return pe.Msg
-	}
-	return err.Error()
 }
 
 func TestBindRow_EmptyCellTakesDefault(t *testing.T) {
