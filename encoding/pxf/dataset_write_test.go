@@ -5,7 +5,6 @@ package pxf_test
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -92,14 +91,23 @@ message Row {
     int32 o_i = 54;
   }
 
-  // Not cell-shaped.
+  // Value cells (protowire#341): lists and blocks.
   repeated int32 list = 60;
   map<string, int32> m = 61;
   Inner inner = 62;
+  repeated Inner inners = 63;
+  repeated Keyed keyed = 64 [(pxf.key) = "id"];
+  map<string, Inner> by_key = 65;
+}
+
+message Keyed {
+  string id = 1;
+  int32 v = 2;
 }
 
 message Inner {
   int32 x = 1;
+  string label = 2;
 }
 
 message Pick {
@@ -141,6 +149,7 @@ var rowColumns = []string{
 	"ts", "dur", "w_s", "w_i64", "w_b", "w_by", "bi", "dec", "bf", "sec",
 	"d_s", "d_i32", "d_opt", "d_w", "d_ts", "d_color",
 	"c_w", "c_i", "c_b", "o_s", "o_i",
+	"list", "m", "inner", "inners", "keyed", "by_key",
 }
 
 // defaultedColumns are the columns of dsw.v1.Row with (pxf.default).
@@ -191,6 +200,12 @@ func randomRow(t testing.TB, r *rand.Rand, desc protoreflect.MessageDescriptor) 
 			continue
 		}
 		fd := desc.Fields().ByName(protoreflect.Name(c))
+		if doc := randomNested(r, c); doc != "" {
+			if err := pxf.Unmarshal([]byte(doc), m); err != nil {
+				t.Fatalf("setting %s: %v", doc, err)
+			}
+			continue
+		}
 		if fd.Kind() == protoreflect.MessageKind {
 			lit := randomLiteral(r, fd.Message().FullName())
 			if err := pxf.Unmarshal([]byte(c+" = "+lit), m); err != nil {
@@ -205,6 +220,58 @@ func randomRow(t testing.TB, r *rand.Rand, desc protoreflect.MessageDescriptor) 
 }
 
 var trickyStrings = []string{"", "plain", "a, b", "(x)", "\"q\"", "back\\slash", "line\nbreak", "tab\t", "# not a comment", "// nor this", "ünï ✓", "null", "true", "@dataset"}
+
+// randomNested is a document setting one of the value-cell columns at
+// random, or "" for any other column.
+func randomNested(r *rand.Rand, col string) string {
+	inner := func() string {
+		switch r.IntN(3) {
+		case 0:
+			return "{}"
+		case 1:
+			return fmt.Sprintf("{ x = %d }", r.Int32()-r.Int32())
+		}
+		return fmt.Sprintf("{ x = %d label = %q }", r.IntN(9), trickyStrings[r.IntN(len(trickyStrings))])
+	}
+	n := r.IntN(4)
+	var parts []string
+	switch col {
+	case "list":
+		for range n {
+			parts = append(parts, fmt.Sprint(r.Int32()-r.Int32()))
+		}
+		return "list = [" + strings.Join(parts, ", ") + "]"
+	case "m":
+		for i := range n {
+			parts = append(parts, fmt.Sprintf("%q: %d", fmt.Sprint(i)+trickyStrings[r.IntN(len(trickyStrings))], r.IntN(100)))
+		}
+		return "m = { " + strings.Join(parts, " ") + " }"
+	case "inner":
+		return "inner " + inner()
+	case "inners":
+		for range n {
+			parts = append(parts, inner())
+		}
+		return "inners = [" + strings.Join(parts, ", ") + "]"
+	case "keyed":
+		if r.IntN(2) == 0 { // the keyed form: distinct, non-empty keys
+			for i := range n {
+				parts = append(parts, fmt.Sprintf("k%d { v = %d }", i, r.IntN(9)))
+			}
+			return "keyed { " + strings.Join(parts, " ") + " }"
+		}
+		for range n { // anonymous: no key at all
+			parts = append(parts, fmt.Sprintf("{ v = %d }", r.IntN(9)))
+		}
+		return "keyed = [" + strings.Join(parts, ", ") + "]"
+	case "by_key":
+		for i := range n {
+			parts = append(parts, fmt.Sprintf("%q: %s", fmt.Sprint("k", i), inner()))
+		}
+		return "by_key = { " + strings.Join(parts, " ") + " }"
+	}
+	return ""
+}
 
 func randomScalar(r *rand.Rand, fd protoreflect.FieldDescriptor) protoreflect.Value {
 	switch fd.Kind() {
@@ -268,8 +335,11 @@ func writeTable(t testing.TB, desc protoreflect.MessageDescriptor, columns []str
 	out, err := pxf.AppendDatasetHeader(nil, desc, columns)
 	require.NoError(t, err)
 	for _, m := range msgs {
+		before := len(out)
 		out, err = pxf.AppendDatasetRow(out, m, columns)
 		require.NoError(t, err, "row for %v", m)
+		// One row per line, nested cells included (#155).
+		require.Equal(t, 1, bytes.Count(out[before:], []byte("\n")), "row %q", out[before:])
 	}
 	return out
 }
@@ -567,9 +637,6 @@ func TestDatasetWrite_RefusesWhatACellCannotHold(t *testing.T) {
 		{[]string{"s", "s"}, `column "s" appears twice`},
 		// The reader's header rules, applied before any column resolves.
 		{[]string{"inner", "inner.x"}, `column "inner.x" overlaps column "inner"`},
-		{[]string{"list"}, "a repeated field cannot be held"},
-		{[]string{"m"}, "a map field cannot be held"},
-		{[]string{"inner"}, "a dsw.v1.Inner field needs a block"},
 		{[]string{"S"}, "no such field"}, // proto names, exactly
 	} {
 		t.Run(strings.Join(tc.cols, ","), func(t *testing.T) {
@@ -584,12 +651,38 @@ func TestDatasetWrite_RefusesWhatACellCannotHold(t *testing.T) {
 	}
 }
 
-func TestDatasetWrite_RefusesSecretWithMetadata(t *testing.T) {
+// A list, map or block value is one cell on one line (protowire#341),
+// the text Marshal writes for the field; a pxf.Secret with a hint, which
+// needs a block, is one now too (#155).
+func TestDatasetWrite_ValueCells(t *testing.T) {
 	desc := compileDatasetWrite(t, "Row")
 	m := dynamicpb.NewMessage(desc)
-	require.NoError(t, pxf.Unmarshal([]byte(`sec { value = "pw" hint = "vault" }`), m))
-	_, err := pxf.AppendDatasetRow(nil, m, []string{"sec"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "needs a block")
-	assert.True(t, errors.Unwrap(err) != nil)
+	require.NoError(t, pxf.Unmarshal([]byte(`list = [1, 2, 3] m = { "a b": 1 "c": 2 } inner {} inners = [{ x = 1 }, { label = "l,)" }] keyed { a { v = 1 } } by_key = { "k": { x = 2 } } sec { value = "pw" hint = "vault" }`), m))
+	cols := []string{"list", "m", "inner", "inners", "keyed", "by_key", "sec"}
+	row, err := pxf.AppendDatasetRow(nil, m, cols)
+	require.NoError(t, err)
+	assert.Equal(t, `([ 1, 2, 3 ], { "a b": 1 c: 2 }, { }, [ { x = 1 }, { label = "l,)" } ], { a { v = 1 } }, { k: { x = 2 } }, { value = "pw" hint = "vault" })`+"\n", string(row))
+
+	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
+	require.NoError(t, err)
+	assertTableReadsBack(t, desc, append(h, row...), []*dynamicpb.Message{withDefaults(t, desc, m, cols)})
+}
+
+// withDefaults is m as a table with these columns reads it back: every
+// field of dsw.v1.Row outside the columns that has (pxf.default) takes it.
+func withDefaults(t *testing.T, desc protoreflect.MessageDescriptor, m *dynamicpb.Message, cols []string) *dynamicpb.Message {
+	t.Helper()
+	out := proto.Clone(m).(*dynamicpb.Message)
+	for _, c := range defaultedColumns {
+		if slices.Contains(cols, c) {
+			continue
+		}
+		fd := desc.Fields().ByName(protoreflect.Name(c))
+		if od := fd.ContainingOneof(); od != nil && !od.IsSynthetic() && out.WhichOneof(od) != nil {
+			continue
+		}
+		def, _ := pxf.Default(fd)
+		require.NoError(t, pxf.ApplyDefault(out, fd, def))
+	}
+	return out
 }
