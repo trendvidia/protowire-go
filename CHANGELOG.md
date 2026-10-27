@@ -18,6 +18,20 @@ format changes.
   #134 / #139 / #158 precedent. `go.sum` changes only the parent's two
   lines. Tagged `check/protovalidate/v1.4.5` at that commit.
 
+### Fixed
+
+- **A consumer of `buf.build/go/protovalidate` v1.2.0 builds again.**
+  `go.mod` carried protocompile's requirement on the 2024 build of the
+  buf.validate protos, and BSR versions sort by protobuf-go version
+  first, so that build outranked the 2026 one protovalidate v1.2.0
+  needs and the build failed on `undefined: validate.FieldPath`. The
+  indirect floor is now the 2026-04-15 build
+  (`v1.36.12-20260415201107-50325440f8f2.1`), the one v1.2.0 names. No
+  code change; `internal/deps` now fails if the floor drops below it
+  ([#179]).
+
+[#179]: https://github.com/trendvidia/protowire-go/issues/179
+
 ## [1.10.0] — 2026-10-24
 
 A minor release that brings decoding in line with draft `-01` at
