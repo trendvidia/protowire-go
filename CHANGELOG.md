@@ -11,6 +11,13 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`check/protovalidate` requires the parent module at v1.10.0 instead of
+  v1.9.0.** Keeps the nested module on the parent it ships with, the
+  #134 / #139 / #158 precedent. `go.sum` changes only the parent's two
+  lines. Tagged `check/protovalidate/v1.4.5` at that commit.
+
 ## [1.10.0] — 2026-10-24
 
 A minor release that brings decoding in line with draft `-01` at
