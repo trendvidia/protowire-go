@@ -1843,27 +1843,35 @@ func (d *directDecoder) skipBracketed() {
 	}
 }
 
-// nullable reports whether a null literal may be bound to fd: only a
-// singular message field may hold one, wrapper types included, which it
-// clears (draft -01 § Booleans, Null, and Identifier Values). A scalar is
-// not nullable even with explicit presence (proto3 optional, a oneof
-// member), and neither is a repeated or map field (#150,
-// trendvidia/protowire#339).
+// nullable reports whether a null literal may be bound to fd: a
+// singular field with explicit presence, which it leaves unset and
+// present-but-null (draft -01 § Booleans, Null, and Identifier Values).
+// That is a message field (wrappers included), a proto3 optional scalar,
+// a oneof member, or a proto2 optional field (#182,
+// trendvidia/protowire#339 option 3). A required field is not nullable:
+// unset, it would make the message invalid in binary
+// (trendvidia/protowire#379). Neither is a scalar without presence,
+// which has no unset state, nor a repeated or map field.
 func nullable(fd protoreflect.FieldDescriptor) bool {
-	return (fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind) &&
-		!fd.IsList() && !fd.IsMap()
+	return fd.HasPresence() && !fd.IsList() && !fd.IsMap() &&
+		fd.Cardinality() != protoreflect.Required
 }
 
 // nullNotAllowed is the error for a null bound to a field nullable
 // refuses, saying how the schema can admit one where it can.
 func nullNotAllowed(pos Position, fd protoreflect.FieldDescriptor) error {
+	isMsg := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
 	switch {
 	case fd.IsMap():
 		return errorf(pos, "null is not allowed on map field %q", fd.Name())
 	case fd.IsList():
 		return errorf(pos, "null is not allowed on repeated field %q", fd.Name())
+	case fd.Cardinality() == protoreflect.Required && isMsg:
+		return errorf(pos, "null is not allowed on required field %q: it must be set", fd.Name())
+	case fd.Cardinality() == protoreflect.Required:
+		return errorf(pos, "null is not allowed on scalar field %q: the field is required, so it must be set", fd.Name())
 	}
-	return errorf(pos, "null is not allowed on scalar field %q: declare it as a wrapper type (google.protobuf.%sValue or similar) to make it nullable", fd.Name(), wrapperName(fd.Kind()))
+	return errorf(pos, "null is not allowed on scalar field %q: declare it optional, or as a wrapper type (google.protobuf.%sValue or similar), to make it nullable", fd.Name(), wrapperName(fd.Kind()))
 }
 
 // wrapperName is the google.protobuf wrapper stem for a scalar kind, for

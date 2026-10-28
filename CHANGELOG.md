@@ -41,6 +41,25 @@ format changes.
   - Known edge: a value within one decimal rounding of 2^±16384 can print as a literal
     just past the bound, which the decoder then rejects. A finite decimal literal
     cannot hold a power of two exactly.
+    
+- **`null` is accepted on a scalar with explicit presence**
+  ([#182](https://github.com/trendvidia/protowire-go/issues/182);
+  [protowire#339](https://github.com/trendvidia/protowire/issues/339)
+  option 3, [protowire#379](https://github.com/trendvidia/protowire/issues/379)).
+  v1.10.0 rejected `null` on every scalar that is not a wrapper. The
+  draft now accepts it on any singular field with explicit presence: a
+  proto3 `optional` scalar, a oneof member, a proto2 `optional` scalar,
+  as well as a message field. The field stays unset and is
+  present-but-null, so it satisfies `(pxf.required)` and keeps
+  `(pxf.default)` off. `Unmarshal`, `UnmarshalFull`, `Scan` and
+  `BindRow` accept it, `Result` and the `_null` mask record it, and
+  `Marshal` and `AppendDatasetRow` write `field = null` for such a field
+  named in the mask, so the null survives protobuf binary. `null` on a
+  plain proto3 scalar, a repeated or map field, a list element or a map
+  value is still an error; the plain-scalar error now suggests
+  `optional` as well as the wrapper type. `null` on a proto2 `required`
+  field is an error too, which for a required message field is new: it
+  was accepted and left the field unset, which binary does not allow.
 
 - **`check/protovalidate` requires the parent module at v1.10.0 instead of
   v1.9.0.** Keeps the nested module on the parent it ships with, the
