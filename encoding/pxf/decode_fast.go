@@ -131,16 +131,17 @@ type directDecoder struct {
 	current        Token
 	resolver       TypeResolver
 	discardUnknown bool
-	depth          int                            // nesting depth, capped at maxDepth
-	lim            limits                         // this call's limits (UnmarshalOptions.limits); schema literals stay under the constants
-	result         *Result                        // nil for plain Unmarshal, non-nil for UnmarshalFull
-	rootMsg        protoreflect.Message           // top-level message (for _null FieldMask writes)
-	nullMaskFd     protoreflect.FieldDescriptor   // cached _null field, may be nil
-	pathPrefix     string                         // dotted path prefix for nested messages
-	elemDepth      int                            // list elements / map values entered; a null under one stays out of the _null mask
-	onSecret       func(path, value string) error // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
-	keyedElem      *keyedElemState                // context for the next decodeFields call: it decodes one element of a keyed repeated field (draft -01 §3.13)
-	postDecodeAny  bool                           // run postDecode on each Any body before packing it (UnmarshalFull without SkipPostDecode)
+	depth          int                              // nesting depth, capped at maxDepth
+	lim            limits                           // this call's limits (UnmarshalOptions.limits); schema literals stay under the constants
+	mapKeys        map[mapKeyScope]map[any]struct{} // keys each map field has bound in this decode (bindMapKey)
+	result         *Result                          // nil for plain Unmarshal, non-nil for UnmarshalFull
+	rootMsg        protoreflect.Message             // top-level message (for _null FieldMask writes)
+	nullMaskFd     protoreflect.FieldDescriptor     // cached _null field, may be nil
+	pathPrefix     string                           // dotted path prefix for nested messages
+	elemDepth      int                              // list elements / map values entered; a null under one stays out of the _null mask
+	onSecret       func(path, value string) error   // optional pxf.Secret scalar-shorthand hook (see UnmarshalOptions.OnSecretField)
+	keyedElem      *keyedElemState                  // context for the next decodeFields call: it decodes one element of a keyed repeated field (draft -01 §3.13)
+	postDecodeAny  bool                             // run postDecode on each Any body before packing it (UnmarshalFull without SkipPostDecode)
 }
 
 func (d *directDecoder) advance() {
@@ -789,6 +790,43 @@ func (b *boundFields) bindWide(fd protoreflect.FieldDescriptor, i int, pos Posit
 	return nil
 }
 
+// mapKeyScope is one message body's map field: the scope in which a key
+// may be bound once.
+type mapKeyScope struct {
+	msg protoreflect.Message
+	fd  protoreflect.FieldDescriptor
+}
+
+// bindMapKey records that this decode bound key k of msg's map field fd,
+// and rejects a second binding of it (draft -01 § Entries and Keys,
+// protowire#396): inside one map literal or across two bindings of the
+// field, since both fill the same message's map. Keys compare as values
+// of the key type, so 1 and "1" are one key of an integer-keyed map. It
+// records what this decode bound rather than asking the map, which may
+// hold entries the caller set before decoding into it. Each message is
+// its own scope: the maps of two list elements are two scopes.
+func (d *directDecoder) bindMapKey(msg protoreflect.Message, fd protoreflect.FieldDescriptor, k protoreflect.MapKey, pos Position) error {
+	scope := mapKeyScope{msg, fd}
+	if d.mapKeys == nil {
+		d.mapKeys = map[mapKeyScope]map[any]struct{}{}
+	}
+	keys := d.mapKeys[scope]
+	if keys == nil {
+		keys = map[any]struct{}{}
+		d.mapKeys[scope] = keys
+	}
+	v := k.Interface()
+	if _, dup := keys[v]; dup {
+		shown := fmt.Sprint(v)
+		if s, ok := v.(string); ok {
+			shown = strconv.Quote(s)
+		}
+		return errorf(pos, "map field %q: key %s is already set", fd.Name(), shown)
+	}
+	keys[v] = struct{}{}
+	return nil
+}
+
 func alreadySet(fd protoreflect.FieldDescriptor, pos Position) error {
 	return errorf(pos, "field %q is already set", fd.Name())
 }
@@ -1420,6 +1458,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 
 		k, err := decodeMapKey(fd, keyStr, keyKind, pos)
 		if err != nil {
+			return err
+		}
+		if err := d.bindMapKey(msg, fd, k, pos); err != nil {
 			return err
 		}
 

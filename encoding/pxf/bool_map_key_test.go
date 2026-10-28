@@ -83,12 +83,19 @@ func TestBoolMapKeySpellings(t *testing.T) {
 		})
 	}
 
-	// All three admitted spellings of each value land on the same key.
-	msg, err := pxf.UnmarshalDescriptor([]byte("m = {\n  1: \"a\"\n  \"false\": \"b\"\n  true: \"c\"\n  false: \"d\"\n}"), md)
+	// All three admitted spellings of each value land on the same key, so
+	// two of them in one map are one key bound twice, which is rejected
+	// (protowire#396).
+	for _, pair := range [][2]string{{"1", "true"}, {`"true"`, "1"}, {"0", `"false"`}, {"false", "0"}} {
+		doc := "m = {\n  " + pair[0] + ": \"a\"\n  " + pair[1] + ": \"b\"\n}"
+		_, err := pxf.UnmarshalDescriptor([]byte(doc), md)
+		require.ErrorContains(t, err, "is already set", doc)
+	}
+	msg, err := pxf.UnmarshalDescriptor([]byte("m = {\n  1: \"a\"\n  \"false\": \"b\"\n}"), md)
 	require.NoError(t, err)
 	assert.Equal(t, 2, msg.Get(fd).Map().Len())
-	assert.Equal(t, "c", msg.Get(fd).Map().Get(protoreflect.ValueOfBool(true).MapKey()).String(), "the later spelling wins, as any duplicate key does")
-	assert.Equal(t, "d", msg.Get(fd).Map().Get(protoreflect.ValueOfBool(false).MapKey()).String())
+	assert.Equal(t, "a", msg.Get(fd).Map().Get(protoreflect.ValueOfBool(true).MapKey()).String())
+	assert.Equal(t, "b", msg.Get(fd).Map().Get(protoreflect.ValueOfBool(false).MapKey()).String())
 }
 
 // TestBoolKeywordKeyOnOtherKeyTypes pins the other half of #109: the

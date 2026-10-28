@@ -1,4 +1,4 @@
-# Singular-field-bound-twice fixtures
+# Bound-twice fixtures: singular fields and map keys
 
 Cross-port conformance fixtures for the rule that **a singular field is
 bound at most once in one message body** ([issue #347](https://github.com/trendvidia/protowire/issues/347),
@@ -27,6 +27,13 @@ accepts every fixture: a second binding is legal syntax), a decoder bound to
 | `err-oneof-scalar-twice.pxf` | reject | A oneof scalar member bound twice. |
 | `once-per-body.pxf` | accept | Each body is its own scope: `a` once in `m`, once in `n`, once per list element. |
 | `repeated-twice.pxf` | accept | A repeated field bound twice concatenates. |
+| `err-map-key-twice-in-literal.pxf` | reject | A map key repeated inside one map literal ([#396](https://github.com/trendvidia/protowire/issues/396)). |
+| `err-map-key-twice-same-value.pxf` | reject | The same key twice, even with the same value. |
+| `err-map-key-twice-across-bindings.pxf` | reject | `labels = { a: "1" }` then `labels = { a: "2" }`. |
+| `err-map-key-twice-int-spellings.pxf` | reject | `1:` and `"1":` are one key of an `int32`-keyed map: keys compare as values. |
+| `err-map-key-twice-message-values.pxf` | reject | A repeated key in a map of messages; the two values do not merge. |
+| `map-twice-distinct-keys.pxf` | accept | A map bound twice with distinct keys: the entries merge. |
+| `map-key-once-per-body.pxf` | accept | The same key in two list elements' maps: each body is its own scope. |
 
 Every port was measured on 2026-10-27 (the table on #347), and no port
 met all of these. Every port but Swift keeps the last scalar. For two
