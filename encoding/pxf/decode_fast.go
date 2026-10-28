@@ -37,6 +37,19 @@ const MaxNestingDepth = 100
 // the @default carrier (carrier.go).
 const MaxNumericLiteralDigits = 4096
 
+// MaxBigFloatExponent bounds the magnitude of a pxf.BigFloat value's
+// binary exponent, the wire exponent plus the mantissa's bit length (the
+// value's big.Float MantExp), per protowire/docs/HARDENING.md § Mandatory
+// limits (protowire#281). The value's exponent and not the wire field,
+// which shifts with the precision a producer chose, so that a value the
+// encoder writes at 64 bits reads back from its literal at 256. Rendering
+// the value in decimal costs time that grows with the square of it
+// (measured, 3.3 ms at -2^14, 200 ms at -2^17, past 10 s at -2^20), and a
+// thirteen-byte literal such as 1e646456992 sets it. A literal is checked
+// after parsing, which is cheap whatever its exponent. 16384 is IEEE 754
+// binary128's exponent range.
+const MaxBigFloatExponent = 16384
+
 // MaxMessageSize caps the total input to one decode or parse call, per
 // protowire/docs/HARDENING.md § Mandatory limits: peak memory is a
 // multiple of the input, so the input is what bounds it. Checked before
@@ -844,7 +857,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits)
+		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -1160,7 +1173,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits)
+		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1420,7 +1433,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits)
+				bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -2195,7 +2208,7 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 		return nil
 	}
 	if isBigFloat(mdesc) {
-		bf, err := parseBigFloat(def, MaxNumericLiteralDigits)
+		bf, err := parseBigFloat(def, MaxNumericLiteralDigits, MaxBigFloatExponent)
 		if err != nil {
 			return fmt.Errorf("invalid default big float %q for field %q: %w", def, fd.Name(), err)
 		}

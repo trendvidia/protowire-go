@@ -242,6 +242,18 @@ func readBigInt(msg protoreflect.Message) *big.Int {
 	return v
 }
 
+// bigFloatValueExponent returns the binary exponent of the value msg
+// holds, its wire exponent plus the mantissa's bit length, and false for
+// a zero mantissa, which has none.
+func bigFloatValueExponent(msg protoreflect.Message) (int64, bool) {
+	d := msg.Descriptor()
+	bits := new(big.Int).SetBytes(msg.Get(d.Fields().ByName("mantissa")).Bytes()).BitLen()
+	if bits == 0 {
+		return 0, false
+	}
+	return msg.Get(d.Fields().ByName("exponent")).Int() + int64(bits), true
+}
+
 func readBigFloat(msg protoreflect.Message) *big.Float {
 	d := msg.Descriptor()
 	mantBytes := msg.Get(d.Fields().ByName("mantissa")).Bytes()
@@ -354,6 +366,13 @@ func readDecimalStr(msg protoreflect.Message) (string, error) {
 // formatBigFloat renders a BigFloat message as the literal parseBigFloat
 // takes, in exponent form at the precision the message declares.
 func formatBigFloat(msg protoreflect.Message) (string, error) {
+	// Rendering costs time that grows with the square of |exponent|, so
+	// the bound comes before anything is built (MaxBigFloatExponent,
+	// protowire#281). A message past it has no PXF literal: an error,
+	// not a substituted value.
+	if e, ok := bigFloatValueExponent(msg); ok && (e > MaxBigFloatExponent || e < -MaxBigFloatExponent) {
+		return "", fmt.Errorf("pxf.BigFloat binary exponent %d exceeds MaxBigFloatExponent=%d", e, MaxBigFloatExponent)
+	}
 	bf := readBigFloat(msg)
 	prec := bf.Prec()
 	if prec == 0 {
@@ -365,9 +384,8 @@ func formatBigFloat(msg protoreflect.Message) (string, error) {
 	// prec is four bytes the message's producer chose, and Text works
 	// for every digit it is asked for, so the digit count is bounded
 	// before rendering: past MaxNumericLiteralDigits the literal could
-	// not be read anyway. This bounds the mantissa's cost, not the
-	// exponent's — Text is proportional to |exponent| however short the
-	// printed form, which is protowire#281's open limit.
+	// not be read anyway. This bounds the mantissa's cost; the check
+	// above bounds the exponent's.
 	if decDigits > MaxNumericLiteralDigits {
 		return "", fmt.Errorf("pxf.BigFloat prec %d bits renders to %d digits; MaxNumericLiteralDigits=%d", prec, decDigits, MaxNumericLiteralDigits)
 	}
@@ -448,7 +466,7 @@ func parseDecimal(s string, maxDigits int) (unscaled *big.Int, scale int32, nega
 // bigFloatPrec is the precision a PXF BigFloat literal is parsed at.
 const bigFloatPrec = 256
 
-func parseBigFloat(s string, maxDigits int) (*big.Float, error) {
+func parseBigFloat(s string, maxDigits, maxExp int) (*big.Float, error) {
 	if err := checkLiteralDigits(s, maxDigits); err != nil {
 		return nil, err
 	}
@@ -474,6 +492,11 @@ func parseBigFloat(s string, maxDigits int) (*big.Float, error) {
 	// subtraction in setBigFloatFields wrapped silently.
 	if int64(bf.MantExp(nil))-bigFloatPrec < math.MinInt32 {
 		return nil, fmt.Errorf("big float literal %s is below the wire's exponent range", clipLiteral(s))
+	}
+	// The value's binary exponent is bounded as one read off the wire is
+	// (MaxBigFloatExponent, protowire#281). Zero has none.
+	if e := bf.MantExp(nil); bf.Sign() != 0 && (e > maxExp || e < -maxExp) {
+		return nil, fmt.Errorf("big float literal %s has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", clipLiteral(s), e, maxExp)
 	}
 	return bf, nil
 }

@@ -4,6 +4,7 @@
 package pxf_test
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -118,13 +119,20 @@ func TestCarrier_DecimalScaleIsBounded(t *testing.T) {
 // finite one is protowire#281's question — so only the overflow and a
 // large finite value are pinned.
 func TestCarrier_BigFloatOverflowIsDiagnosed(t *testing.T) {
-	t.Run("overflow", func(t *testing.T) {
-		fd := synthField(t, defaultCarrier(18, bigFloatArg(math.MaxInt32, 64)))
-		var def, problems string
-		promptly(t, 5*time.Second, func() error { def, problems = readCarrier(fd); return nil })
-		require.Empty(t, def)
-		require.Contains(t, problems, "above big.Float's range")
-	})
+	// An exponent past MaxBigFloatExponent is refused before Text runs,
+	// whose cost grows with the square of |exponent| (protowire#281). It
+	// is also what makes 2^31-1, which used to reach big.Float's ceiling,
+	// an error.
+	// bigFloatArg's mantissa, 25, has 5 bits: binary exponent exp + 5.
+	for _, exp := range []int32{math.MaxInt32, pxf.MaxBigFloatExponent - 4, -pxf.MaxBigFloatExponent - 6, math.MinInt32} {
+		t.Run(fmt.Sprintf("exponent %d", exp), func(t *testing.T) {
+			fd := synthField(t, defaultCarrier(18, bigFloatArg(exp, 64)))
+			var def, problems string
+			promptly(t, 5*time.Second, func() error { def, problems = readCarrier(fd); return nil })
+			require.Empty(t, def)
+			require.Contains(t, problems, "MaxBigFloatExponent=16384")
+		})
+	}
 	t.Run("large finite", func(t *testing.T) {
 		fd := synthField(t, defaultCarrier(18, bigFloatArg(10_000, 64)))
 		var def, problems string

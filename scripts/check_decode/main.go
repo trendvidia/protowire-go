@@ -84,7 +84,7 @@ func main() {
 	flag.StringVar(&proto, "proto", "", "path to adversarial.proto")
 	flag.StringVar(&input, "input", "", "path to corpus file")
 	var limits limitFlags
-	flag.Var(&limits, "limit", "NAME=VALUE, repeatable: lower a HARDENING limit for this run — MaxMessageSize, MaxNestingDepth, MaxNumericLiteralDigits, MaxBytesLiteralLength, MaxRepeatedCount")
+	flag.Var(&limits, "limit", "NAME=VALUE, repeatable: lower a HARDENING limit for this run — MaxMessageSize, MaxNestingDepth, MaxNumericLiteralDigits, MaxBytesLiteralLength, MaxRepeatedCount, MaxBigFloatExponent")
 	flag.Parse()
 
 	if format == "" || schema == "" || input == "" {
@@ -131,6 +131,7 @@ func pxfDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 		MaxNumericLiteralDigits: lim["MaxNumericLiteralDigits"],
 		MaxBytesLiteralLength:   lim["MaxBytesLiteralLength"],
 		MaxRepeatedCount:        lim["MaxRepeatedCount"],
+		MaxBigFloatExponent:     lim["MaxBigFloatExponent"],
 	}.UnmarshalDescriptor(data, desc)
 	return err
 }
@@ -158,6 +159,7 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 		MaxNestingDepth:         lim["MaxNestingDepth"],
 		MaxNumericLiteralDigits: lim["MaxNumericLiteralDigits"],
 		MaxRepeatedCount:        lim["MaxRepeatedCount"],
+		MaxBigFloatExponent:     lim["MaxBigFloatExponent"],
 	}.Unmarshal(data, msg)
 }
 
@@ -243,7 +245,7 @@ func (l *limitFlags) Set(s string) error {
 		return fmt.Errorf("--limit wants NAME=VALUE, got %q", s)
 	}
 	switch name {
-	case "MaxMessageSize", "MaxNestingDepth", "MaxNumericLiteralDigits", "MaxBytesLiteralLength", "MaxRepeatedCount":
+	case "MaxMessageSize", "MaxNestingDepth", "MaxNumericLiteralDigits", "MaxBytesLiteralLength", "MaxRepeatedCount", "MaxBigFloatExponent":
 	default:
 		return fmt.Errorf("--limit: unknown limit %q", name)
 	}

@@ -25,6 +25,23 @@ format changes.
 
 ### Changed
 
+- **A `pxf.BigFloat` whose binary exponent exceeds `MaxBigFloatExponent` (16384) is
+  rejected** ([#185](https://github.com/trendvidia/protowire-go/issues/185), trendvidia/protowire#281). Rendering one in decimal
+  costs time that grows with the square of its exponent. Measured through `pxf.Marshal`:
+  3.3 ms at −2^14, 200 ms at −2^17, and past 10 s at −2^20.
+  - The bound is on the value's binary exponent, which is the wire `exponent` plus the
+    mantissa's bit length. It does not depend on precision, so a value written at 64
+    bits reads back from its literal at 256.
+  - `encoding/pb` Unmarshal and Marshal, `encoding/pxf` literal decode, `Marshal` and
+    the `(pxf.default)` carrier reader all check it before doing any work that grows
+    with the exponent. Over the bound, `Marshal` now fails in about 0.1 ms.
+  - `Marshal` no longer writes `+Inf` for an exponent of 2^31−1. It fails instead.
+  - `UnmarshalOptions.MaxBigFloatExponent` lowers the bound per call in both packages,
+    and `check_decode --limit MaxBigFloatExponent=N` passes it through.
+  - Known edge: a value within one decimal rounding of 2^±16384 can print as a literal
+    just past the bound, which the decoder then rejects. A finite decimal literal
+    cannot hold a power of two exactly.
+
 - **`check/protovalidate` requires the parent module at v1.10.0 instead of
   v1.9.0.** Keeps the nested module on the parent it ships with, the
   #134 / #139 / #158 precedent. `go.sum` changes only the parent's two

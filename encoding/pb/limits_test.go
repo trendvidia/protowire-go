@@ -112,12 +112,16 @@ func bigFloatWire(mant []byte, exp int32, prec uint32) []byte {
 	return protowire.AppendBytes(out, sub)
 }
 
-// TestBigFloatExponentNeedsNoBound is the written reason #95 asks for:
-// decoding is prompt across the whole int32 exponent range because
-// big.Float stores the exponent rather than materialising 2^exponent,
-// and the decoded value is exact.
-func TestBigFloatExponentNeedsNoBound(t *testing.T) {
-	for _, exp := range []int32{math.MinInt32, -1_000_000, -1, 0, 1, 1_000_000, math.MaxInt32 - 8} {
+// TestBigFloatExponentBound: storing an exponent is cheap, but rendering
+// the value in decimal costs time that grows with the square of
+// |exponent|, so the draft bounds it at MaxBigFloatExponent
+// (protowire#281). Inside the bound the decoded value is exact; past it,
+// on either side and up to the int32 extremes, decoding fails promptly.
+func TestBigFloatExponentBound(t *testing.T) {
+	// 25 has 5 bits, so the value's binary exponent is exp + 5, and the
+	// bound is on that (MaxBigFloatExponent counts the value, not the
+	// wire field).
+	for _, exp := range []int32{-MaxBigFloatExponent - 5, -1, 0, 1, MaxBigFloatExponent - 5} {
 		t.Run(big.NewInt(int64(exp)).String(), func(t *testing.T) {
 			var h bigFloatHolder
 			err := promptly(t, 5*time.Second, func() error { return Unmarshal(bigFloatWire([]byte{25}, exp, 64), &h) })
@@ -128,21 +132,24 @@ func TestBigFloatExponentNeedsNoBound(t *testing.T) {
 			if got := h.F.MantExp(nil); got != int(exp)+5 {
 				t.Fatalf("exponent %d: decoded MantExp %d, want %d", exp, got, int(exp)+5)
 			}
-			if h.F.IsInf() {
-				t.Fatalf("exponent %d: decoded to an infinity", exp)
+		})
+	}
+	for _, exp := range []int32{math.MinInt32, -MaxBigFloatExponent - 6, MaxBigFloatExponent - 4, math.MaxInt32} {
+		t.Run(big.NewInt(int64(exp)).String(), func(t *testing.T) {
+			var h bigFloatHolder
+			err := promptly(t, 5*time.Second, func() error { return Unmarshal(bigFloatWire([]byte{25}, exp, 64), &h) })
+			if err == nil || !strings.Contains(err.Error(), "MaxBigFloatExponent") {
+				t.Fatalf("exponent %d: err = %v, want the MaxBigFloatExponent error", exp, err)
 			}
 		})
 	}
-}
-
-// TestBigFloatOverflowIsAnError: a mantissa whose bits push the exponent
-// past big.Float's range used to decode as +Inf, which pxf.BigFloat
-// cannot represent. protowire#278 makes that an error.
-func TestBigFloatOverflowIsAnError(t *testing.T) {
+	// The bound is a per-call limit, as the draft's limits are.
 	var h bigFloatHolder
-	err := promptly(t, 5*time.Second, func() error { return Unmarshal(bigFloatWire([]byte{25}, math.MaxInt32, 64), &h) })
-	if err == nil || !strings.Contains(err.Error(), "overflows") {
-		t.Fatalf("err = %v, want an overflow error", err)
+	if err := (UnmarshalOptions{MaxBigFloatExponent: 10}).Unmarshal(bigFloatWire([]byte{25}, 6, 64), &h); err == nil || !strings.Contains(err.Error(), "MaxBigFloatExponent=10") {
+		t.Fatalf("MaxBigFloatExponent=10, binary exponent 11: err = %v", err)
+	}
+	if err := (UnmarshalOptions{MaxBigFloatExponent: 10}).Unmarshal(bigFloatWire([]byte{25}, 5, 64), &h); err != nil {
+		t.Fatalf("MaxBigFloatExponent=10, binary exponent 10: %v", err)
 	}
 }
 
@@ -194,8 +201,16 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 			t.Fatalf("err = %v, want the exponent-range error", err)
 		}
 	})
-	t.Run("BigFloat exponent just inside int32 round-trips", func(t *testing.T) {
-		in := &bigFloatHolder{F: new(big.Float).SetPrec(53).SetMantExp(big.NewFloat(0.75), math.MinInt32+53)}
+	t.Run("BigFloat exponent past MaxBigFloatExponent", func(t *testing.T) {
+		// 0.75 × 2^k has binary exponent k.
+		f := new(big.Float).SetPrec(53).SetMantExp(big.NewFloat(0.75), -MaxBigFloatExponent-1)
+		_, err := Marshal(&bigFloatHolder{F: f})
+		if err == nil || !strings.Contains(err.Error(), "MaxBigFloatExponent") {
+			t.Fatalf("err = %v, want the MaxBigFloatExponent error", err)
+		}
+	})
+	t.Run("BigFloat exponent at MaxBigFloatExponent round-trips", func(t *testing.T) {
+		in := &bigFloatHolder{F: new(big.Float).SetPrec(53).SetMantExp(big.NewFloat(0.75), -MaxBigFloatExponent)}
 		data, err := Marshal(in)
 		if err != nil {
 			t.Fatal(err)
