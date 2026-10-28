@@ -254,3 +254,47 @@ func TestMarshalBigFloatExponentBoundEdges(t *testing.T) {
 		})
 	}
 }
+
+// The bounds apply where a value is materialised, not where its fields
+// are read (draft -01 § Mandatory Limits; #188, decided as option b). The
+// block form of a pxf.BigFloat or pxf.Decimal is read as plain fields, so
+// a value past a bound decodes, and Marshal, which renders it, refuses
+// it; the literal form computes the value and is rejected at decode. The
+// test fails the day either half changes.
+func TestBlockFormIsNotBounded(t *testing.T) {
+	md := bigNumDesc(t, "BigNumDemo")
+	for _, tc := range []struct {
+		block, literal, marshalErr, literalErr string
+	}{
+		{
+			`big_float_field { mantissa = b"AQ==" exponent = -1048576 prec = 64 }`,
+			`big_float_field = 1e-400000`,
+			"pxf.BigFloat binary exponent -1048575 exceeds MaxBigFloatExponent=16384",
+			"MaxBigFloatExponent=16384 bounds its magnitude",
+		},
+		{
+			`decimal_field { unscaled = b"AQ==" scale = 1000000 }`,
+			`decimal_field = 0.` + strings.Repeat("0", 4096) + `1`,
+			"pxf.Decimal scale 1000000 exceeds MaxNumericLiteralDigits=4096",
+			"MaxNumericLiteralDigits",
+		},
+	} {
+		t.Run(tc.block, func(t *testing.T) {
+			var msg *dynamicpb.Message
+			err := promptly(t, 2*time.Second, func() error {
+				var err error
+				msg, err = pxf.UnmarshalDescriptor([]byte(tc.block), md)
+				return err
+			})
+			require.NoError(t, err, "the block form stores the fields without computing the value")
+			err = promptly(t, 2*time.Second, func() error {
+				_, err := pxf.Marshal(msg)
+				return err
+			})
+			require.ErrorContains(t, err, tc.marshalErr, "a producer of PXF text fails on it")
+
+			_, err = pxf.UnmarshalDescriptor([]byte(tc.literal), md)
+			require.ErrorContains(t, err, tc.literalErr, "the literal form is bounded at decode")
+		})
+	}
+}
