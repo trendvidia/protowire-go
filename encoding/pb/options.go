@@ -25,11 +25,13 @@ type UnmarshalOptions struct {
 	// MaxMessageSize caps the input to this call and is checked before
 	// anything is read; MaxNestingDepth caps submessage / map-entry
 	// recursion; MaxNumericLiteralDigits bounds the magnitude of a
-	// pxf.Decimal's scale; MaxRepeatedCount caps the element count of
+	// pxf.Decimal's scale; MaxBigFloatExponent the magnitude of a
+	// pxf.BigFloat's exponent; MaxRepeatedCount caps the element count of
 	// any repeated or map field.
 	MaxMessageSize          int
 	MaxNestingDepth         int
 	MaxNumericLiteralDigits int
+	MaxBigFloatExponent     int
 	MaxRepeatedCount        int
 }
 
@@ -45,6 +47,9 @@ func (o UnmarshalOptions) limits() limits {
 	}
 	if o.MaxNumericLiteralDigits > 0 {
 		lim.maxDigits = o.MaxNumericLiteralDigits
+	}
+	if o.MaxBigFloatExponent > 0 {
+		lim.maxBigFloatExp = o.MaxBigFloatExponent
 	}
 	if o.MaxRepeatedCount > 0 {
 		lim.maxRepeated = o.MaxRepeatedCount

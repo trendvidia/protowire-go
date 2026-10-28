@@ -76,9 +76,33 @@ const MaxNestingDepth = 100
 // numeric-literal digit cap is the bound rather than a new one: a
 // Decimal with scale 4096 is the wire form of a 4096-digit literal.
 //
-// BigFloat.exponent is a binary exponent that big.Float stores as-is,
-// so it needs no bound here; see unmarshalBigFloatMsg.
+// BigFloat.exponent has a bound of its own, MaxBigFloatExponent.
 const MaxNumericLiteralDigits = 4096
+
+// MaxBigFloatExponent bounds the magnitude of a BigFloat value's binary
+// exponent, per protowire/docs/HARDENING.md § Mandatory limits
+// (protowire#281). That is exponent plus the mantissa's bit length (the
+// value's big.Float MantExp), not the wire field alone, which shifts with
+// the precision a producer chose: a bound on the field would accept a
+// value at 64 bits and reject the same value re-read at 256. Storing a
+// huge exponent is cheap, but rendering the value in decimal is not:
+// measured, the cost grows with the square of |exponent| (3.3 ms at
+// -2^14, 200 ms at -2^17, past 10 s at -2^20), and a five-byte exponent
+// sets it. 16384 is IEEE 754 binary128's exponent range.
+const MaxBigFloatExponent = 16384
+
+// bigFloatExponentErr reports a BigFloat value whose binary exponent,
+// exponent + bit length of the mantissa, exceeds limit in magnitude. A
+// zero mantissa is zero at any exponent.
+func bigFloatExponentErr(mantBits int, exponent int64, limit int) error {
+	if mantBits == 0 {
+		return nil
+	}
+	if e := exponent + int64(mantBits); e > int64(limit) || e < -int64(limit) {
+		return fmt.Errorf("pxf.BigFloat binary exponent %d exceeds MaxBigFloatExponent=%d", e, limit)
+	}
+	return nil
+}
 
 // MaxMessageSize caps the total input to one decode call, per
 // protowire/docs/HARDENING.md § Mandatory limits: peak memory is a
@@ -101,6 +125,7 @@ const MaxRepeatedCount = MaxMessageSize
 type limits struct {
 	maxDepth       int
 	maxDigits      int
+	maxBigFloatExp int
 	maxMessageSize int
 	maxRepeated    int
 }
@@ -108,6 +133,7 @@ type limits struct {
 var defaultLimits = limits{
 	maxDepth:       MaxNestingDepth,
 	maxDigits:      MaxNumericLiteralDigits,
+	maxBigFloatExp: MaxBigFloatExponent,
 	maxMessageSize: MaxMessageSize,
 	maxRepeated:    MaxRepeatedCount,
 }
@@ -606,7 +632,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 			}
 		case bigFloatType:
 			bf := fv.Addr().Interface().(*big.Float)
-			if err := unmarshalBigFloatMsg(v, bf); err != nil {
+			if err := unmarshalBigFloatMsg(v, bf, lim.maxBigFloatExp); err != nil {
 				return 0, err
 			}
 		default:
@@ -749,6 +775,12 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 	adj := int64(exp) - int64(prec)
 	if adj < math.MinInt32 || adj > math.MaxInt32 {
 		return nil, fmt.Errorf("pxf.BigFloat exponent %d does not fit int32", adj)
+	}
+	// A conformant decoder rejects a value past MaxBigFloatExponent, so
+	// writing one would produce bytes this package's own Unmarshal refuses
+	// (protowire#281), as for Decimal.scale above.
+	if err := bigFloatExponentErr(mantInt.BitLen(), adj, MaxBigFloatExponent); err != nil {
+		return nil, err
 	}
 	adjExp := int32(adj)
 	if adjExp != 0 {
@@ -942,7 +974,7 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat, maxDigits int) error {
 	return nil
 }
 
-func unmarshalBigFloatMsg(data []byte, bf *big.Float) error {
+func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
 	var mantBytes []byte
 	var exp int32
 	var prec uint
@@ -995,16 +1027,26 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float) error {
 		bf.SetFloat64(0)
 		return nil
 	}
+	// Storing the exponent is cheap: big.Float keeps it as an int32, and
+	// SetMantExp adds to it without allocating, measured flat at ~4µs from
+	// -2^31 to 2^31-1 (#95). Rendering the value in decimal is not, and
+	// its cost grows with the square of |exponent|, so the draft bounds
+	// the exponent at decode, before anything is materialised
+	// (MaxBigFloatExponent, protowire#281).
 	mantInt := new(big.Int).SetBytes(mantBytes)
+	if err := bigFloatExponentErr(mantInt.BitLen(), int64(exp), maxExp); err != nil {
+		return err
+	}
+	// The bound is on the wire's mantissa, so it holds the value before
+	// SetInt rounds it to prec. A mantissa wider than prec can round up a
+	// power of two, and land one past the bound: decoded here, refused by
+	// Marshal, as a decimal literal at the bound can be (protowire#281).
 	bf.SetPrec(prec).SetInt(mantInt)
-	// exponent needs no bound, unlike Decimal.scale: big.Float keeps the
-	// exponent as an int32, and SetMantExp adds to it without allocating.
-	// Measured flat at ~4µs from -2^31 to 2^31-1 (#95); the cost of a huge
-	// exponent falls on whoever renders the value in decimal, which is
-	// the caller's call. What it can do is leave big.Float's range, and
-	// SetMantExp then returns ±Inf, which pxf.BigFloat cannot mean; that
-	// is an error, not a value. Underflow is unreachable: the mantissa's
-	// own exponent is at least 1, so the sum never drops below MinInt32.
+	// The sum can leave big.Float's range, whose exponent is an int32, only
+	// when the caller has raised MaxBigFloatExponent near MaxInt32: the
+	// mantissa's bit length is bounded by MaxMessageSize. SetMantExp then
+	// returns ±Inf, which pxf.BigFloat cannot mean; that is an error, not
+	// a value (protowire#278).
 	bf.SetMantExp(bf, int(exp))
 	if bf.IsInf() {
 		return fmt.Errorf("pxf.BigFloat exponent %d with a %d-bit mantissa overflows big.Float", exp, mantInt.BitLen())

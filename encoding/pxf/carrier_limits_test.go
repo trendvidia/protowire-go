@@ -4,6 +4,7 @@
 package pxf_test
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -111,19 +112,35 @@ func TestCarrier_DecimalScaleIsBounded(t *testing.T) {
 	}
 }
 
-// TestCarrier_BigFloatOverflowIsDiagnosed: a big_float_value past
-// big.Float's range came back as +Inf and was rendered as a literal no
-// parser takes; protowire#278 makes it a bind-time diagnostic. The
-// exponent itself is not bounded here — the cost of rendering a huge
-// finite one is protowire#281's question — so only the overflow and a
-// large finite value are pinned.
-func TestCarrier_BigFloatOverflowIsDiagnosed(t *testing.T) {
-	t.Run("overflow", func(t *testing.T) {
-		fd := synthField(t, defaultCarrier(18, bigFloatArg(math.MaxInt32, 64)))
-		var def, problems string
-		promptly(t, 5*time.Second, func() error { def, problems = readCarrier(fd); return nil })
-		require.Empty(t, def)
-		require.Contains(t, problems, "above big.Float's range")
+// TestCarrier_BigFloatExponentIsBounded: a big_float_value past
+// MaxBigFloatExponent is a bind-time diagnostic, refused before Text
+// runs, whose cost grows with the square of |exponent| (protowire#281).
+// The bound is also what makes 2^31-1, which used to reach big.Float's
+// ceiling and come back as +Inf (protowire#278), an error. A zero
+// mantissa is zero at any exponent, and a large finite value inside the
+// bound still renders.
+func TestCarrier_BigFloatExponentIsBounded(t *testing.T) {
+	// bigFloatArg's mantissa, 25, has 5 bits: binary exponent exp + 5.
+	for _, exp := range []int32{math.MaxInt32, pxf.MaxBigFloatExponent - 4, -pxf.MaxBigFloatExponent - 6, math.MinInt32} {
+		t.Run(fmt.Sprintf("exponent %d", exp), func(t *testing.T) {
+			fd := synthField(t, defaultCarrier(18, bigFloatArg(exp, 64)))
+			var def, problems string
+			promptly(t, 5*time.Second, func() error { def, problems = readCarrier(fd); return nil })
+			require.Empty(t, def)
+			require.Contains(t, problems, "MaxBigFloatExponent=16384")
+		})
+	}
+	t.Run("zero mantissa", func(t *testing.T) {
+		exp := int32(math.MinInt32)
+		var arg []byte
+		arg = protowire.AppendTag(arg, 2, protowire.VarintType)
+		arg = protowire.AppendVarint(arg, uint64(int64(exp)))
+		arg = protowire.AppendTag(arg, 3, protowire.VarintType)
+		arg = protowire.AppendVarint(arg, 64)
+		fd := synthField(t, defaultCarrier(18, arg))
+		def, problems := readCarrier(fd)
+		require.Empty(t, problems)
+		require.Equal(t, "0", def)
 	})
 	t.Run("large finite", func(t *testing.T) {
 		fd := synthField(t, defaultCarrier(18, bigFloatArg(10_000, 64)))

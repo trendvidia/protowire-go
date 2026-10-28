@@ -128,12 +128,14 @@ type UnmarshalOptions struct {
 	// nesting; MaxNumericLiteralDigits the digit count of any numeric
 	// literal; MaxBytesLiteralLength the decoded length of any b"…"
 	// literal, checked from its length before decoding;
-	// MaxRepeatedCount the element count of any repeated or map field.
+	// MaxRepeatedCount the element count of any repeated or map field;
+	// MaxBigFloatExponent the magnitude of a pxf.BigFloat's exponent.
 	MaxMessageSize          int
 	MaxNestingDepth         int
 	MaxNumericLiteralDigits int
 	MaxBytesLiteralLength   int
 	MaxRepeatedCount        int
+	MaxBigFloatExponent     int
 }
 
 // UnmarshalFull decodes PXF data into msg and returns field presence metadata.
@@ -168,6 +170,7 @@ func (o UnmarshalOptions) UnmarshalFull(data []byte, msg proto.Message) (*Result
 type limits struct {
 	maxDepth        int
 	maxDigits       int
+	maxBigFloatExp  int
 	maxMessageSize  int
 	maxBytesLiteral int
 	maxRepeated     int
@@ -176,6 +179,7 @@ type limits struct {
 var defaultLimits = limits{
 	maxDepth:        MaxNestingDepth,
 	maxDigits:       MaxNumericLiteralDigits,
+	maxBigFloatExp:  MaxBigFloatExponent,
 	maxMessageSize:  MaxMessageSize,
 	maxBytesLiteral: MaxBytesLiteralLength,
 	maxRepeated:     MaxRepeatedCount,
@@ -197,6 +201,9 @@ func (o UnmarshalOptions) limits() limits {
 	}
 	if o.MaxRepeatedCount > 0 {
 		lim.maxRepeated = o.MaxRepeatedCount
+	}
+	if o.MaxBigFloatExponent > 0 {
+		lim.maxBigFloatExp = o.MaxBigFloatExponent
 	}
 	return lim
 }

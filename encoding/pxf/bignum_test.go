@@ -680,20 +680,20 @@ func TestMarshalBoundsBigNumberLiterals(t *testing.T) {
 		require.NoError(t, err, "the decoder takes what the encoder wrote at the bound: %.40s…", out)
 	})
 	t.Run("BigFloat past the bound, rendered", func(t *testing.T) {
-		const want = "pxf.BigFloat renders to 4100 digits; MaxNumericLiteralDigits=4096"
+		const want = "pxf.BigFloat renders to 4099 digits; MaxNumericLiteralDigits=4096" // at MaxBigFloatExponent
 
 		msg := dynamicpb.NewMessage(demo)
-		setBigFloat(msg.Mutable(demo.Fields().ByName("big_float_field")).Message(), allOnes(13600), 100000, 13600)
+		setBigFloat(msg.Mutable(demo.Fields().ByName("big_float_field")).Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
 		_, err := pxf.Marshal(msg)
 		require.ErrorContains(t, err, want, "field")
 
 		msg = dynamicpb.NewMessage(demo)
-		setBigFloat(msg.Mutable(demo.Fields().ByName("repeated_big_float")).List().AppendMutable().Message(), allOnes(13600), 100000, 13600)
+		setBigFloat(msg.Mutable(demo.Fields().ByName("repeated_big_float")).List().AppendMutable().Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
 		_, err = pxf.Marshal(msg)
 		require.ErrorContains(t, err, want, "list")
 
 		mm := dynamicpb.NewMessage(maps)
-		setBigFloat(mm.Mutable(maps.Fields().ByName("floats")).Map().Mutable(protoreflect.ValueOfString("k").MapKey()).Message(), allOnes(13600), 100000, 13600)
+		setBigFloat(mm.Mutable(maps.Fields().ByName("floats")).Map().Mutable(protoreflect.ValueOfString("k").MapKey()).Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
 		_, err = pxf.Marshal(mm)
 		require.ErrorContains(t, err, want, "map")
 	})
