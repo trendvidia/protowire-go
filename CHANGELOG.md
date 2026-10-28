@@ -25,6 +25,26 @@ format changes.
 
 ### Changed
 
+- **A singular field bound twice in one message body is rejected**
+  ([#184](https://github.com/trendvidia/protowire-go/issues/184);
+  [protowire#347](https://github.com/trendvidia/protowire/issues/347)
+  option a, draft -01 § Entries and Keys). v1.10.0 kept the last value
+  of `s = "a"` then `s = "b"`, and merged `m { a = 1 }` with a later
+  `m { b = 2 }`. The decoder now fails at the second binding with
+  `field "s" is already set`. The rule covers scalars, wrappers, proto3
+  `optional` scalars, message fields in either spelling (`m { … }` or
+  `m = { … }`), and `null` followed by a value, in every message body:
+  the root, a sub-message, a list element, a map value, a keyed element,
+  an Any body opened by `@type`, and a `pxf.Secret` block decoded through
+  the `OnSecretField` hook, which therefore never sees a second value. A
+  oneof member bound twice keeps its existing oneof error. Repeated and
+  map fields still concatenate, and the same field may be bound once in
+  each of several bodies. A map key bound twice, in one map literal or
+  across two, still keeps the last value: the spec has not decided that
+  case yet ([protowire#396](https://github.com/trendvidia/protowire/issues/396)). `Parse` still accepts such a document; the rule
+  is a schema rule. The spec repo's `testdata/duplicates/` corpus is
+  vendored under `encoding/pxf/testdata/duplicates/`.
+
 - **A `pxf.BigFloat` whose binary exponent exceeds `MaxBigFloatExponent` (16384) is
   rejected** ([#185](https://github.com/trendvidia/protowire-go/issues/185), trendvidia/protowire#281). Rendering one in decimal
   costs time that grows with the square of its exponent. Measured through `pxf.Marshal`:
