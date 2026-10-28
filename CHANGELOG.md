@@ -11,6 +11,17 @@ format changes.
 
 ## [Unreleased]
 
+## [1.12.0] — 2026-10-28
+
+A minor release with one change, which brings map decoding in line with
+the rule v1.11.0 applied to singular fields. A map key bound twice in one
+message body is now an error, where the later value used to replace the
+earlier one silently ([#191]). Keys compare as values of the map's key
+type, so `1:` and `"1":` are one key on an integer-keyed map. Documents
+that decoded before can fail now. No API or wire-format change.
+
+[#191]: https://github.com/trendvidia/protowire-go/issues/191
+
 ### Changed
 
 - **A map key bound twice in one message body is rejected**
