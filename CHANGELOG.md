@@ -11,6 +11,18 @@ format changes.
 
 ## [Unreleased]
 
+### Removed
+
+- **The deprecated `check/protovalidate` module.** It moved to
+  [`github.com/trendvidia/protocheck/protovalidate`](https://github.com/trendvidia/protocheck/tree/main/protovalidate)
+  in protocheck v2.3.0 and was marked deprecated here, but every release
+  since kept bumping and tagging it, and CI kept testing it. Nothing
+  imports it. Its tagged versions (up to `check/protovalidate/v1.4.5`)
+  stay downloadable from the Go module proxy; new code should use the
+  protocheck module, which RFC-001 Appendix C names as the migration path.
+  CI and the nightly run drop its vet, test, govulncheck and staticcheck
+  steps.
+
 ### Changed
 
 - **`check/protovalidate` requires the parent module at v1.10.0 instead of
