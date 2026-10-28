@@ -277,8 +277,9 @@ func firstCol(n *bodyNode) int {
 // "c" is the entry `c = <value>`. One in a dotted column "a.b.c" is the
 // entry `c = <value>` inside `a { b { ... } }`, and every cell whose
 // column starts with "a." lands in that same one `a` block, in the order
-// its first non-empty cell appears (draft §3.4.4). Two blocks for one
-// sub-message would merge, but two for one oneof member are an error.
+// its first non-empty cell appears (draft §3.4.4). The one block is
+// required: two blocks for one sub-message bind it twice, which the
+// decoder rejects (#184), as it does two for one oneof member.
 // Empty cells produce no entry, and a block none of whose cells is
 // non-empty is not written: the field stays absent. A header with no
 // dotted column has no blocks, and its row is written without building
