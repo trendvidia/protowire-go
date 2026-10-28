@@ -66,6 +66,10 @@ format changes.
     is on the wire's mantissa, and a mantissa wider than its `prec` can round up to the
     next power of two. `encoding/pb` then decodes a value one past the bound, which its
     `Marshal` refuses.
+  - The block form, `big_float_field { mantissa = … exponent = … }`, is read as plain
+    fields and is not checked, as for `pxf.Decimal`'s scale: the spec bounds a value
+    where it is materialised ([#188](https://github.com/trendvidia/protowire-go/issues/188),
+    option b). Such a value decodes, and `Marshal` refuses it.
 
 - **`null` is accepted on a scalar with explicit presence**
   ([#182](https://github.com/trendvidia/protowire-go/issues/182);

@@ -48,6 +48,11 @@ const MaxNumericLiteralDigits = 4096
 // thirteen-byte literal such as 1e646456992 sets it. A literal is checked
 // after parsing, which is cheap whatever its exponent. 16384 is IEEE 754
 // binary128's exponent range.
+//
+// Like the Decimal scale bound, it applies where a value is materialised:
+// the block form `f { mantissa = … exponent = … }` is read as plain fields
+// and is not checked, and Marshal refuses such a value (draft -01
+// § Mandatory Limits; #188).
 const MaxBigFloatExponent = 16384
 
 // MaxMessageSize caps the total input to one decode or parse call, per
