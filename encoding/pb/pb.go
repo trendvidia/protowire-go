@@ -1037,10 +1037,16 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
 	if err := bigFloatExponentErr(mantInt.BitLen(), int64(exp), maxExp); err != nil {
 		return err
 	}
+	// The bound is on the wire's mantissa, so it holds the value before
+	// SetInt rounds it to prec. A mantissa wider than prec can round up a
+	// power of two, and land one past the bound: decoded here, refused by
+	// Marshal, as a decimal literal at the bound can be (protowire#281).
 	bf.SetPrec(prec).SetInt(mantInt)
-	// Within the bound the sum can still leave big.Float's range only for
-	// a mantissa near MaxInt32 bits, and SetMantExp then returns ±Inf,
-	// which pxf.BigFloat cannot mean; that is an error, not a value.
+	// The sum can leave big.Float's range, whose exponent is an int32, only
+	// when the caller has raised MaxBigFloatExponent near MaxInt32: the
+	// mantissa's bit length is bounded by MaxMessageSize. SetMantExp then
+	// returns ±Inf, which pxf.BigFloat cannot mean; that is an error, not
+	// a value (protowire#278).
 	bf.SetMantExp(bf, int(exp))
 	if bf.IsInf() {
 		return fmt.Errorf("pxf.BigFloat exponent %d with a %d-bit mantissa overflows big.Float", exp, mantInt.BitLen())

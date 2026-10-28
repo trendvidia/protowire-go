@@ -342,17 +342,17 @@ func bigFloatLiteral(b []byte) (string, string) {
 	// Text below costs time that grows with the square of the value's
 	// binary exponent, so the bound comes first (MaxBigFloatExponent,
 	// protowire#281). A zero mantissa is zero at any exponent.
-	if bits := new(big.Int).SetBytes(mantissa).BitLen(); bits > 0 {
-		if e := int64(exponent) + int64(bits); e > MaxBigFloatExponent || e < -MaxBigFloatExponent {
-			return "", fmt.Sprintf("@default's big_float_value has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", e, MaxBigFloatExponent)
-		}
+	if e, ok := bigFloatValueExponent(mantissa, int64(exponent)); ok && bigFloatExponentExceeds(e, MaxBigFloatExponent) {
+		return "", fmt.Sprintf("@default's big_float_value has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", e, MaxBigFloatExponent)
 	}
 
 	// value = mantissa x 2^exponent.
 	m := new(big.Float).SetPrec(uint(prec)).SetInt(new(big.Int).SetBytes(mantissa))
 	f := new(big.Float).SetPrec(uint(prec)).SetMantExp(m, int(exponent))
 	// SetMantExp hands back +Inf past big.Float's range, and pxf.BigFloat
-	// has no infinity: an error, not a value (protowire#278).
+	// has no infinity: an error, not a value (protowire#278). The bound
+	// above keeps every exponent far inside that range, so this is a
+	// guard for the day the bound moves, not a path any input reaches.
 	if f.IsInf() {
 		return "", fmt.Sprintf("@default's big_float_value (exponent %d, %d-bit mantissa) is above big.Float's range", exponent, m.MantExp(nil))
 	}

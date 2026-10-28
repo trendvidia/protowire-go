@@ -153,6 +153,63 @@ func TestBigFloatExponentBound(t *testing.T) {
 	}
 }
 
+// TestBigFloatExponentBoundEdges covers the states the bound's own test
+// never reaches: a mantissa with no bits, with leading zero bytes, wider
+// than its precision, a precision of zero, and a bound raised past
+// big.Float's range.
+func TestBigFloatExponentBoundEdges(t *testing.T) {
+	t.Run("zero mantissa is zero at any exponent", func(t *testing.T) {
+		for _, mant := range [][]byte{nil, {0, 0}} {
+			for _, exp := range []int32{math.MinInt32, math.MaxInt32} {
+				var h bigFloatHolder
+				if err := Unmarshal(bigFloatWire(mant, exp, 64), &h); err != nil || h.F.Sign() != 0 {
+					t.Fatalf("mantissa %x, exponent %d: %v, %v; want zero", mant, exp, h.F, err)
+				}
+			}
+		}
+	})
+	t.Run("prec 0 is zero at any exponent", func(t *testing.T) {
+		var h bigFloatHolder
+		if err := Unmarshal(bigFloatWire([]byte{1}, math.MinInt32, 0), &h); err != nil || h.F.Sign() != 0 {
+			t.Fatalf("%v, %v; want zero", h.F, err)
+		}
+	})
+	t.Run("leading zero bytes are not mantissa bits", func(t *testing.T) {
+		var h bigFloatHolder
+		if err := Unmarshal(bigFloatWire([]byte{0, 0, 1}, MaxBigFloatExponent-1, 64), &h); err != nil {
+			t.Fatalf("binary exponent %d: %v", MaxBigFloatExponent, err)
+		}
+		if err := Unmarshal(bigFloatWire([]byte{0, 0, 1}, MaxBigFloatExponent, 64), &h); err == nil || !strings.Contains(err.Error(), "MaxBigFloatExponent") {
+			t.Fatalf("binary exponent %d: err = %v, want the MaxBigFloatExponent error", MaxBigFloatExponent+1, err)
+		}
+	})
+	t.Run("a bound raised past big.Float's range still refuses an infinity", func(t *testing.T) {
+		// protowire#278: 25 × 2^(2^31-1) is above big.Float's range.
+		var h bigFloatHolder
+		err := (UnmarshalOptions{MaxBigFloatExponent: math.MaxInt}).Unmarshal(bigFloatWire([]byte{25}, math.MaxInt32, 64), &h)
+		if err == nil || !strings.Contains(err.Error(), "overflows") {
+			t.Fatalf("err = %v, want an overflow error", err)
+		}
+	})
+	// Pinned divergence. The bound is on the wire's mantissa and exponent,
+	// as protowire#281 defines it; SetInt then rounds the mantissa to
+	// prec, and 0xFF at one bit rounds up to 0x100. The decoded value is
+	// one past the bound, and Marshal refuses it. This fails the day the
+	// decoder checks the rounded value instead.
+	t.Run("rounding to prec can carry past the bound", func(t *testing.T) {
+		var h bigFloatHolder
+		if err := Unmarshal(bigFloatWire([]byte{0xFF}, MaxBigFloatExponent-8, 1), &h); err != nil {
+			t.Fatalf("wire binary exponent %d: %v", MaxBigFloatExponent, err)
+		}
+		if got := h.F.MantExp(nil); got != MaxBigFloatExponent+1 {
+			t.Fatalf("decoded MantExp %d, want %d", got, MaxBigFloatExponent+1)
+		}
+		if _, err := Marshal(&h); err == nil || !strings.Contains(err.Error(), "MaxBigFloatExponent") {
+			t.Fatalf("Marshal: err = %v, want the MaxBigFloatExponent error", err)
+		}
+	})
+}
+
 // TestMarshalRefusesWhatUnmarshalRejects: the encoders refuse a value the
 // wire cannot carry, instead of writing bytes no conformant decoder
 // accepts (a scale past the limit), a wrong exponent (int32 wrap), or

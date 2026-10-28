@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"math/bits"
 	"strings"
 	"time"
 
@@ -242,16 +243,26 @@ func readBigInt(msg protoreflect.Message) *big.Int {
 	return v
 }
 
-// bigFloatValueExponent returns the binary exponent of the value msg
-// holds, its wire exponent plus the mantissa's bit length, and false for
-// a zero mantissa, which has none.
-func bigFloatValueExponent(msg protoreflect.Message) (int64, bool) {
-	d := msg.Descriptor()
-	bits := new(big.Int).SetBytes(msg.Get(d.Fields().ByName("mantissa")).Bytes()).BitLen()
-	if bits == 0 {
+// bigFloatValueExponent returns the binary exponent of the value a
+// mantissa and wire exponent denote, the exponent plus the mantissa's bit
+// length, and false for a zero mantissa, which has none. The bit length
+// is read off the bytes, so no big.Int is built for it.
+func bigFloatValueExponent(mantissa []byte, exponent int64) (int64, bool) {
+	for len(mantissa) > 0 && mantissa[0] == 0 {
+		mantissa = mantissa[1:]
+	}
+	if len(mantissa) == 0 {
 		return 0, false
 	}
-	return msg.Get(d.Fields().ByName("exponent")).Int() + int64(bits), true
+	return exponent + int64(8*(len(mantissa)-1)+bits.Len8(mantissa[0])), true
+}
+
+// bigFloatExponentExceeds reports whether a value's binary exponent is
+// past limit in magnitude (MaxBigFloatExponent, protowire#281). Every
+// reader and writer of a pxf.BigFloat here asks it, each in its own
+// words.
+func bigFloatExponentExceeds(e int64, limit int) bool {
+	return e > int64(limit) || e < -int64(limit)
 }
 
 func readBigFloat(msg protoreflect.Message) *big.Float {
@@ -366,18 +377,23 @@ func readDecimalStr(msg protoreflect.Message) (string, error) {
 // formatBigFloat renders a BigFloat message as the literal parseBigFloat
 // takes, in exponent form at the precision the message declares.
 func formatBigFloat(msg protoreflect.Message) (string, error) {
+	// A precision of zero is zero whatever the other fields say, as it
+	// is to readBigFloat and to encoding/pb's Unmarshal, so it has no
+	// exponent to bound.
+	d := msg.Descriptor()
+	if msg.Get(d.Fields().ByName("prec")).Uint() == 0 {
+		return "0", nil
+	}
 	// Rendering costs time that grows with the square of |exponent|, so
 	// the bound comes before anything is built (MaxBigFloatExponent,
 	// protowire#281). A message past it has no PXF literal: an error,
 	// not a substituted value.
-	if e, ok := bigFloatValueExponent(msg); ok && (e > MaxBigFloatExponent || e < -MaxBigFloatExponent) {
+	mantissa := msg.Get(d.Fields().ByName("mantissa")).Bytes()
+	if e, ok := bigFloatValueExponent(mantissa, msg.Get(d.Fields().ByName("exponent")).Int()); ok && bigFloatExponentExceeds(e, MaxBigFloatExponent) {
 		return "", fmt.Errorf("pxf.BigFloat binary exponent %d exceeds MaxBigFloatExponent=%d", e, MaxBigFloatExponent)
 	}
 	bf := readBigFloat(msg)
 	prec := bf.Prec()
-	if prec == 0 {
-		return "0", nil
-	}
 	// Use enough decimal digits to represent the precision.
 	// log10(2) ≈ 0.301, so prec bits ≈ prec*0.301 decimal digits.
 	decDigits := int(float64(prec)*0.30103) + 1
@@ -495,7 +511,7 @@ func parseBigFloat(s string, maxDigits, maxExp int) (*big.Float, error) {
 	}
 	// The value's binary exponent is bounded as one read off the wire is
 	// (MaxBigFloatExponent, protowire#281). Zero has none.
-	if e := bf.MantExp(nil); bf.Sign() != 0 && (e > maxExp || e < -maxExp) {
+	if e := bf.MantExp(nil); bf.Sign() != 0 && bigFloatExponentExceeds(int64(e), maxExp) {
 		return nil, fmt.Errorf("big float literal %s has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", clipLiteral(s), e, maxExp)
 	}
 	return bf, nil

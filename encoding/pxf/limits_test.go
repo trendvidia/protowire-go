@@ -207,3 +207,50 @@ func TestMarshalRefusesBigFloatPastExponentBound(t *testing.T) {
 		})
 	}
 }
+
+// TestMarshalBigFloatExponentBoundEdges: the states the test above never
+// reaches. A precision of zero is zero, as readBigFloat and encoding/pb
+// read it, whatever the exponent; so is a mantissa with no bits; and a
+// mantissa's leading zero bytes are not bits of it.
+func TestMarshalBigFloatExponentBoundEdges(t *testing.T) {
+	md := bigNumDesc(t, "BigNumDemo")
+	field := md.Fields().ByName("big_float_field")
+	set := func(mantissa []byte, exponent int32, prec uint32) protoreflect.Message {
+		msg := dynamicpb.NewMessage(md)
+		sub := msg.Mutable(field).Message()
+		d := sub.Descriptor()
+		sub.Set(d.Fields().ByName("mantissa"), protoreflect.ValueOfBytes(mantissa))
+		sub.Set(d.Fields().ByName("exponent"), protoreflect.ValueOfInt32(exponent))
+		sub.Set(d.Fields().ByName("prec"), protoreflect.ValueOfUint32(prec))
+		return msg
+	}
+	for _, tc := range []struct {
+		name     string
+		mantissa []byte
+		exponent int32
+		prec     uint32
+		wantErr  string // "" for a literal
+	}{
+		{"prec 0", []byte{1}, math.MinInt32, 0, ""},
+		{"empty mantissa", nil, math.MinInt32, 64, ""},
+		{"zero bytes", []byte{0, 0}, math.MaxInt32, 64, ""},
+		{"leading zeros, at the bound", []byte{0, 0, 3}, pxf.MaxBigFloatExponent - 2, 64, ""},
+		{"leading zeros, past the bound", []byte{0, 0, 3}, pxf.MaxBigFloatExponent - 1, 64, "binary exponent 16385 exceeds MaxBigFloatExponent=16384"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out []byte
+			err := promptly(t, 2*time.Second, func() error {
+				var err error
+				out, err = pxf.Marshal(set(tc.mantissa, tc.exponent, tc.prec).Interface())
+				return err
+			})
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			_, err = pxf.UnmarshalDescriptor(out, md)
+			require.NoError(t, err, "the decoder takes what the encoder wrote: %s", out)
+		})
+	}
+}
