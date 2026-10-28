@@ -25,6 +25,28 @@ format changes.
 
 ### Changed
 
+- **A `pxf.BigFloat` whose binary exponent exceeds `MaxBigFloatExponent` (16384) is
+  rejected** ([#185](https://github.com/trendvidia/protowire-go/issues/185), trendvidia/protowire#281). Rendering one in decimal
+  costs time that grows with the square of its exponent. Measured through `pxf.Marshal`:
+  3.3 ms at −2^14, 200 ms at −2^17, and past 10 s at −2^20.
+  - The bound is on the value's binary exponent, which is the wire `exponent` plus the
+    mantissa's bit length. It does not depend on precision, so a value written at 64
+    bits reads back from its literal at 256.
+  - `encoding/pb` Unmarshal and Marshal, `encoding/pxf` literal decode, `Marshal` and
+    the `(pxf.default)` carrier reader all check it before doing any work that grows
+    with the exponent. Over the bound, `Marshal` now fails in about 0.1 ms.
+  - `Marshal` no longer writes `+Inf` for an exponent of 2^31−1. It fails instead.
+  - `UnmarshalOptions.MaxBigFloatExponent` sets the bound per call in both packages,
+    and `check_decode --limit MaxBigFloatExponent=N` passes it through. `Marshal` and
+    the carrier reader keep the package constant, so a decode bound raised above 16384
+    admits values that `Marshal` then refuses.
+  - Known edge: a value within one decimal rounding of 2^±16384 can print as a literal
+    just past the bound, which the decoder then rejects. A finite decimal literal
+    cannot hold a power of two exactly. The same holds for a binary rounding: the bound
+    is on the wire's mantissa, and a mantissa wider than its `prec` can round up to the
+    next power of two. `encoding/pb` then decodes a value one past the bound, which its
+    `Marshal` refuses.
+
 - **`null` is accepted on a scalar with explicit presence**
   ([#182](https://github.com/trendvidia/protowire-go/issues/182);
   [protowire#339](https://github.com/trendvidia/protowire/issues/339)

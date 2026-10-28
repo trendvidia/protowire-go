@@ -85,6 +85,7 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 		MaxNumericLiteralDigits: tr.lim.maxDigits,
 		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
 		MaxRepeatedCount:        tr.lim.maxRepeated,
+		MaxBigFloatExponent:     tr.lim.maxBigFloatExp,
 		TypeResolver:            tr.resolver,
 	}
 	// The column paths depend on msg's type and the header, never on the
