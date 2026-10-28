@@ -234,7 +234,7 @@ func checkRowPresence(m protoreflect.Message, cols []datasetColumn, filled map[s
 // see AppendDatasetRow.
 func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescriptor, path string, cols []protoreflect.FieldDescriptor, o cellOptions) error {
 	isMsg := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
-	if isMsg && e.nullSet[path] {
+	if e.nullSet[path] && nullable(fd) {
 		e.buf.WriteString("null")
 		return nil
 	}
@@ -269,8 +269,10 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 		}
 	}
 	if !isMsg {
-		// No cell holds an unset scalar with presence: the draft rejects
-		// null on a scalar field. Empty reads back as the default.
+		// An unset scalar with presence is an empty cell, which reads
+		// back as its default (decided on #146). null would keep it
+		// unset, which the draft allows since #182; whether the writer
+		// should is the owner's call.
 		return nil
 	}
 	e.buf.WriteString("null")

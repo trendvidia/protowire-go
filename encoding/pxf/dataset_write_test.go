@@ -568,11 +568,11 @@ func TestDatasetWrite_RefusesInvalidSchema(t *testing.T) {
 	}
 }
 
-// A message-typed field in the message's _null mask is null, as Marshal
-// writes it, so a default stays off and a required field is satisfied.
-// A scalar in the mask is written as if the mask did not name it, by
-// the writer and by Marshal alike: null on a scalar is a decode error
-// (#150, #151).
+// A field with presence in the message's _null mask is null, as Marshal
+// writes it, so a default stays off and a required field is satisfied;
+// that includes an optional scalar (#182). A plain scalar in the mask is
+// written as if the mask did not name it, by the writer and by Marshal
+// alike: null on it is a decode error (#150, #151).
 func TestDatasetWrite_NullMask(t *testing.T) {
 	src := `syntax = "proto3";
 package dswnull.v1;
@@ -585,13 +585,14 @@ message N {
   google.protobuf.Int32Value rw = 3 [(pxf.required) = true];
   int32 n = 4;
   google.protobuf.FieldMask _null = 5;
+  optional int32 o = 6 [(pxf.default) = "7"];
 }`
 	fd := compileProtoSources(t, "null.proto", map[string]string{"null.proto": src, "pxf/annotations.proto": annotationsProtoSrc})
 	desc := fd.Messages().ByName("N")
-	cols := []string{"w", "dw", "rw", "n"}
+	cols := []string{"w", "dw", "rw", "n", "o"}
 
 	m := dynamicpb.NewMessage(desc)
-	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = null\n"), m)
+	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = null\no = null\n"), m)
 	require.NoError(t, err)
 	require.NoError(t, pxf.Unmarshal([]byte(`w = "set anyway"`+"\nn = 3\n"), m))
 	// A scalar in the mask: no decode puts one there since #150, but a
@@ -601,11 +602,21 @@ message N {
 	mask.Mutable(mask.Descriptor().Fields().ByName("paths")).List().Append(protoreflect.ValueOfString("n"))
 	marshalled, err := pxf.Marshal(m)
 	require.NoError(t, err)
-	assert.Equal(t, "w = null\ndw = null\nrw = null\nn = 3\n", string(marshalled))
+	assert.Equal(t, "w = null\ndw = null\nrw = null\nn = 3\no = null\n", string(marshalled))
 
 	row, err := pxf.AppendDatasetRow(nil, m, cols)
 	require.NoError(t, err)
-	assert.Equal(t, "(null, null, null, 3)\n", string(row))
+	assert.Equal(t, "(null, null, null, 3, null)\n", string(row))
+
+	// The null o reads back unset, not as its default, and in the mask.
+	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
+	require.NoError(t, err)
+	tr, err := pxf.NewDatasetReader(bytes.NewReader(append(h, row...)))
+	require.NoError(t, err)
+	back := dynamicpb.NewMessage(desc)
+	require.NoError(t, tr.Scan(back))
+	assert.False(t, back.Has(desc.Fields().ByName("o")), "o stays unset")
+	assert.Contains(t, readMaskPaths(back), "o")
 
 	// Without the mask, the set wrapper is its value and the unset
 	// required one is refused.
@@ -857,4 +868,15 @@ func TestDatasetWrite_DottedIntoSecret(t *testing.T) {
 		require.NoError(t, err, doc)
 		assertTableReadsBack(t, desc, append(slices.Clone(h), row...), []*dynamicpb.Message{withDefaults(t, desc, m, cols)})
 	}
+}
+
+// readMaskPaths returns the paths of m's _null FieldMask.
+func readMaskPaths(m protoreflect.Message) []string {
+	mask := m.Get(m.Descriptor().Fields().ByName("_null")).Message()
+	l := mask.Get(mask.Descriptor().Fields().ByName("paths")).List()
+	var out []string
+	for i := range l.Len() {
+		out = append(out, l.Get(i).String())
+	}
+	return out
 }
