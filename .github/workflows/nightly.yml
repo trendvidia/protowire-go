@@ -38,7 +38,3 @@ jobs:
 
       - name: go test (race, count=10)
         run: go test -race -count=10 ./...
-
-      - name: go test (check/protovalidate, race, count=10)
-        run: go test -race -count=10 ./...
-        working-directory: check/protovalidate
