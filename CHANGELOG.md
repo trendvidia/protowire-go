@@ -11,6 +11,21 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A map key bound twice in one message body is rejected**
+  ([#191](https://github.com/trendvidia/protowire-go/issues/191), trendvidia/protowire#396).
+  - Inside one map literal or across two bindings of the field, the second occurrence fails
+    with `map field "labels": key "a" is already set`. Before, the later value replaced the
+    earlier one silently.
+  - Keys compare as values of the key type, so `1:` and `"1":` on an integer-keyed map, or
+    `true:` and `1:` on a bool-keyed one, are one key.
+  - Two bindings with distinct keys still merge, and each message body is its own scope.
+  - The decoder records the keys it binds, rather than asking the map. Decoding into a message
+    that already holds a key still replaces that key's value.
+  - `testdata/duplicates/` is re-vendored with protowire's seven new map fixtures.
+  - `TestBoolMapKeySpellings` no longer expects the later of two spellings of one key to win.
+
 ## [1.11.0] — 2026-10-28
 
 A minor release that brings decoding in line with four decisions draft

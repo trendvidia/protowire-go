@@ -9,7 +9,7 @@ package pxf_test
 // the second binding: a second scalar does not replace the first, and a
 // second block does not merge into it. The fixture corpus under
 // testdata/duplicates/ is vendored verbatim from the spec repository
-// (trendvidia/protowire testdata/duplicates/, commit 1ff38dd) and is
+// (trendvidia/protowire testdata/duplicates/, PR trendvidia/protowire#399 at da4d315) and is
 // shared by every port; keep the two in sync when the spec repo adds
 // fixtures. Its README names the spec repo's driver,
 // cmd/pxf/duplicates_test.go, which also runs `pxf validate`; in this
@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
@@ -33,18 +34,25 @@ import (
 // duplicatesVerdicts is each fixture's error substring, "" for accept,
 // as the spec repo's corpus driver states them.
 var duplicatesVerdicts = map[string]string{
-	"err-scalar-twice.pxf":              `field "s" is already set`,
-	"err-scalar-same-value.pxf":         `field "s" is already set`,
-	"err-wrapper-twice.pxf":             `field "w" is already set`,
-	"err-message-twice.pxf":             `field "m" is already set`,
-	"err-message-assign-then-block.pxf": `field "m" is already set`,
-	"err-nested-scalar-twice.pxf":       `field "a" is already set`,
-	"err-null-then-value.pxf":           `field "w" is already set`,
-	"err-optional-twice.pxf":            `field "o" is already set`,
-	"err-oneof-member-twice.pxf":        `field "km" conflicts with already-set field "km"`,
-	"err-oneof-scalar-twice.pxf":        `field "ks" conflicts with already-set field "ks"`,
-	"once-per-body.pxf":                 "",
-	"repeated-twice.pxf":                "",
+	"err-scalar-twice.pxf":                  `field "s" is already set`,
+	"err-scalar-same-value.pxf":             `field "s" is already set`,
+	"err-wrapper-twice.pxf":                 `field "w" is already set`,
+	"err-message-twice.pxf":                 `field "m" is already set`,
+	"err-message-assign-then-block.pxf":     `field "m" is already set`,
+	"err-nested-scalar-twice.pxf":           `field "a" is already set`,
+	"err-null-then-value.pxf":               `field "w" is already set`,
+	"err-optional-twice.pxf":                `field "o" is already set`,
+	"err-oneof-member-twice.pxf":            `field "km" conflicts with already-set field "km"`,
+	"err-oneof-scalar-twice.pxf":            `field "ks" conflicts with already-set field "ks"`,
+	"once-per-body.pxf":                     "",
+	"repeated-twice.pxf":                    "",
+	"err-map-key-twice-in-literal.pxf":      "already set",
+	"err-map-key-twice-same-value.pxf":      "already set",
+	"err-map-key-twice-across-bindings.pxf": "already set",
+	"err-map-key-twice-int-spellings.pxf":   "already set",
+	"err-map-key-twice-message-values.pxf":  "already set",
+	"map-twice-distinct-keys.pxf":           "",
+	"map-key-once-per-body.pxf":             "",
 }
 
 func TestDuplicatesCorpus(t *testing.T) {
@@ -199,22 +207,46 @@ func TestDuplicatesEdges(t *testing.T) {
 	})
 
 	t.Run("map key twice", func(t *testing.T) {
+		// A map key bound twice in one message body is rejected, inside
+		// one literal or across bindings; distinct keys merge; each body
+		// is its own scope (protowire#396, option b).
 		desc := compilePlacementSrc(t, `
 syntax = "proto3";
 package dupmap.v1;
-message M { map<string, string> labels = 1; }
+message In { map<string, string> tags = 1; }
+message M {
+  map<string, string> labels = 1;
+  map<int32, string> nums = 2;
+  map<string, In> inners = 3;
+  repeated In items = 4;
+}
 `, "dupmap.v1", "M")
-		labels := desc.Fields().ByName("labels")
-		for _, doc := range []string{
-			`labels = { a: "1" a: "2" }`,
-			"labels = { a: \"1\" }\nlabels = { a: \"2\" }",
+		for _, tc := range []struct{ doc, want string }{
+			{`labels = { a: "1" a: "2" }`, `map field "labels": key "a" is already set`},
+			{`labels = { a: "1" a: "1" }`, `map field "labels": key "a" is already set`},
+			{"labels = { a: \"1\" }\nlabels = { a: \"2\" }", `map field "labels": key "a" is already set`},
+			{`nums = { 1: "x" "1": "y" }`, `map field "nums": key 1 is already set`},
+			{`inners = { k: { tags = { a: "1" } } k: { tags = { b: "2" } } }`, `map field "inners": key "k" is already set`},
 		} {
-			m, err := pxf.UnmarshalDescriptor([]byte(doc), desc)
-			require.NoError(t, err, doc)
-			got := m.Get(labels).Map()
-			assert.Equal(t, 1, got.Len(), doc)
-			assert.Equal(t, "2", got.Get(protoreflect.ValueOfString("a").MapKey()).String(), doc)
+			_, err := pxf.UnmarshalDescriptor([]byte(tc.doc), desc)
+			require.ErrorContains(t, err, tc.want, tc.doc)
 		}
+
+		m, err := pxf.UnmarshalDescriptor([]byte("labels = { a: \"1\" }\nlabels = { b: \"2\" }"), desc)
+		require.NoError(t, err, "distinct keys across bindings merge")
+		assert.Equal(t, 2, m.Get(desc.Fields().ByName("labels")).Map().Len())
+
+		_, err = pxf.UnmarshalDescriptor([]byte(`items = [{ tags = { a: "1" } }, { tags = { a: "2" } }]`), desc)
+		require.NoError(t, err, "each list element is its own scope")
+
+		// Keys the caller set before decoding are not this decode's
+		// bindings: decoding a: "2" into a message holding a: "1"
+		// replaces it, as a decode into a populated message does.
+		pre := dynamicpb.NewMessage(desc)
+		labels := desc.Fields().ByName("labels")
+		pre.Mutable(labels).Map().Set(protoreflect.ValueOfString("a").MapKey(), protoreflect.ValueOfString("1"))
+		require.NoError(t, pxf.UnmarshalOptions{}.Unmarshal([]byte(`labels = { a: "2" }`), pre))
+		assert.Equal(t, "2", pre.Get(labels).Map().Get(protoreflect.ValueOfString("a").MapKey()).String())
 	})
 }
 

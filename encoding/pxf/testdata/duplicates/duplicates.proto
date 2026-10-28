@@ -2,7 +2,7 @@
 // Copyright (c) 2026 TrendVidia, LLC.
 
 // Schema for the singular-field-bound-twice fixtures under
-// testdata/duplicates/ (issue #347; IETF draft -01 § Entries and Keys).
+// testdata/duplicates/ (issues #347 and #396; IETF draft -01 § Entries and Keys).
 
 syntax = "proto3";
 
@@ -13,6 +13,7 @@ import "google/protobuf/wrappers.proto";
 message Inner {
   int32 a = 1;
   int32 b = 2;
+  map<string, string> tags = 3;
 }
 
 message Holder {
@@ -26,4 +27,7 @@ message Holder {
   Inner n = 6;
   repeated Inner items = 7;
   optional int32 o = 8;
+  map<string, string> labels = 9;
+  map<int32, string> nums = 10;
+  map<string, Inner> inners = 11;
 }
