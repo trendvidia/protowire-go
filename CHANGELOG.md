@@ -39,7 +39,9 @@ format changes.
   the `OnSecretField` hook, which therefore never sees a second value. A
   oneof member bound twice keeps its existing oneof error. Repeated and
   map fields still concatenate, and the same field may be bound once in
-  each of several bodies. `Parse` still accepts such a document; the rule
+  each of several bodies. A map key bound twice, in one map literal or
+  across two, still keeps the last value: the spec has not decided that
+  case yet ([protowire#396](https://github.com/trendvidia/protowire/issues/396)). `Parse` still accepts such a document; the rule
   is a schema rule. The spec repo's `testdata/duplicates/` corpus is
   vendored under `encoding/pxf/testdata/duplicates/`.
 

@@ -751,24 +751,41 @@ type boundFields struct {
 }
 
 // bind records fd as bound, or reports that the body already bound it.
+// It runs on every entry, so a map, a repeated field of entries, is
+// excluded by the one cardinality test rather than IsList and IsMap,
+// and the slice for indexes past 63 is left to bindWide.
 func (b *boundFields) bind(fd protoreflect.FieldDescriptor, pos Position) error {
-	if fd.IsList() || fd.IsMap() {
+	if fd.Cardinality() == protoreflect.Repeated {
 		return nil
 	}
 	i := fd.Index()
-	word, bit := &b.small, uint64(1)<<(i%64)
 	if i >= 64 {
-		w := i/64 - 1
-		if w >= len(b.big) {
-			b.big = append(b.big, make([]uint64, w+1-len(b.big))...)
-		}
-		word = &b.big[w]
+		return b.bindWide(fd, i, pos)
 	}
-	if *word&bit != 0 {
-		return errorf(pos, "field %q is already set", fd.Name())
+	bit := uint64(1) << i
+	if b.small&bit != 0 {
+		return alreadySet(fd, pos)
 	}
-	*word |= bit
+	b.small |= bit
 	return nil
+}
+
+// bindWide is bind for a field index past 63.
+func (b *boundFields) bindWide(fd protoreflect.FieldDescriptor, i int, pos Position) error {
+	w := i/64 - 1
+	if w >= len(b.big) {
+		b.big = append(b.big, make([]uint64, w+1-len(b.big))...)
+	}
+	bit := uint64(1) << (i % 64)
+	if b.big[w]&bit != 0 {
+		return alreadySet(fd, pos)
+	}
+	b.big[w] |= bit
+	return nil
+}
+
+func alreadySet(fd protoreflect.FieldDescriptor, pos Position) error {
+	return errorf(pos, "field %q is already set", fd.Name())
 }
 
 func checkOneofDirect(fd protoreflect.FieldDescriptor, setOneofs *map[string]string, pos Position) error {
@@ -1731,6 +1748,7 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 	defer func() { d.depth-- }()
 
 	desc := sub.Descriptor()
+	valueFd := desc.Fields().ByName("value")
 	hintFd := desc.Fields().ByName("hint")
 	fingerprintFd := desc.Fields().ByName("fingerprint")
 	// The same rule as any other body (boundFields): each subfield is
@@ -1765,13 +1783,11 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 		if !utf8.ValidString(d.current.Value) {
 			return errorf(d.current.Pos, "invalid UTF-8 in pxf.Secret %s", name)
 		}
-		if fd := desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
-			if err := bound.bind(fd, namePos); err != nil {
-				return err
-			}
-		}
 		switch name {
 		case "value":
+			if err := bound.bind(valueFd, namePos); err != nil {
+				return err
+			}
 			if err := d.onSecret(path, d.current.Value); err != nil {
 				return errorf(d.current.Pos, "pxf.Secret hook for %q: %v", path, err)
 			}
@@ -1779,11 +1795,17 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 				d.result.markPresent(path + ".value")
 			}
 		case "hint":
+			if err := bound.bind(hintFd, namePos); err != nil {
+				return err
+			}
 			fastSet(sub, hintFd, protoreflect.ValueOfString(d.current.Value))
 			if d.result != nil {
 				d.result.markPresent(path + ".hint")
 			}
 		case "fingerprint":
+			if err := bound.bind(fingerprintFd, namePos); err != nil {
+				return err
+			}
 			fastSet(sub, fingerprintFd, protoreflect.ValueOfString(d.current.Value))
 			if d.result != nil {
 				d.result.markPresent(path + ".fingerprint")

@@ -11,7 +11,10 @@ package pxf_test
 // testdata/duplicates/ is vendored verbatim from the spec repository
 // (trendvidia/protowire testdata/duplicates/, commit 1ff38dd) and is
 // shared by every port; keep the two in sync when the spec repo adds
-// fixtures.
+// fixtures. Its README names the spec repo's driver,
+// cmd/pxf/duplicates_test.go, which also runs `pxf validate`; in this
+// repo the driver is TestDuplicatesCorpus below, and it runs Parse and
+// the decoder only.
 
 import (
 	"fmt"
@@ -146,12 +149,71 @@ func TestDuplicatesEveryBody(t *testing.T) {
 		for _, doc := range []string{
 			`db_password { value = "a" value = "b" }`,
 			`db_password { hint = "a" hint = "a" }`,
+			`db_password { fingerprint = "a" value = "b" fingerprint = "c" }`,
 		} {
 			var got []recordedSecret
 			opts := pxf.UnmarshalOptions{OnSecretField: recorder(&got)}
 			_, err := opts.UnmarshalDescriptor([]byte(doc), desc)
 			require.ErrorContains(t, err, "is already set", doc)
 			assert.LessOrEqual(t, len(got), 1, "the hook sees at most the first value")
+		}
+	})
+}
+
+// The edges of the rule. A keyed element's body opens with its key field
+// already set from the entry name, and that is not a binding: one
+// explicit, agreeing assignment is accepted, a second is not. A keyed
+// field written as two blocks concatenates even when a name repeats,
+// since the duplicate-key check is per block (draft -01 § Keyed Repeated
+// Fields, Decoding). A map key bound twice is a question the spec left
+// open (trendvidia/protowire#396); the decoder keeps the last value, and
+// this pins that so the day it changes is seen.
+func TestDuplicatesEdges(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "keyed", "keyed.proto"))
+	require.NoError(t, err)
+	fd := compileProtoSources(t, "keyed.proto", map[string]string{
+		"keyed.proto":           string(data),
+		"pxf/annotations.proto": annotationsProtoSrc,
+	})
+	node := fd.Messages().ByName("Node")
+	children := node.Fields().ByName("children")
+	id := node.Fields().ByName("id")
+
+	t.Run("keyed element key", func(t *testing.T) {
+		m, err := pxf.UnmarshalDescriptor([]byte(`children { a { id = "a" weight = 1 } }`), node)
+		require.NoError(t, err)
+		assert.Equal(t, "a", m.Get(children).List().Get(0).Message().Get(id).String())
+
+		_, err = pxf.UnmarshalDescriptor([]byte(`children { a { id = "a" id = "a" } }`), node)
+		require.ErrorContains(t, err, `1:25: field "id" is already set`)
+	})
+
+	t.Run("keyed field in two blocks", func(t *testing.T) {
+		m, err := pxf.UnmarshalDescriptor([]byte("children { a { weight = 1 } }\nchildren { a { weight = 2 } }"), node)
+		require.NoError(t, err)
+		list := m.Get(children).List()
+		require.Equal(t, 2, list.Len())
+		for i := range 2 {
+			assert.Equal(t, "a", list.Get(i).Message().Get(id).String())
+		}
+	})
+
+	t.Run("map key twice", func(t *testing.T) {
+		desc := compilePlacementSrc(t, `
+syntax = "proto3";
+package dupmap.v1;
+message M { map<string, string> labels = 1; }
+`, "dupmap.v1", "M")
+		labels := desc.Fields().ByName("labels")
+		for _, doc := range []string{
+			`labels = { a: "1" a: "2" }`,
+			"labels = { a: \"1\" }\nlabels = { a: \"2\" }",
+		} {
+			m, err := pxf.UnmarshalDescriptor([]byte(doc), desc)
+			require.NoError(t, err, doc)
+			got := m.Get(labels).Map()
+			assert.Equal(t, 1, got.Len(), doc)
+			assert.Equal(t, "2", got.Get(protoreflect.ValueOfString("a").MapKey()).String(), doc)
 		}
 	})
 }
