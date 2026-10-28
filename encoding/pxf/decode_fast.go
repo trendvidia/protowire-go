@@ -572,6 +572,7 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 	}
 	fields := desc.Fields()
 	var setOneofs map[string]string
+	var bound boundFields
 
 	// A non-nil keyedElem applies to exactly this body: the immediate
 	// entries of one element of a keyed repeated field. Consume it so
@@ -622,6 +623,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 				return errorf(pos, "unknown field %q in %s", key, desc.FullName())
 			}
 			if err := checkOneofDirect(fd, &setOneofs, pos); err != nil {
+				return err
+			}
+			if err := bound.bind(fd, pos); err != nil {
 				return err
 			}
 			if d.current.Kind == NULL {
@@ -701,6 +705,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			if err := checkOneofDirect(fd, &setOneofs, pos); err != nil {
 				return err
 			}
+			if err := bound.bind(fd, pos); err != nil {
+				return err
+			}
 			if d.result != nil {
 				d.result.markPresent(d.pathPrefix + string(fd.Name()))
 			}
@@ -715,6 +722,40 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			return errorf(d.current.Pos, "expected '=', ':', or '{' after %q, got %s", key, d.current.Kind)
 		}
 	}
+}
+
+// boundFields is the set of singular fields one message body has bound,
+// by field index: a singular field, any that is not repeated or a map, is
+// bound at most once in a body, so a second scalar does not replace the
+// first and a second block does not merge into it (draft -01 § Entries
+// and Keys; trendvidia/protowire#347, option a). null is a binding too.
+// Repeated fields concatenate (#337), and each body, a sub-message's or a
+// list element's, has a set of its own. The first 64 fields need no
+// allocation.
+type boundFields struct {
+	small uint64
+	big   []uint64
+}
+
+// bind records fd as bound, or reports that the body already bound it.
+func (b *boundFields) bind(fd protoreflect.FieldDescriptor, pos Position) error {
+	if fd.IsList() || fd.IsMap() {
+		return nil
+	}
+	i := fd.Index()
+	word, bit := &b.small, uint64(1)<<(i%64)
+	if i >= 64 {
+		w := i/64 - 1
+		if w >= len(b.big) {
+			b.big = append(b.big, make([]uint64, w+1-len(b.big))...)
+		}
+		word = &b.big[w]
+	}
+	if *word&bit != 0 {
+		return errorf(pos, "field %q is already set", fd.Name())
+	}
+	*word |= bit
+	return nil
 }
 
 func checkOneofDirect(fd protoreflect.FieldDescriptor, setOneofs *map[string]string, pos Position) error {
@@ -1679,6 +1720,9 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 	desc := sub.Descriptor()
 	hintFd := desc.Fields().ByName("hint")
 	fingerprintFd := desc.Fields().ByName("fingerprint")
+	// The same rule as any other body (boundFields): each subfield is
+	// bound at most once, so the hook never sees a second value.
+	var bound boundFields
 
 	for {
 		switch d.current.Kind {
@@ -1707,6 +1751,11 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 		}
 		if !utf8.ValidString(d.current.Value) {
 			return errorf(d.current.Pos, "invalid UTF-8 in pxf.Secret %s", name)
+		}
+		if fd := desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
+			if err := bound.bind(fd, namePos); err != nil {
+				return err
+			}
 		}
 		switch name {
 		case "value":
