@@ -11,6 +11,30 @@ format changes.
 
 ## [Unreleased]
 
+## [1.11.0] — 2026-10-28
+
+A minor release that brings decoding in line with four decisions draft
+`-01` took for protowire v1.13. A singular field set twice in one
+message body is now an error, where it used to keep the last value or
+merge two blocks ([#184]). A `pxf.BigFloat` whose binary exponent is past
+`MaxBigFloatExponent` (16384) is rejected on decode and refused by
+`Marshal`, which used to take over 10 s to render one at exponent
+−2^20 ([#185]). The block form of a `BigFloat` or `Decimal` is not checked,
+because the spec bounds a value where it is computed ([#188]). `null` is
+now accepted on a scalar with explicit presence, such as a proto3
+`optional` field or a oneof member ([#182]). A build against
+`buf.build/go/protovalidate` v1.2.0 works again ([#179]). The deprecated
+`check/protovalidate` module is gone; its tags stay on the module proxy.
+Documents that decoded before can fail now: a field set twice, a
+`BigFloat` past the bound, and `null` on a proto2 `required` message
+field. New API: `UnmarshalOptions.MaxBigFloatExponent`
+in `encoding/pb` and `encoding/pxf`. No wire-format change.
+
+[#182]: https://github.com/trendvidia/protowire-go/issues/182
+[#184]: https://github.com/trendvidia/protowire-go/issues/184
+[#185]: https://github.com/trendvidia/protowire-go/issues/185
+[#188]: https://github.com/trendvidia/protowire-go/issues/188
+
 ### Removed
 
 - **The deprecated `check/protovalidate` module.** It moved to
