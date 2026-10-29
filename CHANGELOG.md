@@ -13,14 +13,24 @@ format changes.
 
 ## [1.12.0] — 2026-10-28
 
-A minor release with one change, which brings map decoding in line with
-the rule v1.11.0 applied to singular fields. A map key bound twice in one
+A minor release that settles a `pxf.BigFloat`'s PXF text and brings map
+decoding in line with the rule v1.11.0 applied to singular fields. A
+BigFloat is now written with its precision as a suffix,
+`0.10000000000000001p53`, and a literal with a suffix is read back at
+exactly that precision, so value and precision survive a round trip
+([#194]). v1.11.0 and earlier reject the suffix, so they cannot read
+BigFloat text this release writes; text without a suffix reads as before.
+`encoding/pb` writes a BigFloat zero with exponent 0 at any precision, so
+a zero has one encoding; bytes written before still decode ([#196]). With
+`DiscardUnknown`, the decoder now rejects the grammar errors `Parse`
+rejects in content it skips ([#196]). A map key bound twice in one
 message body is now an error, where the later value used to replace the
-earlier one silently ([#191]). Keys compare as values of the map's key
-type, so `1:` and `"1":` are one key on an integer-keyed map. Documents
-that decoded before can fail now. No API or wire-format change.
+earlier one silently ([#191]). Documents that decoded before can fail
+now. `IntVal` and `FloatVal` gain a `Prec` field; no other API change.
 
 [#191]: https://github.com/trendvidia/protowire-go/issues/191
+[#194]: https://github.com/trendvidia/protowire-go/issues/194
+[#196]: https://github.com/trendvidia/protowire-go/issues/196
 
 ### Changed
 
