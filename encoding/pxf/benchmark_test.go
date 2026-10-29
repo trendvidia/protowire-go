@@ -171,6 +171,21 @@ func BenchmarkPXFUnmarshal(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 }
 
+// BenchmarkPXFParse is the same document through the AST parser, the
+// path fmt, validate and the tolerant parser take. It pins the lexer's
+// cost apart from the direct decoder's (#196: a Prec field in Token cost it about 3%).
+func BenchmarkPXFParse(b *testing.B) {
+	data := []byte(benchPXF)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		if _, err := pxf.Parse(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.SetBytes(int64(len(data)))
+}
+
 // BenchmarkPXFUnmarshalFullAnnotated covers the path the annotations
 // actually cost on: UnmarshalFull runs postDecode, which reads every
 // absent field's options to decide required-ness and defaults. The plain

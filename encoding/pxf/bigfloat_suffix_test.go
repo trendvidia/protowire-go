@@ -27,8 +27,40 @@ message H {
   repeated pxf.BigFloat l = 3;
   map<string, pxf.BigFloat> m = 4;
   map<int32, string> by_id = 5;
+  double d = 6;
 }
 `
+
+// The suffix is lexer state, set by every number token (#196), so a
+// number with none never inherits the previous one's. -inf and +inf are
+// FLOAT tokens lexed on a path of their own; after 1.5p53 they would
+// otherwise carry p53, which a double field rejects.
+func TestPrecisionSuffixDoesNotCarryToTheNextNumber(t *testing.T) {
+	md := compilePlacementSrc(t, suffixSchemaSrc, "bfs.v1", "H")
+	for _, c := range []struct{ in, prec string }{
+		{"bf = 1.5p53\nd = -inf\n", "53"},
+		{"bf = 1.5p53\nd = +inf\n", "53"},
+		{"bf = 1.5p53\nd = 2.5\n", "53"},
+		{"bf = 7p64\ncount = 3\n", "64"},
+	} {
+		in := c.in
+		_, err := pxf.UnmarshalDescriptor([]byte(in), md)
+		require.NoError(t, err, "%q", in)
+
+		doc, err := pxf.Parse([]byte(in))
+		require.NoError(t, err, "%q", in)
+		var got []string
+		for _, e := range doc.Entries {
+			switch v := e.(*pxf.Assignment).Value.(type) {
+			case *pxf.IntVal:
+				got = append(got, v.Prec)
+			case *pxf.FloatVal:
+				got = append(got, v.Prec)
+			}
+		}
+		assert.Equal(t, []string{c.prec, ""}, got, "%q", in)
+	}
+}
 
 // A map key is an integer without a suffix (map-key = identifier /
 // string / integer / bool). Parse used to accept "1p5:" and keep the key
@@ -93,4 +125,18 @@ func TestPrecZeroNegativeZeroRoundTrips(t *testing.T) {
 	out, err := pxf.Marshal(msg)
 	require.NoError(t, err)
 	assert.Equal(t, "bf = -0\n", string(out))
+}
+
+// peekKind saves and restores the stored suffix (#196). Tolerant parsing
+// peeks past a number value to ask whether it starts the next entry, and
+// the peek lexes the number after it, so without the restore 1p5's
+// suffix would be read as 7's, "".
+func TestPrecisionSuffixSurvivesAPeek(t *testing.T) {
+	doc, errs := pxf.ParseTolerant([]byte("a = 1p5 7 = 3\n"))
+	require.NotEmpty(t, errs)
+	require.NotEmpty(t, doc.Entries)
+	v, ok := doc.Entries[0].(*pxf.Assignment).Value.(*pxf.IntVal)
+	require.True(t, ok, "%#v", doc.Entries[0])
+	assert.Equal(t, "1", v.Raw)
+	assert.Equal(t, "5", v.Prec)
 }

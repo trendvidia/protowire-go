@@ -205,19 +205,31 @@ func (p *parser) takeTrailingComment(end Position) string {
 	return c.Text
 }
 
+// prec is the current token's precision suffix digits, "" for none or
+// for a token that isn't a number (lexer.prec).
+func (p *parser) prec() string {
+	// A suffix is rare, so the kind is tested only when one is stored.
+	if p.lex.prec != "" {
+		if k := p.current.Kind; k == INT || k == FLOAT {
+			return p.lex.prec
+		}
+	}
+	return ""
+}
+
 // peekKind returns the kind of the next significant token (skipping
 // newlines and comments) without consuming it or disturbing pending-
 // comment accumulation. Used by parseDirective to disambiguate "this
 // IDENT is a directive prefix" from "this IDENT is a body field key".
 func (p *parser) peekKind() TokenKind {
-	pos, line, col := p.lex.pos, p.lex.line, p.lex.col
+	pos, line, col, prec := p.lex.pos, p.lex.line, p.lex.col, p.lex.prec
 	saved := p.current
 	savedPrevEnd := p.prevEnd
 	nComments := len(p.comments)
 	nErrs := len(p.errs) // tolerant lexing may report during the peek
 	p.advance()
 	next := p.current.Kind
-	p.lex.pos, p.lex.line, p.lex.col = pos, line, col
+	p.lex.pos, p.lex.line, p.lex.col, p.lex.prec = pos, line, col, prec
 	p.current = saved
 	p.prevEnd = savedPrevEnd
 	p.comments = p.comments[:nComments]
@@ -951,7 +963,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 	}
 	keyKind := p.current.Kind
 	key := p.current.Value
-	keyPrec := p.current.Prec
+	keyPrec := p.prec()
 	p.advance()
 
 	switch p.current.Kind {
@@ -963,9 +975,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// keys are only valid with `:` (map entries).
 		if keyKind == INT || keyKind == BOOL {
 			// Tolerant mode records and keeps the entry as an assignment.
-			if err := p.soft(errorf(pos,
-				"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
-				keyKind, key)); err != nil {
+			if err := p.soft(nonNameAssignError(pos, keyKind, key, keyPrec)); err != nil {
 				return nil, err
 			}
 		}
@@ -982,8 +992,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// document top level.
 		if !allowMapEntry {
 			// Tolerant mode records and keeps the entry as a map entry.
-			if err := p.soft(errorf(pos,
-				"map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")); err != nil {
+			if err := p.soft(topLevelMapEntryError(pos)); err != nil {
 				return nil, err
 			}
 		}
@@ -1010,9 +1019,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// or a string literal (quoted entry name, draft -01 §3.13). Same
 		// integer-key rule as `=` applies.
 		if keyKind == INT || keyKind == BOOL {
-			if err := p.soft(errorf(pos,
-				"submessage block requires an identifier or string key, got %s (%q)",
-				keyKind, key)); err != nil {
+			if err := p.soft(nonNameBlockError(pos, keyKind, key, keyPrec)); err != nil {
 				return nil, err
 			}
 		}
@@ -1064,12 +1071,12 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return v, nil
 
 	case INT:
-		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
+		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.prec()}
 		p.advance()
 		return v, nil
 
 	case FLOAT:
-		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
+		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.prec()}
 		p.advance()
 		return v, nil
 
@@ -1326,4 +1333,35 @@ func decodeBase64Lenient(raw string) ([]byte, error) {
 		return decoded, nil
 	}
 	return nil, err
+}
+
+// nonNameAssignError and nonNameBlockError report an integer or bool key
+// before '=' or '{', where only a field name may stand, quoted as written:
+// prec is an integer key's precision suffix, "" for none. The parser and
+// the direct decoder both report them, so such a key is a grammar error
+// on every path, not an unknown field that DiscardUnknown skips
+// (protowire-go#196).
+func nonNameAssignError(pos Position, kind TokenKind, key, prec string) error {
+	return errorf(pos,
+		"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
+		kind, writtenKey(key, prec))
+}
+
+func nonNameBlockError(pos Position, kind TokenKind, key, prec string) error {
+	return errorf(pos,
+		"submessage block requires an identifier or string key, got %s (%q)",
+		kind, writtenKey(key, prec))
+}
+
+// topLevelMapEntryError reports a ':' entry at the top level of a
+// document, from the parser and the direct decoder alike.
+func topLevelMapEntryError(pos Position) error {
+	return errorf(pos, "map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")
+}
+
+func writtenKey(key, prec string) string {
+	if prec == "" {
+		return key
+	}
+	return key + "p" + clipLiteral(prec)
 }

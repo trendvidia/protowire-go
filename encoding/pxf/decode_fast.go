@@ -19,9 +19,8 @@ import (
 
 // MaxNestingDepth caps PXF block / list nesting and PB submessage nesting,
 // per protowire/docs/HARDENING.md § Recursion. The limit applies to the
-// recursive-descent decoders for both formats; iterative skip routines
-// (skipBraced/skipBracketed) use the same cap implicitly because they
-// only run on already-bounded inputs.
+// recursive-descent decoders for both formats, and to a value
+// DiscardUnknown discards, which the AST parser reads (skipValue).
 const MaxNestingDepth = 100
 
 // MaxNumericLiteralDigits caps the digit count of a numeric literal
@@ -190,15 +189,37 @@ func (d *directDecoder) tokenErrMsg() string {
 	return fmt.Sprintf("%s (%q)", d.current.Kind, d.current.Value)
 }
 
+// prec is the current token's precision suffix digits, "" for none or
+// for a token that isn't a number (lexer.prec).
+func (d *directDecoder) prec() string {
+	// A suffix is rare, so the kind is tested only when one is stored.
+	if d.lex.prec != "" {
+		if k := d.current.Kind; k == INT || k == FLOAT {
+			return d.lex.prec
+		}
+	}
+	return ""
+}
+
+// keyPrec is the precision suffix of an entry's key, read once the
+// '=' or '{' after it is current: no number has been lexed since the
+// key, so lex.prec is still the key's, and only an integer key has one.
+func (d *directDecoder) keyPrec(keyKind TokenKind) string {
+	if keyKind == INT {
+		return d.lex.prec
+	}
+	return ""
+}
+
 // peekKind returns the next significant token kind without consuming it.
 // Used by consumeDirective to disambiguate prefix identifiers from body
 // field keys (an IDENT followed by `=` or `:` is the latter).
 func (d *directDecoder) peekKind() TokenKind {
-	pos, line, col := d.lex.pos, d.lex.line, d.lex.col
+	pos, line, col, prec := d.lex.pos, d.lex.line, d.lex.col, d.lex.prec
 	saved := d.current
 	d.advance()
 	next := d.current.Kind
-	d.lex.pos, d.lex.line, d.lex.col = pos, line, col
+	d.lex.pos, d.lex.line, d.lex.col, d.lex.prec = pos, line, col, prec
 	d.current = saved
 	return next
 }
@@ -529,8 +550,17 @@ prefixesDone:
 
 	if d.current.Kind == LBRACE {
 		open := d.current.Pos.Offset
+		// The body is read as Parse reads it (parseDirective), so a body
+		// that is not PXF is an error here too, not skipped by counting
+		// braces (#196). Body stays the raw bytes.
+		p := parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
+		if _, err := p.parseBlockVal(0); err != nil {
+			return dir, err
+		}
 		close := findMatchingBrace(d.lex.input, open)
 		if close < 0 {
+			// parseBlockVal found the '}', so this is defensive, as in
+			// parseDirective.
 			return dir, errorf(dir.Pos, "directive @%s: unmatched '{'", dir.Name)
 		}
 		dir.Body = d.lex.input[open+1 : close]
@@ -615,15 +645,21 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 		if d.current.Kind == AT_TYPE {
 			return errorf(pos, "%s", typeEntryMisplaced)
 		}
-		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
-			return errorf(pos, "expected identifier, string, or integer, got %s", d.tokenErrMsg())
+		// The grammar's key set (parseEntry), so a bool or integer key
+		// before '=' or '{' gets the parser's error below, not this one.
+		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT && d.current.Kind != BOOL {
+			return errorf(pos, "expected identifier, string, integer, or bool, got %s", d.tokenErrMsg())
 		}
-		keyQuoted := d.current.Kind == STRING
+		keyKind := d.current.Kind
+		keyQuoted := keyKind == STRING
 		key := d.current.Value
 		d.advance()
 
 		switch d.current.Kind {
 		case EQUALS:
+			if keyKind == INT || keyKind == BOOL {
+				return nonNameAssignError(pos, keyKind, key, d.keyPrec(keyKind))
+			}
 			d.advance()
 			if keyQuoted {
 				// Grammar accepts a string at entry-name position
@@ -636,7 +672,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			fd := fields.ByName(protoreflect.Name(key))
 			if fd == nil {
 				if d.discardUnknown {
-					d.skipValue()
+					if err := d.skipValue(); err != nil {
+						return err
+					}
 					continue
 				}
 				return errorf(pos, "unknown field %q in %s", key, desc.FullName())
@@ -682,18 +720,24 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 
 		case LBRACE:
-			d.advance()
+			if keyKind == INT || keyKind == BOOL {
+				return nonNameBlockError(pos, keyKind, key, d.keyPrec(keyKind))
+			}
 			if keyQuoted {
 				return quotedNameUnkeyedError(pos, key)
 			}
 			fd := fields.ByName(protoreflect.Name(key))
 			if fd == nil {
 				if d.discardUnknown {
-					d.skipBraced()
+					// From the '{', so skipValue reads it as a block.
+					if err := d.skipValue(); err != nil {
+						return err
+					}
 					continue
 				}
 				return errorf(pos, "unknown field %q in %s", key, desc.FullName())
 			}
+			d.advance()
 			if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
 				return errorf(pos, "field %q is not a message type, cannot use block syntax", key)
 			}
@@ -735,6 +779,11 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 
 		case COLON:
+			if !inBlock {
+				// The parser's grammar error: no map entry stands at
+				// the top level of a document, whatever the schema.
+				return topLevelMapEntryError(pos)
+			}
 			return errorf(pos, "unexpected ':' in message context, use '=' for field assignments")
 
 		default:
@@ -936,7 +985,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
-		if d.current.Prec != "" {
+		if d.prec() != "" {
 			return d.precisionError(fd)
 		}
 		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
@@ -950,7 +999,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		if d.current.Prec != "" {
+		if d.prec() != "" {
 			return d.precisionError(fd)
 		}
 		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
@@ -964,7 +1013,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloatPrec(d.current.Value, d.current.Prec, d.lim.maxDigits, d.lim.maxBigFloatExp)
+		bf, err := parseBigFloatPrec(d.current.Value, d.prec(), d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -1260,7 +1309,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
-		if d.current.Prec != "" {
+		if d.prec() != "" {
 			return protoreflect.Value{}, d.precisionError(fd)
 		}
 		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
@@ -1273,7 +1322,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		if d.current.Prec != "" {
+		if d.prec() != "" {
 			return protoreflect.Value{}, d.precisionError(fd)
 		}
 		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
@@ -1286,7 +1335,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloatPrec(d.current.Value, d.current.Prec, d.lim.maxDigits, d.lim.maxBigFloatExp)
+		bf, err := parseBigFloatPrec(d.current.Value, d.prec(), d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1456,8 +1505,8 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 		if keyKind != IDENT && keyKind != STRING && keyKind != INT && keyKind != BOOL {
 			return errorf(pos, "expected map key, got %s", d.tokenErrMsg())
 		}
-		if d.current.Prec != "" {
-			return errorf(pos, "map field %q: a key cannot carry a precision suffix (p%s)", fd.Name(), clipLiteral(d.current.Prec))
+		if d.prec() != "" {
+			return errorf(pos, "map field %q: a key cannot carry a precision suffix (p%s)", fd.Name(), clipLiteral(d.prec()))
 		}
 		keyStr := strings.Clone(d.current.Value)
 		d.advance()
@@ -1530,7 +1579,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigInt(mdesc) && d.current.Kind == INT {
-				if d.current.Prec != "" {
+				if d.prec() != "" {
 					return d.precisionError(fd)
 				}
 				bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
@@ -1544,7 +1593,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				if d.current.Prec != "" {
+				if d.prec() != "" {
 					return d.precisionError(fd)
 				}
 				unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
@@ -1558,7 +1607,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				bf, err := parseBigFloatPrec(d.current.Value, d.current.Prec, d.lim.maxDigits, d.lim.maxBigFloatExp)
+				bf, err := parseBigFloatPrec(d.current.Value, d.prec(), d.lim.maxDigits, d.lim.maxBigFloatExp)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1680,7 +1729,7 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 // only where an error is already being built.
 func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
-	if d.current.Prec != "" {
+	if d.prec() != "" {
 		return protoreflect.Value{}, d.precisionError(named)
 	}
 
@@ -1922,7 +1971,7 @@ func (d *directDecoder) consumeEnum(fd protoreflect.FieldDescriptor) (protorefle
 // values are typed by the map-entry message's `value` field too.
 func (d *directDecoder) consumeEnumAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
-	if d.current.Prec != "" {
+	if d.prec() != "" {
 		return protoreflect.Value{}, d.precisionError(named)
 	}
 	switch d.current.Kind {
@@ -1945,46 +1994,18 @@ func (d *directDecoder) consumeEnumAs(fd, named protoreflect.FieldDescriptor) (p
 	}
 }
 
-// skipValue skips the current value token (scalar, block, or list).
-func (d *directDecoder) skipValue() {
-	switch d.current.Kind {
-	case LBRACE:
-		d.advance()
-		d.skipBraced()
-	case LBRACKET:
-		d.advance()
-		d.skipBracketed()
-	default:
-		d.advance() // scalar
-	}
-}
-
-// skipBraced skips tokens until the matching closing '}'.
-func (d *directDecoder) skipBraced() {
-	depth := 1
-	for depth > 0 && d.current.Kind != EOF {
-		switch d.current.Kind {
-		case LBRACE:
-			depth++
-		case RBRACE:
-			depth--
-		}
-		d.advance()
-	}
-}
-
-// skipBracketed skips tokens until the matching closing ']'.
-func (d *directDecoder) skipBracketed() {
-	depth := 1
-	for depth > 0 && d.current.Kind != EOF {
-		switch d.current.Kind {
-		case LBRACKET:
-			depth++
-		case RBRACKET:
-			depth--
-		}
-		d.advance()
-	}
+// skipValue consumes the value of a field DiscardUnknown discards: the
+// current token, or the block or list it opens. The AST parser reads it
+// and the result is dropped, so a discarded value is held to the grammar
+// Parse holds it to (#196): an unterminated block, a lexical error or an
+// integer key inside it is reported, not skipped. d.depth is the body's
+// depth, which is what parseValue counts from, so MaxNestingDepth binds
+// a discarded value as it binds a decoded one.
+func (d *directDecoder) skipValue() error {
+	p := parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
+	_, err := p.parseValue(d.depth)
+	d.current = p.current
+	return err
 }
 
 // nullable reports whether a null literal may be bound to fd: a
@@ -2472,8 +2493,8 @@ func parseScalarDefault(kind protoreflect.Kind, def string, fd protoreflect.Fiel
 // precisionError rejects the precision suffix on the current literal,
 // which binds to fd, not a pxf.BigFloat (draft -01 § PXF Annotations,
 // protowire#406). The suffix lexes on any number; only a BigFloat reads
-// it. Callers test d.current.Prec themselves, so a literal without a
+// it. Callers test d.prec() themselves, so a literal without a
 // suffix, which is every literal on these paths, pays no call.
 func (d *directDecoder) precisionError(fd protoreflect.FieldDescriptor) error {
-	return errorf(d.current.Pos, "precision suffix p%s is allowed only on a pxf.BigFloat, not on field %q", clipLiteral(d.current.Prec), fd.Name())
+	return errorf(d.current.Pos, "precision suffix p%s is allowed only on a pxf.BigFloat, not on field %q", clipLiteral(d.prec()), fd.Name())
 }

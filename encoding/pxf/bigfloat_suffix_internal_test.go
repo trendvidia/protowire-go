@@ -64,15 +64,16 @@ func TestPow2Digits(t *testing.T) {
 // 'p' is one such place.
 func TestLexPrecisionStreamingCut(t *testing.T) {
 	for _, in := range []string{"1p53", "2.5p8", "1e5p9", "-3p2"} {
-		full := newLexer([]byte(in)).Next()
-		if full.Prec == "" {
+		fl := newLexer([]byte(in))
+		full := fl.Next()
+		if fl.prec == "" {
 			t.Fatalf("%q lexes without its suffix", in)
 		}
 		for k := 1; k < len(in); k++ {
 			l := newLexer([]byte(in[:k]))
 			tok := l.Next()
-			if !l.sawEnd && (tok.Kind != full.Kind || tok.Value != full.Value || tok.Prec != full.Prec) {
-				t.Errorf("%q cut to %q: token %s %q p%q, sawEnd false; the whole input lexes %s %q p%q", in, in[:k], tok.Kind, tok.Value, tok.Prec, full.Kind, full.Value, full.Prec)
+			if !l.sawEnd && (tok.Kind != full.Kind || tok.Value != full.Value || l.prec != fl.prec) {
+				t.Errorf("%q cut to %q: token %s %q p%q, sawEnd false; the whole input lexes %s %q p%q", in, in[:k], tok.Kind, tok.Value, l.prec, full.Kind, full.Value, fl.prec)
 			}
 		}
 	}

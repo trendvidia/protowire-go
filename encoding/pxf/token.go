@@ -83,8 +83,4 @@ type Token struct {
 	Kind  TokenKind
 	Value string
 	Pos   Position
-	// Prec is the bit count of an INT or FLOAT literal's precision
-	// suffix, as written ("53" for 0.1p53), or "" for none (draft -01
-	// § PXF Annotations, protowire#406). Value never includes it.
-	Prec string
 }
