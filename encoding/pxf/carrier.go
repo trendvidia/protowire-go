@@ -363,7 +363,7 @@ func bigFloatLiteral(b []byte) (string, string) {
 	// the one carrier whose literal is not required to be positional. It
 	// is written with the digit count every producer uses (protowire#406),
 	// not the shortest form, so that it reads back at its precision.
-	digits, ok := bigFloatDigits(uint(prec), MaxNumericLiteralDigits)
+	digits, ok := bigFloatDigits(prec, MaxNumericLiteralDigits)
 	if !ok {
 		return "", fmt.Sprintf("@default's big_float_value has prec %d, which renders to %d digits; MaxNumericLiteralDigits=%d", prec, digits, MaxNumericLiteralDigits)
 	}

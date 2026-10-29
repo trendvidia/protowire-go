@@ -4,13 +4,14 @@
 package pxf_test
 
 // The pxf.BigFloat text-form corpus (draft-trendvidia-protowire-01 § PXF
-// Annotations; trendvidia/protowire#406 and #393). testdata/bigfloat/ is
-// vendored verbatim from the spec repository (trendvidia/protowire
-// testdata/bigfloat/, PR trendvidia/protowire#408), where generate.py
-// computes every expected value with exact rational arithmetic; keep the
-// two in sync when the spec repo changes it. An enc- case is PB bytes and
-// the text Marshal must write for them, a dec- case a document and the PB
-// bytes decoding it must produce, an err- case a document to reject.
+// Annotations; trendvidia/protowire#406, #393 and #410). testdata/bigfloat/
+// is vendored verbatim from the spec repository (trendvidia/protowire
+// testdata/bigfloat/, PR trendvidia/protowire#408 as amended by #412),
+// where generate.py computes every expected value with exact rational
+// arithmetic; keep the two in sync when the spec repo changes it. An enc-
+// case is PB bytes and the text Marshal must write for them, a dec- case a
+// document and the PB bytes decoding it must produce, an err- case a
+// document to reject.
 
 import (
 	"bytes"

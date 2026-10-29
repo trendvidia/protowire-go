@@ -312,21 +312,14 @@ func formatBigInt(msg protoreflect.Message) (string, error) {
 // rather than a document nobody can read (#119). HARDENING.md
 // § Arbitrary-precision magnitudes bounds a marshaller's literal "like
 // any other", and the pb marshaller refuses a Decimal.scale past the
-// same constant for the same reason (#95). A sign, a point or an
-// exponent marker is not a digit, as in checkLiteralDigits; a literal
-// short enough to be within the limit is not counted at all.
+// same constant for the same reason (#95). It counts what
+// checkLiteralDigits counts (countDigits); a literal short enough to be
+// within the limit is not counted at all.
 func boundLiteral(kind, s string) (string, error) {
 	if len(s) <= MaxNumericLiteralDigits {
 		return s, nil
 	}
-	// A BigFloat's precision suffix is not part of the number: it is
-	// bounded on its own (bigFloatDigits), and parseBigFloat counts the
-	// literal without it, so this does too (protowire#406).
-	num := s
-	if i := strings.IndexByte(s, 'p'); i >= 0 {
-		num = s[:i]
-	}
-	if n := countDigits(num); n > MaxNumericLiteralDigits {
+	if n := countDigits(s); n > MaxNumericLiteralDigits {
 		return "", fmt.Errorf("%s renders to %d digits; MaxNumericLiteralDigits=%d", kind, n, MaxNumericLiteralDigits)
 	}
 	return s, nil
@@ -386,10 +379,10 @@ func readDecimalStr(msg protoreflect.Message) (string, error) {
 	buf.WriteByte('.')
 	buf.WriteString(fracPart)
 	// The scale bound above keeps the work proportional to the input;
-	// this keeps the literal readable. The two disagree by one at the
-	// boundary: unscaled 5, scale 4096 is accepted on the pb wire and
-	// renders as 0.000…5, whose leading zero is the 4097th digit
-	// (protowire#310).
+	// this keeps the literal readable. Leading zeros are not significant
+	// (protowire#410, reversing in part #310), so unscaled 5 at scale
+	// 4096, 0.000…5, counts one digit and has a literal; only the
+	// negative arm's trailing zeros can carry a literal past the bound.
 	return boundLiteral("pxf.Decimal", buf.String())
 }
 
@@ -423,32 +416,33 @@ func formatBigFloat(msg protoreflect.Message) (string, error) {
 	// before rendering: past MaxNumericLiteralDigits the literal could
 	// not be read anyway. This bounds the mantissa's cost; the check
 	// above bounds the exponent's.
-	decDigits, ok := bigFloatDigits(prec, MaxNumericLiteralDigits)
+	decDigits, ok := bigFloatDigits(uint32(prec), MaxNumericLiteralDigits)
 	if !ok {
 		return "", fmt.Errorf("pxf.BigFloat prec %d bits renders to %d digits; MaxNumericLiteralDigits=%d", prec, decDigits, MaxNumericLiteralDigits)
 	}
-	return boundLiteral("pxf.BigFloat", bigFloatText(bf, decDigits))
+	// bigFloatText writes at most decDigits significant digits, and the
+	// exponent and suffix are not counted (protowire#410), so the literal
+	// is within MaxNumericLiteralDigits without boundLiteral.
+	return bigFloatText(bf, decDigits), nil
 }
 
-// bigFloatText writes bf as a PXF BigFloat literal with digits
-// significant digits and its precision suffix (draft -01 § PXF
-// Annotations, protowire#406): C's %g form, then "p" and bf's precision,
-// so a decoder reads it back at that precision and gets bf exactly. Zero
-// is "0", without a suffix.
+// bigFloatText writes bf, whose precision is not 0, as a PXF BigFloat
+// literal with digits significant digits and its precision suffix (draft
+// -01 § PXF Annotations, protowire#406): C's %g form, then "p" and bf's
+// precision, so a decoder reads it back at that precision and gets bf
+// exactly. A zero keeps its precision and sign the same way, "0p64" or
+// "-0p64" (protowire#410). The one literal without a suffix, the prec-0
+// zero, is its callers' to write: formatBigFloat writes "0" or "-0", and
+// a carrier has no prec-0 value.
 func bigFloatText(bf *big.Float, digits int) string {
+	suffix := "p" + strconv.FormatUint(uint64(bf.Prec()), 10)
 	if bf.Sign() == 0 {
-		// A zero keeps its precision and sign (protowire#410): "0p64",
-		// "-0p64"; only a prec-0 zero has no suffix.
-		sign := ""
 		if bf.Signbit() {
-			sign = "-"
+			return "-0" + suffix
 		}
-		if bf.Prec() == 0 {
-			return sign + "0"
-		}
-		return sign + "0p" + strconv.FormatUint(uint64(bf.Prec()), 10)
+		return "0" + suffix
 	}
-	return bf.Text('g', digits) + "p" + strconv.FormatUint(uint64(bf.Prec()), 10)
+	return bf.Text('g', digits) + suffix
 }
 
 // bigFloatDigits is the number of significant digits a BigFloat of prec
@@ -456,15 +450,28 @@ func bigFloatText(bf *big.Float, digits int) string {
 // decimal digits of 2^prec, plus one, the fewest for which every prec-bit
 // value is recovered from its literal. One fewer, what this package
 // wrote before, lost 9,157 of 20,000 random 53-bit values (measured on
-// #406). ok is false when the count exceeds limit; it is then an
-// estimate, computed without materialising 2^prec, since prec comes off
-// the wire.
-func bigFloatDigits(prec uint, limit int) (int, bool) {
-	if est := int(float64(prec)*math.Log10(2)) + 2; est > limit+1 {
-		return est, false
-	}
-	n := len(new(big.Int).Lsh(big.NewInt(1), prec).String()) + 1
+// #406). ok reports whether the count is within limit. prec comes off
+// the wire or out of a document, so 2^prec is never computed (the draft
+// says so of a decoder): see pow2Digits.
+func bigFloatDigits(prec uint32, limit int) (int, bool) {
+	n := pow2Digits(prec) + 1
 	return n, n <= limit
+}
+
+// log10Of2Hi and log10Of2Lo are floor(log10(2) × 2^128), high word first.
+const log10Of2Hi, log10Of2Lo = 0x4d104d427de7fbcc, 0x47c4acd605be48bc
+
+// pow2Digits is the number of decimal digits of 2^p, floor(p·log10(2))
+// + 1, without computing 2^p. The product is taken in 128-bit fixed
+// point: it falls short of p·log10(2) by less than 2^-95, and for every
+// uint32 p that product is further than that from an integer, so the
+// floor is exact. float64 is not enough: it is one digit high at p =
+// 146964308, the first of several below 2^32 (TestPow2Digits).
+func pow2Digits(p uint32) int {
+	hi, lo := bits.Mul64(uint64(p), log10Of2Hi)
+	carryIn, _ := bits.Mul64(uint64(p), log10Of2Lo)
+	_, carry := bits.Add64(lo, carryIn, 0)
+	return int(hi+carry) + 1
 }
 
 // Big number string parsers (decode direction).
@@ -561,23 +568,39 @@ func parseDecimal(s string, maxDigits int) (unscaled *big.Int, scale int32, nega
 const bigFloatDefaultPrec = 256
 
 // parseBigFloat reads a BigFloat literal, s, with or without its
-// precision suffix "p<bits>" (protowire#406). A suffixed literal is read
-// at exactly that precision, one without at bigFloatDefaultPrec, both
-// rounding to nearest with ties to even. The suffix is checked before
-// anything is allocated for it: a zero precision, or one whose literal
-// would need more than maxDigits digits, is an error.
+// precision suffix "p<bits>" (protowire#406), for a literal that arrives
+// as one string, a carrier's. A document's literal arrives lexed, number
+// and suffix apart, and goes to parseBigFloatPrec.
 func parseBigFloat(s string, maxDigits, maxExp int) (*big.Float, error) {
+	num, prec, suffixed := strings.Cut(s, "p")
+	if suffixed && prec == "" {
+		return nil, fmt.Errorf("big float literal %s: precision suffix p is not a positive bit count", clipLiteral(s))
+	}
+	return parseBigFloatPrec(num, prec, maxDigits, maxExp)
+}
+
+// parseBigFloatPrec reads a BigFloat literal, s, at the precision its
+// suffix's digits, prec, state, or at bigFloatDefaultPrec when prec is ""
+// (protowire#406), rounding to nearest with ties to even. The suffix is
+// checked before anything is allocated for it: a zero precision, or one
+// whose literal would need more than maxDigits digits, is an error. A
+// suffix of more digits than a uint32 has is rejected without being
+// converted.
+func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error) {
 	readPrec := uint(bigFloatDefaultPrec)
-	num, suffix, suffixed := strings.Cut(s, "p")
+	suffixed := prec != ""
 	if suffixed {
-		p, err := strconv.ParseUint(suffix, 10, 32)
-		if err != nil || p == 0 {
-			return nil, fmt.Errorf("big float literal %s: precision suffix p%s is not a positive bit count", clipLiteral(s), clipLiteral(suffix))
+		p, err := uint64(0), error(nil)
+		if len(prec) <= len("4294967295") {
+			p, err = strconv.ParseUint(prec, 10, 32)
 		}
-		if n, ok := bigFloatDigits(uint(p), maxDigits); !ok {
-			return nil, fmt.Errorf("big float literal %s: precision p%d renders to %d digits; MaxNumericLiteralDigits=%d", clipLiteral(s), p, n, maxDigits)
+		if p == 0 || err != nil {
+			return nil, fmt.Errorf("big float literal %sp%s: precision suffix p%s is not a positive bit count", clipLiteral(s), clipLiteral(prec), clipLiteral(prec))
 		}
-		readPrec, s = uint(p), num
+		if n, ok := bigFloatDigits(uint32(p), maxDigits); !ok {
+			return nil, fmt.Errorf("big float literal %sp%d: precision p%d renders to %d digits; MaxNumericLiteralDigits=%d", clipLiteral(s), p, p, n, maxDigits)
+		}
+		readPrec = uint(p)
 	}
 	if err := checkLiteralDigits(s, maxDigits); err != nil {
 		return nil, err
