@@ -91,7 +91,7 @@ func TestIllegalTokenAtNamePosition(t *testing.T) {
 	desc := msgDesc(t, "AllTypes")
 
 	for _, tc := range []struct{ name, in, want string }{
-		{"entry name", "5seconds = 1\n", "expected identifier, string, or integer, got invalid duration: 5seconds"},
+		{"entry name", "5seconds = 1\n", "expected identifier, string, integer, or bool, got invalid duration: 5seconds"},
 		{"map key", `string_map = { 5seconds: "x" }` + "\n", "expected map key, got invalid duration: 5seconds"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

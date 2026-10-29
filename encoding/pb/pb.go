@@ -772,7 +772,8 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 	}
 
 	var msg []byte
-	if mantBytes := mantInt.Bytes(); len(mantBytes) > 0 {
+	mantBytes := mantInt.Bytes()
+	if len(mantBytes) > 0 {
 		msg = protowire.AppendTag(msg, 1, protowire.BytesType)
 		msg = protowire.AppendBytes(msg, mantBytes)
 	}
@@ -781,6 +782,13 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 	// silently and wrote a wrong exponent for a value the wire cannot
 	// carry.
 	adj := int64(exp) - int64(prec)
+	if len(mantBytes) == 0 {
+		// A zero has no exponent at any prec: one encoding per value, the
+		// one a decoder stores for 0p<prec> (draft -01 § PXF Annotations,
+		// #196). MantExp gives a zero exponent 0, so adj was -prec, which
+		// leaves int32 above prec 2^31 and refused a zero it never wrote.
+		adj = 0
+	}
 	if adj < math.MinInt32 || adj > math.MaxInt32 {
 		return nil, fmt.Errorf("pxf.BigFloat exponent %d does not fit int32", adj)
 	}

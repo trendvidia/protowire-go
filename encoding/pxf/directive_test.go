@@ -439,7 +439,9 @@ func TestUnmarshalFull_RecordsPrefixList(t *testing.T) {
 	allTypes := msgDesc(t, "AllTypes")
 	cfg := dynamicpb.NewMessage(allTypes)
 
-	in := []byte(`@entry alice test.v1.Nested { name = "Alice", value = 7 }
+	// The body is parsed by the message-body entry grammar (draft -01
+	// § Named Directives), which separates entries by whitespace, not ','.
+	in := []byte(`@entry alice test.v1.Nested { name = "Alice" value = 7 }
 string_field = "body"`)
 	res, err := pxf.UnmarshalFull(in, cfg)
 	require.NoError(t, err)

@@ -40,9 +40,27 @@ that decoded before can fail now. No API or wire-format change.
   - `MaxNumericLiteralDigits` counts the mantissa's significant digits only: leading zeros,
     the exponent and the suffix are not counted. So a `pxf.Decimal` at scale +4096 now has a
     literal; scale −4096 still has none.
-  - `Token.Prec`, `IntVal.Prec` and `FloatVal.Prec` carry the suffix through the AST, and the
-    formatter writes it back.
+  - `IntVal.Prec` and `FloatVal.Prec` carry the suffix through the AST, and the formatter
+    writes it back. `Token` has no field for it: the suffix is lexer state, so a token stays
+    48 bytes ([#196](https://github.com/trendvidia/protowire-go/issues/196)).
+  - `encoding/pb` writes a zero at any precision with an empty mantissa and exponent 0,
+    keeping prec and sign, as the decoder stores `0p<prec>`. Before, a zero at prec 64 was
+    written with exponent −64, and one above prec 2^31 was refused
+    ([#196](https://github.com/trendvidia/protowire-go/issues/196), trendvidia/protowire#414).
   - `testdata/bigfloat/` vendors protowire's 35-case corpus, run by `TestBigFloatCorpus`.
+- **The decoder rejects what `Parse` rejects in content it does not decode**
+  ([#196](https://github.com/trendvidia/protowire-go/issues/196)).
+  - With `DiscardUnknown`, `1 = 2` and `1 { }` were taken for unknown fields and skipped. An
+    integer or bool key before `=` or `{` is now the grammar error `Parse` reports, with or
+    without the option, quoted as written (`"1p5"`).
+  - The value of a field `DiscardUnknown` discards is read by the parser. Before, the
+    decoder counted braces and took any other token as a value, so a truncated block or
+    list, a lexical error such as `5seconds`, or a bad key inside the value decoded as
+    success. It now also counts toward `MaxNestingDepth`.
+  - A directive's `{ … }` body is read the same way, with or without `DiscardUnknown`.
+    `Body` still holds the raw bytes.
+  - A `:` entry at the top level, and a key that is not an identifier, string, integer or
+    bool, get `Parse`'s message.
 - **A map key bound twice in one message body is rejected**
   ([#191](https://github.com/trendvidia/protowire-go/issues/191), trendvidia/protowire#396).
   - Inside one map literal or across two bindings of the field, the second occurrence fails
