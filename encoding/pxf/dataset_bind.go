@@ -390,8 +390,10 @@ func writeCellValue(buf *bytes.Buffer, v Value) error {
 		buf.WriteString(strconv.Quote(v.Value))
 	case *IntVal:
 		buf.WriteString(v.Raw)
+		writePrecision(buf, v.Prec)
 	case *FloatVal:
 		buf.WriteString(v.Raw)
+		writePrecision(buf, v.Prec)
 	case *BoolVal:
 		if v.Value {
 			buf.WriteString("true")

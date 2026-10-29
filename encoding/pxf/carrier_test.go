@@ -898,12 +898,13 @@ message M {
 }`), "M")
 
 	// The literal each carrier reduces to. The exact-decimal carriers get
-	// positional notation; BigFloat keeps the exponent, which
-	// big.Float.Parse takes.
+	// positional notation; BigFloat is written in %g form with the digits
+	// its precision needs and its precision suffix (protowire#406), so
+	// 1e19 at 256 bits is positional.
 	for _, tc := range []struct{ field, lit string }{
 		{"i", "10000000000000000000"},
 		{"d", "10000000000000000000"},
-		{"f", "1e+19"},
+		{"f", "10000000000000000000p256"},
 		{"ten", "10000000000"},
 		{"sml", "42"},
 		{"fr", "1.5"},

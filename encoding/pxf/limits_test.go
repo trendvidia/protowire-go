@@ -66,8 +66,9 @@ func TestNumericLiteralDigitCap(t *testing.T) {
 		{"big int at the cap", "big_int_field", sevens(max), false},
 		{"big int one past", "big_int_field", sevens(max + 1), true},
 		{"negative big int one past", "big_int_field", "-" + sevens(max+1), true},
-		{"decimal at the cap", "decimal_field", "0." + sevens(max-1), false},
-		{"decimal one past", "decimal_field", "0." + sevens(max), true},
+		// The leading 0 is not significant (protowire#410).
+		{"decimal at the cap", "decimal_field", "0." + sevens(max), false},
+		{"decimal one past", "decimal_field", "0." + sevens(max+1), true},
 		{"big float at the cap", "big_float_field", sevens(max-1) + ".5", false},
 		{"big float one past", "big_float_field", sevens(max) + ".5", true},
 		{"big float with exponent one past", "big_float_field", sevens(max) + ".5e3", true},
