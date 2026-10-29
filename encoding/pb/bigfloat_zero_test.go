@@ -99,3 +99,26 @@ func TestBigFloatZeroHasOneEncoding(t *testing.T) {
 		t.Fatalf("% x reads as %v at prec %d, signbit %v; want -0 at prec 64", old, h.F, h.F.Prec(), h.F.Signbit())
 	}
 }
+
+// A zero writes no exponent, so its precision does not bound one: at prec
+// 2^32-1, which Unmarshal reads, exponent -prec left int32 and Marshal
+// refused the zero (#196).
+func TestBigFloatZeroAtMaxPrec(t *testing.T) {
+	for _, neg := range []bool{false, true} {
+		z := new(big.Float).SetPrec(big.MaxPrec)
+		if neg {
+			z.Neg(z)
+		}
+		out, err := Marshal(&bigFloatHolder{F: z})
+		if err != nil {
+			t.Fatalf("-0 %v at prec %d: %v", neg, uint(big.MaxPrec), err)
+		}
+		var back bigFloatHolder
+		if err := Unmarshal(out, &back); err != nil {
+			t.Fatal(err)
+		}
+		if back.F.Sign() != 0 || back.F.Prec() != big.MaxPrec || back.F.Signbit() != neg {
+			t.Fatalf("% x reads as %v at prec %d, signbit %v; want a zero at prec %d, signbit %v", out, back.F, back.F.Prec(), back.F.Signbit(), uint(big.MaxPrec), neg)
+		}
+	}
+}

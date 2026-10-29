@@ -126,3 +126,17 @@ func TestPrecZeroNegativeZeroRoundTrips(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "bf = -0\n", string(out))
 }
+
+// peekKind saves and restores the stored suffix (#196). Tolerant parsing
+// peeks past a number value to ask whether it starts the next entry, and
+// the peek lexes the number after it, so without the restore 1p5's
+// suffix would be read as 7's, "".
+func TestPrecisionSuffixSurvivesAPeek(t *testing.T) {
+	doc, errs := pxf.ParseTolerant([]byte("a = 1p5 7 = 3\n"))
+	require.NotEmpty(t, errs)
+	require.NotEmpty(t, doc.Entries)
+	v, ok := doc.Entries[0].(*pxf.Assignment).Value.(*pxf.IntVal)
+	require.True(t, ok, "%#v", doc.Entries[0])
+	assert.Equal(t, "1", v.Raw)
+	assert.Equal(t, "5", v.Prec)
+}

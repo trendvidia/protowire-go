@@ -19,9 +19,8 @@ import (
 
 // MaxNestingDepth caps PXF block / list nesting and PB submessage nesting,
 // per protowire/docs/HARDENING.md § Recursion. The limit applies to the
-// recursive-descent decoders for both formats; iterative skip routines
-// (skipBraced/skipBracketed) use the same cap implicitly because they
-// only run on already-bounded inputs.
+// recursive-descent decoders for both formats, and to a value
+// DiscardUnknown discards, which the AST parser reads (skipValue).
 const MaxNestingDepth = 100
 
 // MaxNumericLiteralDigits caps the digit count of a numeric literal
@@ -193,7 +192,20 @@ func (d *directDecoder) tokenErrMsg() string {
 // prec is the current token's precision suffix digits, "" for none or
 // for a token that isn't a number (lexer.prec).
 func (d *directDecoder) prec() string {
-	if k := d.current.Kind; k == INT || k == FLOAT {
+	// A suffix is rare, so the kind is tested only when one is stored.
+	if d.lex.prec != "" {
+		if k := d.current.Kind; k == INT || k == FLOAT {
+			return d.lex.prec
+		}
+	}
+	return ""
+}
+
+// keyPrec is the precision suffix of an entry's key, read once the
+// '=' or '{' after it is current: no number has been lexed since the
+// key, so lex.prec is still the key's, and only an integer key has one.
+func (d *directDecoder) keyPrec(keyKind TokenKind) string {
+	if keyKind == INT {
 		return d.lex.prec
 	}
 	return ""
@@ -624,8 +636,10 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 		if d.current.Kind == AT_TYPE {
 			return errorf(pos, "%s", typeEntryMisplaced)
 		}
-		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
-			return errorf(pos, "expected identifier, string, or integer, got %s", d.tokenErrMsg())
+		// The grammar's key set (parseEntry), so a bool or integer key
+		// before '=' or '{' gets the parser's error below, not this one.
+		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT && d.current.Kind != BOOL {
+			return errorf(pos, "expected identifier, string, integer, or bool, got %s", d.tokenErrMsg())
 		}
 		keyKind := d.current.Kind
 		keyQuoted := keyKind == STRING
@@ -634,8 +648,8 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 
 		switch d.current.Kind {
 		case EQUALS:
-			if keyKind == INT {
-				return nonNameAssignError(pos, keyKind, key)
+			if keyKind == INT || keyKind == BOOL {
+				return nonNameAssignError(pos, keyKind, key, d.keyPrec(keyKind))
 			}
 			d.advance()
 			if keyQuoted {
@@ -649,7 +663,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			fd := fields.ByName(protoreflect.Name(key))
 			if fd == nil {
 				if d.discardUnknown {
-					d.skipValue()
+					if err := d.skipValue(); err != nil {
+						return err
+					}
 					continue
 				}
 				return errorf(pos, "unknown field %q in %s", key, desc.FullName())
@@ -695,21 +711,24 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 
 		case LBRACE:
-			if keyKind == INT {
-				return nonNameBlockError(pos, keyKind, key)
+			if keyKind == INT || keyKind == BOOL {
+				return nonNameBlockError(pos, keyKind, key, d.keyPrec(keyKind))
 			}
-			d.advance()
 			if keyQuoted {
 				return quotedNameUnkeyedError(pos, key)
 			}
 			fd := fields.ByName(protoreflect.Name(key))
 			if fd == nil {
 				if d.discardUnknown {
-					d.skipBraced()
+					// From the '{', so skipValue reads it as a block.
+					if err := d.skipValue(); err != nil {
+						return err
+					}
 					continue
 				}
 				return errorf(pos, "unknown field %q in %s", key, desc.FullName())
 			}
+			d.advance()
 			if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
 				return errorf(pos, "field %q is not a message type, cannot use block syntax", key)
 			}
@@ -1961,46 +1980,18 @@ func (d *directDecoder) consumeEnumAs(fd, named protoreflect.FieldDescriptor) (p
 	}
 }
 
-// skipValue skips the current value token (scalar, block, or list).
-func (d *directDecoder) skipValue() {
-	switch d.current.Kind {
-	case LBRACE:
-		d.advance()
-		d.skipBraced()
-	case LBRACKET:
-		d.advance()
-		d.skipBracketed()
-	default:
-		d.advance() // scalar
-	}
-}
-
-// skipBraced skips tokens until the matching closing '}'.
-func (d *directDecoder) skipBraced() {
-	depth := 1
-	for depth > 0 && d.current.Kind != EOF {
-		switch d.current.Kind {
-		case LBRACE:
-			depth++
-		case RBRACE:
-			depth--
-		}
-		d.advance()
-	}
-}
-
-// skipBracketed skips tokens until the matching closing ']'.
-func (d *directDecoder) skipBracketed() {
-	depth := 1
-	for depth > 0 && d.current.Kind != EOF {
-		switch d.current.Kind {
-		case LBRACKET:
-			depth++
-		case RBRACKET:
-			depth--
-		}
-		d.advance()
-	}
+// skipValue consumes the value of a field DiscardUnknown discards: the
+// current token, or the block or list it opens. The AST parser reads it
+// and the result is dropped, so a discarded value is held to the grammar
+// Parse holds it to (#196): an unterminated block, a lexical error or an
+// integer key inside it is reported, not skipped. d.depth is the body's
+// depth, which is what parseValue counts from, so MaxNestingDepth binds
+// a discarded value as it binds a decoded one.
+func (d *directDecoder) skipValue() error {
+	p := parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
+	_, err := p.parseValue(d.depth)
+	d.current = p.current
+	return err
 }
 
 // nullable reports whether a null literal may be bound to fd: a

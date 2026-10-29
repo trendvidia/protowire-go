@@ -208,8 +208,11 @@ func (p *parser) takeTrailingComment(end Position) string {
 // prec is the current token's precision suffix digits, "" for none or
 // for a token that isn't a number (lexer.prec).
 func (p *parser) prec() string {
-	if k := p.current.Kind; k == INT || k == FLOAT {
-		return p.lex.prec
+	// A suffix is rare, so the kind is tested only when one is stored.
+	if p.lex.prec != "" {
+		if k := p.current.Kind; k == INT || k == FLOAT {
+			return p.lex.prec
+		}
 	}
 	return ""
 }
@@ -972,7 +975,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// keys are only valid with `:` (map entries).
 		if keyKind == INT || keyKind == BOOL {
 			// Tolerant mode records and keeps the entry as an assignment.
-			if err := p.soft(nonNameAssignError(pos, keyKind, key)); err != nil {
+			if err := p.soft(nonNameAssignError(pos, keyKind, key, keyPrec)); err != nil {
 				return nil, err
 			}
 		}
@@ -1017,7 +1020,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// or a string literal (quoted entry name, draft -01 §3.13). Same
 		// integer-key rule as `=` applies.
 		if keyKind == INT || keyKind == BOOL {
-			if err := p.soft(nonNameBlockError(pos, keyKind, key)); err != nil {
+			if err := p.soft(nonNameBlockError(pos, keyKind, key, keyPrec)); err != nil {
 				return nil, err
 			}
 		}
@@ -1334,18 +1337,26 @@ func decodeBase64Lenient(raw string) ([]byte, error) {
 }
 
 // nonNameAssignError and nonNameBlockError report an integer or bool key
-// before '=' or '{', where only a field name may stand. The parser and
-// the direct decoder both report them, so an integer key is a grammar
-// error on every path, not an unknown field that DiscardUnknown skips
+// before '=' or '{', where only a field name may stand, quoted as written:
+// prec is an integer key's precision suffix, "" for none. The parser and
+// the direct decoder both report them, so such a key is a grammar error
+// on every path, not an unknown field that DiscardUnknown skips
 // (protowire-go#196).
-func nonNameAssignError(pos Position, kind TokenKind, key string) error {
+func nonNameAssignError(pos Position, kind TokenKind, key, prec string) error {
 	return errorf(pos,
 		"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
-		kind, key)
+		kind, writtenKey(key, prec))
 }
 
-func nonNameBlockError(pos Position, kind TokenKind, key string) error {
+func nonNameBlockError(pos Position, kind TokenKind, key, prec string) error {
 	return errorf(pos,
 		"submessage block requires an identifier or string key, got %s (%q)",
-		kind, key)
+		kind, writtenKey(key, prec))
+}
+
+func writtenKey(key, prec string) string {
+	if prec == "" {
+		return key
+	}
+	return key + "p" + clipLiteral(prec)
 }
