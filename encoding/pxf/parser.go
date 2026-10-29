@@ -992,8 +992,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// document top level.
 		if !allowMapEntry {
 			// Tolerant mode records and keeps the entry as a map entry.
-			if err := p.soft(errorf(pos,
-				"map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")); err != nil {
+			if err := p.soft(topLevelMapEntryError(pos)); err != nil {
 				return nil, err
 			}
 		}
@@ -1352,6 +1351,12 @@ func nonNameBlockError(pos Position, kind TokenKind, key, prec string) error {
 	return errorf(pos,
 		"submessage block requires an identifier or string key, got %s (%q)",
 		kind, writtenKey(key, prec))
+}
+
+// topLevelMapEntryError reports a ':' entry at the top level of a
+// document, from the parser and the direct decoder alike.
+func topLevelMapEntryError(pos Position) error {
+	return errorf(pos, "map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")
 }
 
 func writtenKey(key, prec string) string {

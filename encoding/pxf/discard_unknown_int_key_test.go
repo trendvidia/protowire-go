@@ -15,7 +15,7 @@ import (
 // An integer or bool key with '=' or '{' is a grammar error, not an
 // unknown field, so DiscardUnknown does not skip it: the decoder reports
 // what Parse reports, with or without the option, before or after a
-// known field (#196).
+// known field (#196). So does a ':' entry at the top level.
 func TestDiscardUnknownIntegerKey(t *testing.T) {
 	desc := msgDesc(t, "AllTypes")
 	cases := []struct{ name, src, want string }{
@@ -27,6 +27,8 @@ func TestDiscardUnknownIntegerKey(t *testing.T) {
 		{"bool block", "string_field = \"x\"\nfalse { }\n", `got bool ("false")`},
 		{"suffixed key quoted as written", "1p5 = 2\n", `got integer ("1p5")`},
 		{"suffixed block key", "1p64 { }\n", `got integer ("1p64")`},
+		{"top-level map entry", "1 : 2\n", "map entry (':' form) is only allowed inside a '{ … }' block"},
+		{"top-level named map entry", "string_field : \"x\"\n", "map entry (':' form) is only allowed inside a '{ … }' block"},
 		{"no key", "= 2\n", "expected identifier, string, integer, or bool"},
 	}
 	for _, c := range cases {
@@ -125,4 +127,41 @@ func TestDiscardUnknownValueNestingDepth(t *testing.T) {
 		require.Error(t, err, "%q", c.src)
 		assert.Equal(t, perr.Error(), err.Error(), "%q", c.src)
 	}
+}
+
+// A directive's body is read as Parse reads it, with or without
+// DiscardUnknown: the decoder used to match its braces and keep the
+// bytes, so a body that is not PXF decoded as success (#196).
+func TestDirectiveBodyIsParsed(t *testing.T) {
+	desc := msgDesc(t, "AllTypes")
+	for _, src := range []string{
+		"@x { 1 = 2 }\n",
+		"@x {\n",
+		"@x { a { } \n",
+		"@x Header { a = = }\n",
+		" @0{0}",
+		"@x { a = 1 }\nstring_field = [1 2\n",
+	} {
+		t.Run(src, func(t *testing.T) {
+			_, perr := pxf.Parse([]byte(src))
+			require.Error(t, perr)
+			for _, discard := range []bool{false, true} {
+				_, err := pxf.UnmarshalOptions{DiscardUnknown: discard}.UnmarshalDescriptor([]byte(src), desc)
+				require.Error(t, err, "DiscardUnknown=%v", discard)
+				if src != "@x { a = 1 }\nstring_field = [1 2\n" {
+					assert.Equal(t, perr.Error(), err.Error(), "DiscardUnknown=%v", discard)
+				}
+			}
+		})
+	}
+	// A body Parse accepts keeps its raw bytes, and decoding resumes after it.
+	src := "@x Header { a = { b: [1, 2] } # c\n }\nstring_field = \"x\"\n"
+	doc, err := pxf.Parse([]byte(src))
+	require.NoError(t, err)
+	msg, res, err := pxf.UnmarshalFullDescriptor([]byte(src), desc)
+	require.NoError(t, err)
+	assert.Equal(t, "x", msg.Get(desc.Fields().ByName("string_field")).String())
+	require.Len(t, doc.Directives, 1)
+	require.Len(t, res.Directives(), 1)
+	assert.Equal(t, doc.Directives[0].Body, res.Directives()[0].Body)
 }

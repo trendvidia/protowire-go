@@ -550,8 +550,17 @@ prefixesDone:
 
 	if d.current.Kind == LBRACE {
 		open := d.current.Pos.Offset
+		// The body is read as Parse reads it (parseDirective), so a body
+		// that is not PXF is an error here too, not skipped by counting
+		// braces (#196). Body stays the raw bytes.
+		p := parser{lex: &d.lex, current: d.current, maxDepth: d.lim.maxDepth}
+		if _, err := p.parseBlockVal(0); err != nil {
+			return dir, err
+		}
 		close := findMatchingBrace(d.lex.input, open)
 		if close < 0 {
+			// parseBlockVal found the '}', so this is defensive, as in
+			// parseDirective.
 			return dir, errorf(dir.Pos, "directive @%s: unmatched '{'", dir.Name)
 		}
 		dir.Body = d.lex.input[open+1 : close]
@@ -770,6 +779,11 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 
 		case COLON:
+			if !inBlock {
+				// The parser's grammar error: no map entry stands at
+				// the top level of a document, whatever the schema.
+				return topLevelMapEntryError(pos)
+			}
 			return errorf(pos, "unexpected ':' in message context, use '=' for field assignments")
 
 		default:
