@@ -963,9 +963,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// keys are only valid with `:` (map entries).
 		if keyKind == INT || keyKind == BOOL {
 			// Tolerant mode records and keeps the entry as an assignment.
-			if err := p.soft(errorf(pos,
-				"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
-				keyKind, key)); err != nil {
+			if err := p.soft(nonNameAssignError(pos, keyKind, key)); err != nil {
 				return nil, err
 			}
 		}
@@ -1010,9 +1008,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 		// or a string literal (quoted entry name, draft -01 §3.13). Same
 		// integer-key rule as `=` applies.
 		if keyKind == INT || keyKind == BOOL {
-			if err := p.soft(errorf(pos,
-				"submessage block requires an identifier or string key, got %s (%q)",
-				keyKind, key)); err != nil {
+			if err := p.soft(nonNameBlockError(pos, keyKind, key)); err != nil {
 				return nil, err
 			}
 		}
@@ -1326,4 +1322,21 @@ func decodeBase64Lenient(raw string) ([]byte, error) {
 		return decoded, nil
 	}
 	return nil, err
+}
+
+// nonNameAssignError and nonNameBlockError report an integer or bool key
+// before '=' or '{', where only a field name may stand. The parser and
+// the direct decoder both report them, so an integer key is a grammar
+// error on every path, not an unknown field that DiscardUnknown skips
+// (protowire-go#196).
+func nonNameAssignError(pos Position, kind TokenKind, key string) error {
+	return errorf(pos,
+		"field assignment with '=' requires an identifier or string key, got %s (%q); use ':' for map entries",
+		kind, key)
+}
+
+func nonNameBlockError(pos Position, kind TokenKind, key string) error {
+	return errorf(pos,
+		"submessage block requires an identifier or string key, got %s (%q)",
+		kind, key)
 }

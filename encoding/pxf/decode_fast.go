@@ -618,12 +618,16 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 		if d.current.Kind != IDENT && d.current.Kind != STRING && d.current.Kind != INT {
 			return errorf(pos, "expected identifier, string, or integer, got %s", d.tokenErrMsg())
 		}
-		keyQuoted := d.current.Kind == STRING
+		keyKind := d.current.Kind
+		keyQuoted := keyKind == STRING
 		key := d.current.Value
 		d.advance()
 
 		switch d.current.Kind {
 		case EQUALS:
+			if keyKind == INT {
+				return nonNameAssignError(pos, keyKind, key)
+			}
 			d.advance()
 			if keyQuoted {
 				// Grammar accepts a string at entry-name position
@@ -682,6 +686,9 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 
 		case LBRACE:
+			if keyKind == INT {
+				return nonNameBlockError(pos, keyKind, key)
+			}
 			d.advance()
 			if keyQuoted {
 				return quotedNameUnkeyedError(pos, key)
