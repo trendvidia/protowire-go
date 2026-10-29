@@ -27,6 +27,16 @@ type lexer struct {
 	// never reads it.
 	sawEnd bool
 
+	// prec is the precision suffix of the last INT or FLOAT token Next
+	// returned, as written ("53" for 0.1p53), or "" for none (draft -01
+	// § PXF Annotations, protowire#406). It is lexer state, not a Token
+	// field: Next returns every token by value, and a Token 16 bytes
+	// wider cost Parse about 3% (protowire-go#196). Every INT and FLOAT
+	// sets it, so it is current whenever the token is a number; read it
+	// only then (parser.prec, directDecoder.prec), and save it across a
+	// peek.
+	prec string
+
 	// noValue skips copying a string literal's plain characters into the
 	// token's Value: the dataset row scan (DatasetReader.nextToken) only
 	// needs where a token ends, not what it holds. Escapes are still
@@ -525,6 +535,7 @@ func (l *lexer) lexNumber(pos Position) Token {
 			l.advance()
 			l.advance()
 			l.advance()
+			l.prec = ""
 			return Token{Kind: FLOAT, Value: l.viewString(start, l.pos), Pos: pos}
 		}
 		if sign == '+' {
@@ -572,12 +583,12 @@ func (l *lexer) lexNumber(pos Position) Token {
 	}
 
 	value := l.viewString(start, l.pos)
-	var prec string
+	l.prec = ""
 	if l.peek() == 'p' {
-		prec = l.lexPrecision()
+		l.prec = l.lexPrecision()
 	}
 	l.sawEnd = l.runCut()
-	return Token{Kind: INT, Value: value, Pos: pos, Prec: prec}
+	return Token{Kind: INT, Value: value, Pos: pos}
 }
 
 // lexPrecision consumes a number's precision suffix, "p" and one or more
@@ -615,12 +626,12 @@ func (l *lexer) lexFloat(pos Position, start int) Token {
 		}
 	}
 	value := l.viewString(start, l.pos)
-	var prec string
+	l.prec = ""
 	if l.peek() == 'p' {
-		prec = l.lexPrecision()
+		l.prec = l.lexPrecision()
 	}
 	l.sawEnd = l.runCut()
-	return Token{Kind: FLOAT, Value: value, Pos: pos, Prec: prec}
+	return Token{Kind: FLOAT, Value: value, Pos: pos}
 }
 
 func (l *lexer) lexTimestamp(pos Position, start int) Token {

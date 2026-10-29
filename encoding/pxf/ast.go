@@ -273,7 +273,7 @@ type IntVal struct {
 	End Position // just past the literal's last byte, its suffix included
 	Raw string
 	// Prec is the literal's precision suffix digits, "" for none (see
-	// Token.Prec). Raw never includes it.
+	// lexer.prec). Raw never includes it.
 	Prec string
 }
 
@@ -287,7 +287,7 @@ type FloatVal struct {
 	End Position // just past the literal's last byte, its suffix included
 	Raw string
 	// Prec is the literal's precision suffix digits, "" for none (see
-	// Token.Prec). Raw never includes it.
+	// lexer.prec). Raw never includes it.
 	Prec string
 }
 

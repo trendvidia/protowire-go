@@ -205,19 +205,28 @@ func (p *parser) takeTrailingComment(end Position) string {
 	return c.Text
 }
 
+// prec is the current token's precision suffix digits, "" for none or
+// for a token that isn't a number (lexer.prec).
+func (p *parser) prec() string {
+	if k := p.current.Kind; k == INT || k == FLOAT {
+		return p.lex.prec
+	}
+	return ""
+}
+
 // peekKind returns the kind of the next significant token (skipping
 // newlines and comments) without consuming it or disturbing pending-
 // comment accumulation. Used by parseDirective to disambiguate "this
 // IDENT is a directive prefix" from "this IDENT is a body field key".
 func (p *parser) peekKind() TokenKind {
-	pos, line, col := p.lex.pos, p.lex.line, p.lex.col
+	pos, line, col, prec := p.lex.pos, p.lex.line, p.lex.col, p.lex.prec
 	saved := p.current
 	savedPrevEnd := p.prevEnd
 	nComments := len(p.comments)
 	nErrs := len(p.errs) // tolerant lexing may report during the peek
 	p.advance()
 	next := p.current.Kind
-	p.lex.pos, p.lex.line, p.lex.col = pos, line, col
+	p.lex.pos, p.lex.line, p.lex.col, p.lex.prec = pos, line, col, prec
 	p.current = saved
 	p.prevEnd = savedPrevEnd
 	p.comments = p.comments[:nComments]
@@ -951,7 +960,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 	}
 	keyKind := p.current.Kind
 	key := p.current.Value
-	keyPrec := p.current.Prec
+	keyPrec := p.prec()
 	p.advance()
 
 	switch p.current.Kind {
@@ -1060,12 +1069,12 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return v, nil
 
 	case INT:
-		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
+		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.prec()}
 		p.advance()
 		return v, nil
 
 	case FLOAT:
-		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
+		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.prec()}
 		p.advance()
 		return v, nil
 
