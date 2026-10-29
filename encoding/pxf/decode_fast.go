@@ -936,6 +936,9 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
+		if err := d.noPrecision(fd); err != nil {
+			return err
+		}
 		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
@@ -947,6 +950,9 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+		if err := d.noPrecision(fd); err != nil {
+			return err
+		}
 		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
@@ -958,7 +964,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
+		bf, err := parseBigFloat(numberLiteral(d.current), d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -1254,6 +1260,9 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
+		if err := d.noPrecision(fd); err != nil {
+			return protoreflect.Value{}, err
+		}
 		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
@@ -1264,6 +1273,9 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+		if err := d.noPrecision(fd); err != nil {
+			return protoreflect.Value{}, err
+		}
 		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
@@ -1274,7 +1286,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
+		bf, err := parseBigFloat(numberLiteral(d.current), d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1444,6 +1456,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 		if keyKind != IDENT && keyKind != STRING && keyKind != INT && keyKind != BOOL {
 			return errorf(pos, "expected map key, got %s", d.tokenErrMsg())
 		}
+		if d.current.Prec != "" {
+			return errorf(pos, "map field %q: a key cannot carry a precision suffix (p%s)", fd.Name(), d.current.Prec)
+		}
 		keyStr := strings.Clone(d.current.Value)
 		d.advance()
 
@@ -1515,6 +1530,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigInt(mdesc) && d.current.Kind == INT {
+				if err := d.noPrecision(fd); err != nil {
+					return err
+				}
 				bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
@@ -1526,6 +1544,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+				if err := d.noPrecision(fd); err != nil {
+					return err
+				}
 				unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
@@ -1537,7 +1558,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
+				bf, err := parseBigFloat(numberLiteral(d.current), d.lim.maxDigits, d.lim.maxBigFloatExp)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1659,6 +1680,9 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 // only where an error is already being built.
 func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
+	if err := d.noPrecision(named); err != nil {
+		return protoreflect.Value{}, err
+	}
 
 	switch fd.Kind() {
 	case protoreflect.StringKind:
@@ -1898,6 +1922,9 @@ func (d *directDecoder) consumeEnum(fd protoreflect.FieldDescriptor) (protorefle
 // values are typed by the map-entry message's `value` field too.
 func (d *directDecoder) consumeEnumAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
+	if err := d.noPrecision(named); err != nil {
+		return protoreflect.Value{}, err
+	}
 	switch d.current.Kind {
 	case IDENT:
 		ev := fd.Enum().Values().ByName(protoreflect.Name(d.current.Value))
@@ -2440,4 +2467,24 @@ func parseScalarDefault(kind protoreflect.Kind, def string, fd protoreflect.Fiel
 	default:
 		return protoreflect.Value{}, fmt.Errorf("unsupported default kind %s for field %q", kind, fd.Name())
 	}
+}
+
+// noPrecision rejects a precision suffix on the current literal when it
+// binds to fd, which is not a pxf.BigFloat (draft -01 § PXF Annotations,
+// protowire#406). The suffix lexes on any number; only a BigFloat reads
+// it.
+func (d *directDecoder) noPrecision(fd protoreflect.FieldDescriptor) error {
+	if d.current.Prec == "" {
+		return nil
+	}
+	return errorf(d.current.Pos, "precision suffix p%s is allowed only on a pxf.BigFloat, not on field %q", d.current.Prec, fd.Name())
+}
+
+// numberLiteral is a number token's text with its precision suffix, as
+// parseBigFloat reads it.
+func numberLiteral(t Token) string {
+	if t.Prec == "" {
+		return t.Value
+	}
+	return t.Value + "p" + t.Prec
 }

@@ -1053,12 +1053,12 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return v, nil
 
 	case INT:
-		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value}
+		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
 		p.advance()
 		return v, nil
 
 	case FLOAT:
-		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value}
+		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
 		p.advance()
 		return v, nil
 

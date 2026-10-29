@@ -570,8 +570,26 @@ func (l *lexer) lexNumber(pos Position) Token {
 		return l.lexFloat(pos, start)
 	}
 
+	value := l.viewString(start, l.pos)
+	prec := l.lexPrecision()
 	l.sawEnd = l.runCut()
-	return Token{Kind: INT, Value: l.viewString(start, l.pos), Pos: pos}
+	return Token{Kind: INT, Value: value, Pos: pos, Prec: prec}
+}
+
+// lexPrecision consumes a number's precision suffix, "p" and one or more
+// digits (the precision production of draft -01), and returns its digits,
+// or "" when none follows. Any field but a pxf.BigFloat rejects one; that
+// is the decoder's call, not the lexer's.
+func (l *lexer) lexPrecision() string {
+	if l.peek() != 'p' || !isDigit(l.peekAt(1)) {
+		return ""
+	}
+	l.advance() // p
+	start := l.pos
+	for l.pos < len(l.input) && isDigit(l.peek()) {
+		l.advance()
+	}
+	return l.viewString(start, l.pos)
 }
 
 func (l *lexer) lexFloat(pos Position, start int) Token {
@@ -590,8 +608,10 @@ func (l *lexer) lexFloat(pos Position, start int) Token {
 			l.advance()
 		}
 	}
+	value := l.viewString(start, l.pos)
+	prec := l.lexPrecision()
 	l.sawEnd = l.runCut()
-	return Token{Kind: FLOAT, Value: l.viewString(start, l.pos), Pos: pos}
+	return Token{Kind: FLOAT, Value: value, Pos: pos, Prec: prec}
 }
 
 func (l *lexer) lexTimestamp(pos Position, start int) Token {

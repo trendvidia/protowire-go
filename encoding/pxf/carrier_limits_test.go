@@ -140,13 +140,13 @@ func TestCarrier_BigFloatExponentIsBounded(t *testing.T) {
 		fd := synthField(t, defaultCarrier(18, arg))
 		def, problems := readCarrier(fd)
 		require.Empty(t, problems)
-		require.Equal(t, "0", def)
+		require.Equal(t, "0p64", def, "a zero keeps its precision (protowire#410)")
 	})
 	t.Run("large finite", func(t *testing.T) {
 		fd := synthField(t, defaultCarrier(18, bigFloatArg(10_000, 64)))
 		var def, problems string
 		promptly(t, 5*time.Second, func() error { def, problems = readCarrier(fd); return nil })
 		require.Empty(t, problems)
-		require.True(t, strings.HasSuffix(def, "e+3011"), "25 × 2^10000 renders in exponent form, got %q", def)
+		require.True(t, strings.HasSuffix(def, "e+3011p64"), "25 × 2^10000 renders in exponent form, with its precision, got %q", def)
 	})
 }

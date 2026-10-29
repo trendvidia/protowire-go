@@ -270,8 +270,11 @@ func (v *StringVal) end() Position { return v.End }
 // IntVal is an integer literal (raw text, decoded later by schema).
 type IntVal struct {
 	Pos Position
-	End Position // just past the literal's last byte
+	End Position // just past the literal's last byte, its suffix included
 	Raw string
+	// Prec is the literal's precision suffix digits, "" for none (see
+	// Token.Prec). Raw never includes it.
+	Prec string
 }
 
 func (*IntVal) valueNode()      {}
@@ -281,8 +284,11 @@ func (v *IntVal) end() Position { return v.End }
 // FloatVal is a floating-point literal.
 type FloatVal struct {
 	Pos Position
-	End Position // just past the literal's last byte
+	End Position // just past the literal's last byte, its suffix included
 	Raw string
+	// Prec is the literal's precision suffix digits, "" for none (see
+	// Token.Prec). Raw never includes it.
+	Prec string
 }
 
 func (*FloatVal) valueNode()      {}

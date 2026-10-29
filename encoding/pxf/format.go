@@ -143,8 +143,10 @@ func (f *formatter) formatValue(val Value, level int) {
 		fmt.Fprintf(f.buf, "%q", v.Value)
 	case *IntVal:
 		f.buf.WriteString(v.Raw)
+		writePrecision(f.buf, v.Prec)
 	case *FloatVal:
 		f.buf.WriteString(v.Raw)
+		writePrecision(f.buf, v.Prec)
 	case *BoolVal:
 		if v.Value {
 			f.buf.WriteString("true")
@@ -223,4 +225,13 @@ func lexesAsBareMapKey(s string) bool {
 		return t.Value == s && l.Next().Kind == EOF
 	}
 	return false
+}
+
+// writePrecision writes a literal's precision suffix back as it was
+// lexed, "p" and its digits, or nothing for none (protowire#406).
+func writePrecision(buf *bytes.Buffer, prec string) {
+	if prec != "" {
+		buf.WriteByte('p')
+		buf.WriteString(prec)
+	}
 }
