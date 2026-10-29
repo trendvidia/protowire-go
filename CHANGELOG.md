@@ -13,6 +13,25 @@ format changes.
 
 ### Changed
 
+- **A `pxf.BigFloat` is written with its precision, and read back at it**
+  ([#194](https://github.com/trendvidia/protowire-go/issues/194), trendvidia/protowire#406, #410).
+  - The encoder writes N = (decimal digits of 2^prec) + 1 significant digits, rounded half
+    to even, in `%g` form, followed by the suffix `p<prec>`: `0.10000000000000001p53`. A zero
+    is `0p<prec>` or `-0p<prec>`; only a prec-0 zero is `0`. Before, the literal had no
+    suffix and every literal was read at one fixed precision, so a value's precision did
+    not survive a round trip.
+  - The decoder reads a suffixed literal at exactly its precision and an unsuffixed one at
+    256 bits. It rejects a suffix on any field that is not a `pxf.BigFloat` (naming the
+    field), on a map key, `p0`, and a precision whose N exceeds `MaxNumericLiteralDigits`
+    (above `p13603`).
+  - A mantissa wider than its precision is written as the value rounded to it, and
+    `MaxBigFloatExponent` is checked after rounding.
+  - `MaxNumericLiteralDigits` counts the mantissa's significant digits only: leading zeros,
+    the exponent and the suffix are not counted. So a `pxf.Decimal` at scale +4096 now has a
+    literal; scale −4096 still has none.
+  - `Token.Prec`, `IntVal.Prec` and `FloatVal.Prec` carry the suffix through the AST, and the
+    formatter writes it back.
+  - `testdata/bigfloat/` vendors protowire's 35-case corpus, run by `TestBigFloatCorpus`.
 - **A map key bound twice in one message body is rejected**
   ([#191](https://github.com/trendvidia/protowire-go/issues/191), trendvidia/protowire#396).
   - Inside one map literal or across two bindings of the field, the second occurrence fails

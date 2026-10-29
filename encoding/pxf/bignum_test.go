@@ -547,14 +547,22 @@ func TestDecimalScaleIsBoundedOnMarshal(t *testing.T) {
 	// naming the digit count; neither is truncated, rounded or switched
 	// to another notation. The corpus row decimal-scale-4096 stays
 	// accept on the pb side.
-	for _, scale := range []int32{max, -max} {
-		t.Run("at the wire's bound, one digit past the literal's (protowire#310)", func(t *testing.T) {
-			out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), scale, false))
-			require.Error(t, err, "scale %d", scale)
-			assert.Nil(t, out)
-			assert.Contains(t, err.Error(), "pxf.Decimal renders to 4097 digits; MaxNumericLiteralDigits=4096")
-		})
-	}
+	// At the wire's bound the two signs part company since protowire#410:
+	// the cap counts significant digits, so 5 × 10^-4096, "0.000…5", is
+	// one digit and has a literal, while 5 × 10^4096 is 5 and 4096
+	// trailing zeros, 4097 significant digits, and still has none.
+	t.Run("positive scale at the wire's bound has a literal (protowire#410)", func(t *testing.T) {
+		out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), max, false))
+		require.NoError(t, err)
+		_, err = pxf.UnmarshalDescriptor(out, desc)
+		require.NoError(t, err, "the decoder takes what the encoder wrote at the bound")
+	})
+	t.Run("negative scale at the wire's bound, one digit past the literal's (protowire#310)", func(t *testing.T) {
+		out, err := pxf.Marshal(decimalDemo(t, desc, big.NewInt(5), -max, false))
+		require.Error(t, err)
+		assert.Nil(t, out)
+		assert.Contains(t, err.Error(), "pxf.Decimal renders to 4097 digits; MaxNumericLiteralDigits=4096")
+	})
 	t.Run("unscaled past the digit cap at scale 0 (protowire#310)", func(t *testing.T) {
 		out, err := pxf.Marshal(decimalDemo(t, desc, pow10(max), 0, false))
 		require.Error(t, err)
@@ -675,35 +683,39 @@ func TestMarshalBoundsBigNumberLiterals(t *testing.T) {
 		setBigFloat(msg.Mutable(demo.Fields().ByName("big_float_field")).Message(), allOnes(13600), 0, 13600)
 		out, err := pxf.Marshal(msg)
 		require.NoError(t, err)
-		assert.Len(t, out, len("big_float_field = \n")+4095)
+		assert.Len(t, out, len("big_float_field = \n")+4095+len("p13600"))
 		_, err = pxf.UnmarshalDescriptor(out, demo)
 		require.NoError(t, err, "the decoder takes what the encoder wrote at the bound: %.40s…", out)
 	})
-	t.Run("BigFloat past the bound, rendered", func(t *testing.T) {
-		const want = "pxf.BigFloat renders to 4099 digits; MaxNumericLiteralDigits=4096" // at MaxBigFloatExponent
-
-		msg := dynamicpb.NewMessage(demo)
-		setBigFloat(msg.Mutable(demo.Fields().ByName("big_float_field")).Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
-		_, err := pxf.Marshal(msg)
-		require.ErrorContains(t, err, want, "field")
-
-		msg = dynamicpb.NewMessage(demo)
-		setBigFloat(msg.Mutable(demo.Fields().ByName("repeated_big_float")).List().AppendMutable().Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
-		_, err = pxf.Marshal(msg)
-		require.ErrorContains(t, err, want, "list")
-
+	t.Run("BigFloat at the bound with an exponent", func(t *testing.T) {
+		// Only the mantissa's significant digits count (protowire#410), so
+		// N digits plus an exponent and a suffix fit, in a field, a list
+		// element and a map value alike, and read back.
+		for name, msg := range map[string]*dynamicpb.Message{"field": dynamicpb.NewMessage(demo), "list": dynamicpb.NewMessage(demo)} {
+			if name == "field" {
+				setBigFloat(msg.Mutable(demo.Fields().ByName("big_float_field")).Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
+			} else {
+				setBigFloat(msg.Mutable(demo.Fields().ByName("repeated_big_float")).List().AppendMutable().Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
+			}
+			out, err := pxf.Marshal(msg)
+			require.NoError(t, err, name)
+			_, err = pxf.UnmarshalDescriptor(out, demo)
+			require.NoError(t, err, "%s: the decoder takes what the encoder wrote", name)
+		}
 		mm := dynamicpb.NewMessage(maps)
 		setBigFloat(mm.Mutable(maps.Fields().ByName("floats")).Map().Mutable(protoreflect.ValueOfString("k").MapKey()).Message(), allOnes(13600), pxf.MaxBigFloatExponent-13600, 13600)
-		_, err = pxf.Marshal(mm)
-		require.ErrorContains(t, err, want, "map")
+		out, err := pxf.Marshal(mm)
+		require.NoError(t, err, "map")
+		_, err = pxf.UnmarshalDescriptor(out, maps)
+		require.NoError(t, err, "map: the decoder takes what the encoder wrote")
 	})
 	t.Run("BigFloat past the bound, before rendering", func(t *testing.T) {
 		for _, tc := range []struct {
 			prec uint32
 			want string
 		}{
-			{13610, "pxf.BigFloat prec 13610 bits renders to 4098 digits; MaxNumericLiteralDigits=4096"},
-			{math.MaxUint32, "pxf.BigFloat prec 4294967295 bits renders to 1292914005 digits; MaxNumericLiteralDigits=4096"},
+			{13610, "pxf.BigFloat prec 13610 bits renders to 4099 digits; MaxNumericLiteralDigits=4096"},
+			{math.MaxUint32, "pxf.BigFloat prec 4294967295 bits renders to 1292913988 digits; MaxNumericLiteralDigits=4096"},
 		} {
 			msg := dynamicpb.NewMessage(demo)
 			setBigFloat(msg.Mutable(demo.Fields().ByName("big_float_field")).Message(), big.NewInt(1), 0, tc.prec)

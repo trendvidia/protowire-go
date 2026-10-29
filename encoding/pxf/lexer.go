@@ -97,14 +97,15 @@ func (l *lexer) more(n int) bool {
 // name) and stopped at the cursor could still go on with more input:
 // the input ends at the cursor, or the cursor is on its last byte and
 // that byte is one whose meaning the lexer reads from the byte after it
-// ('.' before a digit, the first byte of "µ", '/' before '/' or '*').
+// ('.' before a digit, the first byte of "µ", '/' before '/' or '*',
+// 'p' before a digit, which makes a number's precision suffix).
 func (l *lexer) runCut() bool {
 	switch len(l.input) - l.pos {
 	case 0:
 		return true
 	case 1:
 		ch := l.input[l.pos]
-		return ch == '.' || ch == 0xC2 || ch == '/'
+		return ch == '.' || ch == 0xC2 || ch == '/' || ch == 'p'
 	}
 	return false
 }
@@ -570,8 +571,31 @@ func (l *lexer) lexNumber(pos Position) Token {
 		return l.lexFloat(pos, start)
 	}
 
+	value := l.viewString(start, l.pos)
+	var prec string
+	if l.peek() == 'p' {
+		prec = l.lexPrecision()
+	}
 	l.sawEnd = l.runCut()
-	return Token{Kind: INT, Value: l.viewString(start, l.pos), Pos: pos}
+	return Token{Kind: INT, Value: value, Pos: pos, Prec: prec}
+}
+
+// lexPrecision consumes a number's precision suffix, "p" and one or more
+// digits (the precision production of draft -01), and returns its digits,
+// or "" when no digit follows the 'p' at the cursor. The caller checks
+// for the 'p', so a number without one pays no call. Any field but a
+// pxf.BigFloat rejects a suffix; that is the decoder's call, not the
+// lexer's.
+func (l *lexer) lexPrecision() string {
+	if !isDigit(l.peekAt(1)) {
+		return ""
+	}
+	l.advance() // p
+	start := l.pos
+	for l.pos < len(l.input) && isDigit(l.peek()) {
+		l.advance()
+	}
+	return l.viewString(start, l.pos)
 }
 
 func (l *lexer) lexFloat(pos Position, start int) Token {
@@ -590,8 +614,13 @@ func (l *lexer) lexFloat(pos Position, start int) Token {
 			l.advance()
 		}
 	}
+	value := l.viewString(start, l.pos)
+	var prec string
+	if l.peek() == 'p' {
+		prec = l.lexPrecision()
+	}
 	l.sawEnd = l.runCut()
-	return Token{Kind: FLOAT, Value: l.viewString(start, l.pos), Pos: pos}
+	return Token{Kind: FLOAT, Value: value, Pos: pos, Prec: prec}
 }
 
 func (l *lexer) lexTimestamp(pos Position, start int) Token {

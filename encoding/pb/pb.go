@@ -358,7 +358,9 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 			b = protowire.AppendBytes(b, msg)
 		case bigFloatType:
 			bf := fv.Addr().Interface().(*big.Float)
-			if bf.Sign() == 0 && bf.Prec() == 0 && !element {
+			// Only +0 at prec 0 is the empty message; -0 there is
+			// {negative: true}, as PXF "-0" reads (protowire#410).
+			if bf.Sign() == 0 && bf.Prec() == 0 && !bf.Signbit() && !element {
 				return b, nil
 			}
 			msg, err := marshalBigFloat(bf)
@@ -750,6 +752,12 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 	}
 	prec := bf.Prec()
 	if prec == 0 {
+		// A prec-0 big.Float is ±0, and its sign is all there is to
+		// write: PXF "-0" reads as {negative: true} (protowire#410).
+		if bf.Signbit() {
+			msg := protowire.AppendTag(nil, 4, protowire.VarintType)
+			return protowire.AppendVarint(msg, 1), nil
+		}
 		return nil, nil
 	}
 	if prec > math.MaxUint32 {
@@ -1024,7 +1032,13 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
 		}
 	}
 	if prec == 0 {
-		bf.SetFloat64(0)
+		// A zero at prec 0, signed by negative (protowire#410: PXF "-0"
+		// reads as {negative: true}). SetFloat64 dropped the sign and
+		// raised the precision to 53; SetPrec(0) keeps both as stored.
+		bf.SetPrec(0)
+		if bf.Signbit() != negative {
+			bf.Neg(bf)
+		}
 		return nil
 	}
 	// Storing the exponent is cheap: big.Float keeps it as an int32, and

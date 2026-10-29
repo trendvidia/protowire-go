@@ -951,6 +951,7 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 	}
 	keyKind := p.current.Kind
 	key := p.current.Value
+	keyPrec := p.current.Prec
 	p.advance()
 
 	switch p.current.Kind {
@@ -983,6 +984,16 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 			// Tolerant mode records and keeps the entry as a map entry.
 			if err := p.soft(errorf(pos,
 				"map entry (':' form) is only allowed inside a '{ … }' block; use '=' for top-level field assignments")); err != nil {
+				return nil, err
+			}
+		}
+		// map-key = identifier / string / integer / bool: an integer key
+		// takes no precision suffix (draft -01 ABNF, protowire#406).
+		// MapEntry.Key has nowhere to keep one, so accepting it would
+		// drop it, and a formatted document would bind a different key
+		// from the one the decoder rejects.
+		if keyPrec != "" {
+			if err := p.soft(errorf(pos, "map key %s: a key cannot carry a precision suffix (p%s)", key, clipLiteral(keyPrec))); err != nil {
 				return nil, err
 			}
 		}
@@ -1053,12 +1064,12 @@ func (p *parser) parseValue(depth int) (Value, error) {
 		return v, nil
 
 	case INT:
-		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value}
+		v := &IntVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
 		p.advance()
 		return v, nil
 
 	case FLOAT:
-		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value}
+		v := &FloatVal{Pos: pos, End: p.tokenEnd(), Raw: p.current.Value, Prec: p.current.Prec}
 		p.advance()
 		return v, nil
 

@@ -936,6 +936,9 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
+		if d.current.Prec != "" {
+			return d.precisionError(fd)
+		}
 		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
@@ -947,6 +950,9 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+		if d.current.Prec != "" {
+			return d.precisionError(fd)
+		}
 		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
@@ -958,7 +964,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		return nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
+		bf, err := parseBigFloatPrec(d.current.Value, d.current.Prec, d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return errorf(d.current.Pos, "%v", err)
 		}
@@ -1254,6 +1260,9 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigInt(mdesc) && d.current.Kind == INT {
+		if d.current.Prec != "" {
+			return protoreflect.Value{}, d.precisionError(fd)
+		}
 		bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
@@ -1264,6 +1273,9 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+		if d.current.Prec != "" {
+			return protoreflect.Value{}, d.precisionError(fd)
+		}
 		unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
@@ -1274,7 +1286,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		return protoreflect.ValueOfMessage(sub), nil
 	}
 	if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-		bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
+		bf, err := parseBigFloatPrec(d.current.Value, d.current.Prec, d.lim.maxDigits, d.lim.maxBigFloatExp)
 		if err != nil {
 			return protoreflect.Value{}, errorf(d.current.Pos, "%v", err)
 		}
@@ -1444,6 +1456,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 		if keyKind != IDENT && keyKind != STRING && keyKind != INT && keyKind != BOOL {
 			return errorf(pos, "expected map key, got %s", d.tokenErrMsg())
 		}
+		if d.current.Prec != "" {
+			return errorf(pos, "map field %q: a key cannot carry a precision suffix (p%s)", fd.Name(), clipLiteral(d.current.Prec))
+		}
 		keyStr := strings.Clone(d.current.Value)
 		d.advance()
 
@@ -1515,6 +1530,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigInt(mdesc) && d.current.Kind == INT {
+				if d.current.Prec != "" {
+					return d.precisionError(fd)
+				}
 				bi, err := parseBigInt(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
@@ -1526,6 +1544,9 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isDecimal(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
+				if d.current.Prec != "" {
+					return d.precisionError(fd)
+				}
 				unscaled, scale, negative, err := parseDecimal(d.current.Value, d.lim.maxDigits)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
@@ -1537,7 +1558,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				continue
 			}
 			if isBigFloat(mdesc) && (d.current.Kind == INT || d.current.Kind == FLOAT) {
-				bf, err := parseBigFloat(d.current.Value, d.lim.maxDigits, d.lim.maxBigFloatExp)
+				bf, err := parseBigFloatPrec(d.current.Value, d.current.Prec, d.lim.maxDigits, d.lim.maxBigFloatExp)
 				if err != nil {
 					return errorf(d.current.Pos, "%v", err)
 				}
@@ -1659,6 +1680,9 @@ func (d *directDecoder) consumeScalar(fd protoreflect.FieldDescriptor) (protoref
 // only where an error is already being built.
 func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
+	if d.current.Prec != "" {
+		return protoreflect.Value{}, d.precisionError(named)
+	}
 
 	switch fd.Kind() {
 	case protoreflect.StringKind:
@@ -1898,6 +1922,9 @@ func (d *directDecoder) consumeEnum(fd protoreflect.FieldDescriptor) (protorefle
 // values are typed by the map-entry message's `value` field too.
 func (d *directDecoder) consumeEnumAs(fd, named protoreflect.FieldDescriptor) (protoreflect.Value, error) {
 	pos := d.current.Pos
+	if d.current.Prec != "" {
+		return protoreflect.Value{}, d.precisionError(named)
+	}
 	switch d.current.Kind {
 	case IDENT:
 		ev := fd.Enum().Values().ByName(protoreflect.Name(d.current.Value))
@@ -2440,4 +2467,13 @@ func parseScalarDefault(kind protoreflect.Kind, def string, fd protoreflect.Fiel
 	default:
 		return protoreflect.Value{}, fmt.Errorf("unsupported default kind %s for field %q", kind, fd.Name())
 	}
+}
+
+// precisionError rejects the precision suffix on the current literal,
+// which binds to fd, not a pxf.BigFloat (draft -01 § PXF Annotations,
+// protowire#406). The suffix lexes on any number; only a BigFloat reads
+// it. Callers test d.current.Prec themselves, so a literal without a
+// suffix, which is every literal on these paths, pays no call.
+func (d *directDecoder) precisionError(fd protoreflect.FieldDescriptor) error {
+	return errorf(d.current.Pos, "precision suffix p%s is allowed only on a pxf.BigFloat, not on field %q", clipLiteral(d.current.Prec), fd.Name())
 }
