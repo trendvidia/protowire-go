@@ -772,7 +772,8 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 	}
 
 	var msg []byte
-	if mantBytes := mantInt.Bytes(); len(mantBytes) > 0 {
+	mantBytes := mantInt.Bytes()
+	if len(mantBytes) > 0 {
 		msg = protowire.AppendTag(msg, 1, protowire.BytesType)
 		msg = protowire.AppendBytes(msg, mantBytes)
 	}
@@ -791,7 +792,10 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 		return nil, err
 	}
 	adjExp := int32(adj)
-	if adjExp != 0 {
+	// A zero has no exponent at any prec: one encoding per value, the
+	// one a decoder stores for 0p<prec> (draft -01 § PXF Annotations,
+	// #196). MantExp gives a zero exponent 0, so adj was -prec.
+	if adjExp != 0 && len(mantBytes) > 0 {
 		// `int32 exponent = 2`: a plain varint, as for Decimal.scale
 		// above. adjExp is negative for almost every value, which is why
 		// this field is where #92 bit hardest.
