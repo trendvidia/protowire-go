@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -101,74 +100,27 @@ func firstDepFrom(deps []string, compiler string) (string, bool) {
 	return "", false
 }
 
-// validateProtosModule is the BSR-generated Go code for the buf.validate
-// protos. protowire-go imports none of it; protocompile requires it, and
-// this module's go.mod records that requirement as a floor every
-// consumer inherits.
-const validateProtosModule = "buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go"
-
-// minValidateProtos is the proto commit time, not the version, of the
-// oldest build the floor may name: the one buf.build/go/protovalidate
-// v1.2.0 requires. Older builds lack FieldPath, Rule and the other types
-// that release compiles against.
-const minValidateProtos = "20260415201107"
-
-// TestValidateProtosFloorIsNotStale pins issue #179. A BSR pseudo-version
-// leads with the protobuf-go version it was generated with, so the 2024
-// build at v1.36.12 sorts above the 2026 build at v1.36.11, and minimal
-// version selection hands a consumer of protovalidate v1.2.0 the older
-// protos. The comparison therefore reads the proto timestamp inside the
-// version rather than trusting version order.
-func TestValidateProtosFloorIsNotStale(t *testing.T) {
-	version, ok := selectedVersion(t, validateProtosModule)
-	if !ok {
-		t.Skipf("%s is no longer in the module graph, so this module sets no floor on it", validateProtosModule)
-	}
-
-	stamp, ok := bsrTimestamp(version)
-	require.Truef(t, ok, "%s@%s is not a BSR pseudo-version; the floor check cannot read its proto timestamp", validateProtosModule, version)
-	assert.GreaterOrEqualf(t, stamp, minValidateProtos,
-		"%s@%s carries buf.validate protos from %s, older than the %s build protovalidate v1.2.0 needs. "+
-			"Consumers inherit this floor, and version order prefers it over newer protos at a lower protobuf-go version. "+
-			"Raise it with go get. See issue #179.",
-		validateProtosModule, version, stamp, minValidateProtos)
-}
-
-// selectedVersion reports the version of module that this module's own
-// build list selects, outside any go.work, which is the graph a
-// consumer inherits.
-func selectedVersion(t *testing.T, module string) (string, bool) {
-	t.Helper()
-
-	cmd := exec.Command(goTool(t), "list", "-m", "-f", "{{.Path}} {{.Version}}", "all")
+// TestModuleGraphNamesNoBufBuild pins issue #198. Every module in this
+// module's graph reaches each consumer's graph, and the stack is meant not
+// to depend on buf.build (trendvidia/protowire#424). protocompile v0.36.0
+// stopped importing buf.build's generated code, which also retired the
+// buf.validate floor check of issue #179: with the module gone there is
+// no floor left to keep fresh.
+func TestModuleGraphNamesNoBufBuild(t *testing.T) {
+	cmd := exec.Command(goTool(t), "mod", "graph")
 	cmd.Dir = moduleRoot(t)
 	cmd.Env = append(os.Environ(), "GOWORK=off")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	require.NoErrorf(t, err, "go list -m all failed: %s", stderr.String())
+	require.NoErrorf(t, err, "go mod graph failed: %s", stderr.String())
+	require.NotEmpty(t, out, "go mod graph printed nothing")
 
 	for line := range strings.Lines(string(out)) {
-		path, version, _ := strings.Cut(strings.TrimSpace(line), " ")
-		if path == module {
-			return version, true
-		}
+		from, to, _ := strings.Cut(strings.TrimSpace(line), " ")
+		assert.Falsef(t, strings.HasPrefix(to, "buf.build/"),
+			"%s requires %s, so every consumer's graph names a buf.build module. See issue #198.", from, to)
 	}
-	return "", false
-}
-
-// bsrPseudoVersion matches a BSR generated-SDK version:
-// v<plugin version>-<proto commit time>-<commit>.<revision>.
-var bsrPseudoVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+-([0-9]{14})-[0-9a-f]{12}\.[0-9]+$`)
-
-// bsrTimestamp returns the proto commit time inside a BSR version,
-// reporting whether version has that shape.
-func bsrTimestamp(version string) (string, bool) {
-	m := bsrPseudoVersion.FindStringSubmatch(version)
-	if m == nil {
-		return "", false
-	}
-	return m[1], true
 }
 
 // listedPackage is the subset of `go list -json` output the guard uses.
@@ -309,33 +261,4 @@ func TestFirstDepFrom(t *testing.T) {
 func TestToolPrefixIsPathBounded(t *testing.T) {
 	assert.True(t, strings.HasPrefix("github.com/trendvidia/protowire-go/scripts/check_decode", toolPrefix))
 	assert.False(t, strings.HasPrefix("github.com/trendvidia/protowire-go/scriptsy", toolPrefix))
-}
-
-// TestBSRTimestamp pins the version parsing the floor check relies on,
-// including the ordering trap from issue #179: the later proto build
-// carries the lower plugin version.
-func TestBSRTimestamp(t *testing.T) {
-	tests := []struct {
-		version string
-		want    string
-		wantOK  bool
-	}{
-		{version: "v1.36.12-20240920164238-5a7b106cbb87.1", want: "20240920164238", wantOK: true},
-		{version: "v1.36.11-20260415201107-50325440f8f2.1", want: "20260415201107", wantOK: true},
-		{version: "v1.36.12-20260825204119-511051f7f437.2", want: "20260825204119", wantOK: true},
-		{version: "v1.36.12", wantOK: false},
-		{version: "v0.0.0-20260113132338-7c7de50cc741", wantOK: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.version, func(t *testing.T) {
-			got, ok := bsrTimestamp(tt.version)
-			assert.Equal(t, tt.wantOK, ok)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-
-	older, _ := bsrTimestamp("v1.36.12-20240920164238-5a7b106cbb87.1")
-	newer, _ := bsrTimestamp("v1.36.11-20260415201107-50325440f8f2.1")
-	assert.Less(t, older, newer, "proto timestamps must order by time even where versions order the other way")
 }
