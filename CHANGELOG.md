@@ -11,6 +11,25 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **protocompile v0.34.0 → v0.36.1, and the module graph names no
+  buf.build module** ([#198]). protocompile v0.36.0 stopped importing
+  buf.build's generated code, so `go mod tidy` drops
+  `buf.build/gen/go/bufbuild/protodescriptor` and `.../protovalidate` from
+  `go.mod`, and consumers no longer inherit them. protocompile is still
+  reached only from the tests and `scripts/`, never from a library
+  package. It brings `github.com/trendvidia/protos` v0.1.2 as an indirect
+  dependency.
+- **The `go` directive rises from 1.25.6 to 1.26.2**, the floor
+  protocompile v0.36 declares. CI already tested only Go 1.26 and 1.27.
+- **`internal/deps`: `TestModuleGraphNamesNoBufBuild` replaces the
+  buf.validate floor check** of [#179]. With the module gone there is no
+  floor left to keep fresh; the new pin fails if any requirement brings a
+  buf.build module back into the graph.
+
+[#198]: https://github.com/trendvidia/protowire-go/issues/198
+
 ## [1.12.0] — 2026-10-28
 
 A minor release that settles a `pxf.BigFloat`'s PXF text and brings map

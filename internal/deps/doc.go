@@ -37,15 +37,12 @@
 // package pulls in none of them should not have to be re-litigated when
 // it does.
 //
-// # The buf.validate floor is not stale
+// # The module graph names no buf.build module
 //
-// go.mod records protocompile's requirement on the BSR-generated
-// buf.validate protos, and every consumer inherits it as a floor. BSR
-// versions lead with the protobuf-go version, not the proto date, so a
-// 2024 build at v1.36.12 outranks a 2026 build at v1.36.11, and a
-// consumer of buf.build/go/protovalidate v1.2.0 is handed protos too
-// old to compile against (issue #179).
-// TestValidateProtosFloorIsNotStale reads the proto timestamp out of
-// the selected version and fails while it predates the build v1.2.0
-// requires.
+// Every module this one requires reaches each consumer's graph, and the
+// stack is meant not to depend on buf.build. protocompile v0.36.0 stopped
+// importing buf.build's generated code (issue #198), and
+// TestModuleGraphNamesNoBufBuild fails if any requirement brings one back.
+// It replaces the buf.validate floor check of issue #179, which had
+// nothing left to check once the module left the graph.
 package deps
