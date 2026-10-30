@@ -11,6 +11,14 @@ format changes.
 
 ## [Unreleased]
 
+## [1.12.1] — 2026-10-30
+
+A patch release that drops buf.build from the module graph. protocompile
+moves to v0.36.1, which no longer imports buf.build's generated code, so
+a module that requires protowire-go no longer downloads or lists any
+buf.build module ([#198]). The `go` directive rises to 1.26.2, the
+floor protocompile v0.36 declares. No API or wire-format change.
+
 ### Changed
 
 - **protocompile v0.34.0 → v0.36.1, and the module graph names no
