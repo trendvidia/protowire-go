@@ -17,7 +17,7 @@ import (
 )
 
 // layeredAnnotatedProtoSrc declares a schema with every scalar kind we
-// care about, each annotated with (pxf.required) and (pxf.default), so
+// care about, each annotated with (pxf.default), and one (pxf.required), so
 // the tests can drive ApplyDefault / IsRequired / Default through
 // every path in the kind-dispatch switch.
 const layeredAnnotatedProtoSrc = `
@@ -27,7 +27,7 @@ package layered_test.v1;
 import "pxf/annotations.proto";
 
 message AllScalars {
-  string s = 1 [(pxf.required) = true, (pxf.default) = "hello"];
+  string s = 1 [(pxf.default) = "hello"];
   bool b = 2 [(pxf.default) = "true"];
   int32 i32 = 3 [(pxf.default) = "32"];
   int64 i64 = 4 [(pxf.default) = "64"];
@@ -42,6 +42,7 @@ message AllScalars {
 
   string no_default = 12;
   string optional_no_anno = 13;
+  string req = 14 [(pxf.required) = true];
 }
 
 enum Color {
@@ -483,8 +484,8 @@ func TestApplyDefault_WKTInvalidValue(t *testing.T) {
 
 func TestIsRequired(t *testing.T) {
 	desc := compileLayeredProto(t)
-	assert.True(t, pxf.IsRequired(desc.Fields().ByName("s")),
-		"field 's' annotated (pxf.required) = true")
+	assert.True(t, pxf.IsRequired(desc.Fields().ByName("req")),
+		"field 'req' annotated (pxf.required) = true")
 	assert.False(t, pxf.IsRequired(desc.Fields().ByName("b")),
 		"field 'b' has no required annotation")
 	assert.False(t, pxf.IsRequired(desc.Fields().ByName("no_default")),
@@ -526,11 +527,7 @@ func TestSkipPostDecode(t *testing.T) {
 	desc := compileLayeredProto(t)
 
 	t.Run("default mode rejects missing required field", func(t *testing.T) {
-		// `s` is required. postDecode runs and errors. (Note:
-		// protowire-go's postDecode checks required BEFORE applying
-		// defaults, so a default annotation does NOT satisfy required
-		// at the per-parse level. Layered consumers handle that
-		// distinction in their own merged-result pass — see chameleon.)
+		// `req` is required. postDecode runs and errors.
 		input := `i32 = 99`
 		_, _, err := pxf.UnmarshalOptions{}.UnmarshalFullDescriptor([]byte(input), desc)
 		require.Error(t, err)
@@ -550,7 +547,7 @@ func TestSkipPostDecode(t *testing.T) {
 		// Without SkipPostDecode, a non-required defaulted field gets
 		// its default value. With SkipPostDecode, it stays at zero.
 		// `b` is annotated (pxf.default) = "true", not required.
-		input := `s = "x"`
+		input := `req = "x"`
 
 		_, _, err := pxf.UnmarshalOptions{}.UnmarshalFullDescriptor([]byte(input), desc)
 		require.NoError(t, err, "default mode satisfies non-required defaulted fields")

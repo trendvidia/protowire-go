@@ -13,6 +13,12 @@ format changes.
 
 ### Fixed
 
+- **`(pxf.required)` with `(pxf.default)` on one field is a bind-time
+  violation** ([#201]), in every spelling, as draft -01 now requires
+  (protowire#453). Such a schema used to bind, and which option won
+  depended on the engine. `(pxf.required) = false` beside a default stays
+  accepted.
+
 - **A map's `{` and a scalar-valued PB map entry count toward
   `MaxNestingDepth`** (protowire#449). The PXF decoder skipped the map's
   own `{`, so `Unmarshal` accepted documents `Parse` rejects: 100 map
@@ -45,6 +51,7 @@ floor protocompile v0.36 declares. No API or wire-format change.
   floor left to keep fresh; the new pin fails if any requirement brings a
   buf.build module back into the graph.
 
+[#201]: https://github.com/trendvidia/protowire-go/issues/201
 [#198]: https://github.com/trendvidia/protowire-go/issues/198
 
 ## [1.12.0] — 2026-10-28

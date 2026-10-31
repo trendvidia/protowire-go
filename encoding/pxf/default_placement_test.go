@@ -440,8 +440,9 @@ func TestDecode_DefaultOnSingularFieldUnaffected(t *testing.T) {
 // the single pass has to fill both accumulators.
 //
 // The field here is outside any oneof, so the (pxf.required) the walker
-// now reads is inert — TestValidateFile_RequiredOnOneofMemberFromUnknownBytes
-// is what pins the varint arm's effect.
+// reads matters only beside the default;
+// TestValidateFile_RequiredOnOneofMemberFromUnknownBytes pins the varint
+// arm's effect on a oneof.
 func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	var raw []byte
 	// (pxf.required) = true — varint, read into pxfOptions.required.
@@ -475,7 +476,7 @@ func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	require.NoError(t, err)
 
 	vs := pxf.ValidateFile(fd)
-	require.Len(t, vs, 2, "both annotations read in one options pass: %v", vs)
+	require.Len(t, vs, 3, "every annotation read in one options pass: %v", vs)
 
 	byKind := map[pxf.ViolationKind]pxf.Violation{}
 	for _, v := range vs {
@@ -491,6 +492,10 @@ func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 	require.True(t, ok, "no ViolationKeyOption in %v", vs)
 	assert.Equal(t, "id", key.Name)
 	assert.Contains(t, key.Detail, "(pxf.key) is valid only on repeated message-typed fields")
+
+	req, ok := byKind[pxf.ViolationRequiredOption]
+	require.True(t, ok, "no ViolationRequiredOption in %v", vs)
+	assert.Contains(t, req.Detail, "(pxf.required) and (pxf.default) are exclusive")
 }
 
 // ValidateFile walks the transitive import closure, so a misplaced
