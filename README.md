@@ -193,6 +193,7 @@ These families of schema defect are rejected before the decoder looks at the doc
 | `(pxf.default)` placement | The annotation carries exactly one PXF literal, so it is valid only on singular scalars, enums, and the message types a literal can denote: `Timestamp`, `Duration`, the nine `*Value` wrappers, `pxf.BigInt`, `pxf.Decimal`, `pxf.BigFloat`. A repeated field, a map field, a group, or any other message type is a violation. |
 | `(pxf.default)` in a oneof | At most one member of any one oneof may carry it. Two or more is a violation — with two, some default must win, and deciding by declaration order would make reordering fields silently change what a document decodes to. |
 | `(pxf.required)` in a oneof | Not valid on a oneof member at all. Read per field it demands one specific arm always be chosen, which makes every other arm undecodable. |
+| `(pxf.required)` with `(pxf.default)` | Exclusive on one field, in every spelling. `(pxf.required) = false` requires nothing, so it stays legal beside a default. |
 
 The `(pxf.default)` rule is placement only — a literal that does not parse as the field's type (`"abc"` on an `int32`) stays a decode-time error, since placement is decidable from the descriptor alone and the literal is not.
 
