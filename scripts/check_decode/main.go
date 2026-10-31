@@ -32,7 +32,9 @@ import (
 	"strings"
 
 	"github.com/trendvidia/protocompile"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	pwpb "github.com/trendvidia/protowire-go/encoding/pb"
 	"github.com/trendvidia/protowire-go/encoding/pxf"
@@ -110,6 +112,8 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 		return pxfDecode(data, schema, protoPath, lim)
 	case "pb":
 		return pbDecode(data, schema, lim)
+	case "pb-render":
+		return pbRender(data, schema, protoPath)
 	case "envelope":
 		return errors.New("envelope decode not yet implemented in this reference")
 	case "sbe":
@@ -163,6 +167,27 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 		MaxRepeatedCount:        lim["MaxRepeatedCount"],
 		MaxBigFloatExponent:     lim["MaxBigFloatExponent"],
 	}.Unmarshal(data, msg)
+}
+
+// pbRender is the producer's side of the bounds (HARDENING.md §
+// Arbitrary-precision magnitudes): the bytes are read by the stock protobuf
+// runtime, which stores the fields and bounds nothing, and then written as
+// PXF. The hardened decoder is bypassed on purpose, or it would refuse the row
+// and the encoder would go untested (protowire#448).
+func pbRender(data []byte, schema, protoPath string) error {
+	if protoPath == "" {
+		return errors.New("--proto is required for format=pb-render")
+	}
+	desc, err := loadDescriptor(protoPath, schema)
+	if err != nil {
+		return err
+	}
+	msg := dynamicpb.NewMessage(desc)
+	if err := proto.Unmarshal(data, msg); err != nil {
+		return err
+	}
+	_, err = pxf.Marshal(msg)
+	return err
 }
 
 // sbeDecode binds the codec from the same runtime-compiled proto the PXF
