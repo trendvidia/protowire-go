@@ -1489,6 +1489,13 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 	if d.current.Kind != LBRACE {
 		return errorf(d.current.Pos, "expected '{' for map field %q", fd.Name())
 	}
+	// The map's own `{` is a descent, as it is to the parser (HARDENING.md
+	// § Recursion; protowire#449).
+	d.depth++
+	if d.depth > d.lim.maxDepth {
+		return errorf(d.current.Pos, "nesting depth exceeds MaxNestingDepth=%d", d.lim.maxDepth)
+	}
+	defer func() { d.depth-- }()
 	d.advance()
 
 	m := msg.Mutable(fd).Map()

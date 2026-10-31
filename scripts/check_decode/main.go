@@ -48,8 +48,10 @@ import (
 // this file and the .proto must be caught by the conformance run itself: a
 // missing or wrong tag will fail the manifest's accept/reject expectations.
 type Tree struct {
-	Child *Tree  `protowire:"1"`
-	Label string `protowire:"2"`
+	Child    *Tree             `protowire:"1"`
+	Label    string            `protowire:"2"`
+	Branches map[string]*Tree  `protowire:"4"`
+	Tags     map[string]string `protowire:"5"`
 }
 
 type StringHolder struct {
