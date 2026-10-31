@@ -11,6 +11,14 @@ format changes.
 
 ## [Unreleased]
 
+## [1.13.0] — 2026-10-30
+
+A minor release, because it narrows what decodes. Maps and PB map entries
+now count toward `MaxNestingDepth`, so a deeply nested document that used
+to decode fails, and `(pxf.required)` with `(pxf.default)` on one field no
+longer binds ([#201]). protocompile moves to v0.37.0 ([#202]), which the
+library does not import. No API or wire-format change.
+
 ### Changed
 
 - **protocompile v0.36.1 → v0.37.0** ([#202]). Only the tests and two
