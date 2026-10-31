@@ -11,6 +11,24 @@ format changes.
 
 ## [Unreleased]
 
+## [1.13.1] — 2026-10-31
+
+A patch release. protocompile moves to v0.38.1, which changes nothing the
+tests or tools here compile, and the conformance tool learns to test a
+producer ([#209]). No library code, API or wire-format change.
+
+[#209]: https://github.com/trendvidia/protowire-go/pull/209
+
+### Changed
+
+- **protocompile v0.37.0 → v0.38.1.** Only the tests and two tools under
+  `scripts/` use it; the library does not import it. The two versions add
+  the `fdp/descpath` package, make `fdp.DescriptorPath` an alias of its
+  type, and change no compiler code. The `go` directive stays at 1.26.2.
+- **`scripts/check_decode` gains `--format pb-render`** ([#209]), the
+  corpus rows that test a producer. It reads the bytes with the stock
+  protobuf runtime and writes PXF. No encoder needed changing.
+
 ## [1.13.0] — 2026-10-30
 
 A minor release, because it narrows what decodes. Maps and PB map entries
