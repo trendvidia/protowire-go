@@ -649,6 +649,11 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 		if n < 0 {
 			return 0, fmt.Errorf("corrupt map entry")
 		}
+		// The entry is a descent whatever its value's type (HARDENING.md
+		// § Recursion; protowire#449).
+		if depth+1 > lim.maxDepth {
+			return 0, fmt.Errorf("nesting depth exceeds MaxNestingDepth=%d", lim.maxDepth)
+		}
 		if fv.IsNil() {
 			fv.Set(reflect.MakeMap(fv.Type()))
 		}

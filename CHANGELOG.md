@@ -19,6 +19,13 @@ format changes.
   depended on the engine. `(pxf.required) = false` beside a default stays
   accepted.
 
+- **A map's `{` and a scalar-valued PB map entry count toward
+  `MaxNestingDepth`** (protowire#449). The PXF decoder skipped the map's
+  own `{`, so `Unmarshal` accepted documents `Parse` rejects: 100 map
+  levels decoded while `Parse` stopped at 51. A document nesting maps
+  past 50 levels, or a `google.protobuf.Struct` past about 33 levels, now
+  fails to decode, as it already does in Rust and Java.
+
 ## [1.12.1] — 2026-10-30
 
 A patch release that drops buf.build from the module graph. protocompile
