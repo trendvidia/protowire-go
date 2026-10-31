@@ -196,6 +196,8 @@ These families of schema defect are rejected before the decoder looks at the doc
 
 The `(pxf.default)` rule is placement only — a literal that does not parse as the field's type (`"abc"` on an `int32`) stays a decode-time error, since placement is decidable from the descriptor alone and the literal is not.
 
+protocompile v0.37.0 refuses the `@default` and `@required` spellings of these placements at compile time. The checks here still apply to them, because a binder takes descriptors from any producer, and bracket-form placement is still left to this port.
+
 The checks run by default at the top of every `Unmarshal*` call:
 
 ```go

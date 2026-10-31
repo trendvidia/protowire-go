@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **protocompile v0.36.1 → v0.37.0** ([#202]). Only the tests and two
+  tools under `scripts/` compile schemas with it; the library does not
+  import it. The compiler now refuses the annotation-form placements
+  `ValidateDescriptor` reports, so the carrier tests assert that refusal
+  and then assemble the same shapes as descriptors. The bind-time checks
+  stay: a binder takes descriptors from any producer, and bracket-form
+  placement is still left to it.
+
 ### Fixed
 
 - **`(pxf.required)` with `(pxf.default)` on one field is a bind-time
@@ -51,6 +61,7 @@ floor protocompile v0.36 declares. No API or wire-format change.
   floor left to keep fresh; the new pin fails if any requirement brings a
   buf.build module back into the graph.
 
+[#202]: https://github.com/trendvidia/protowire-go/issues/202
 [#201]: https://github.com/trendvidia/protowire-go/issues/201
 [#198]: https://github.com/trendvidia/protowire-go/issues/198
 
