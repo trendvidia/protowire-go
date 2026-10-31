@@ -17,7 +17,7 @@ import (
 func nestDesc(t *testing.T) protoreflect.MessageDescriptor {
 	t.Helper()
 	fd := compileProtoSources(t, "nest.proto", map[string]string{
-		"nest.proto": `syntax = "proto3"; package nest; message N { N child = 1; int32 v = 2; repeated N kids = 3; }`,
+		"nest.proto": `syntax = "proto3"; package nest; message N { N child = 1; int32 v = 2; repeated N kids = 3; map<string, N> branches = 4; map<string, string> tags = 5; }`,
 	})
 	md := fd.Messages().ByName("N")
 	require.NotNil(t, md)
@@ -99,11 +99,24 @@ func TestNestingDepthBoundary(t *testing.T) {
 	mixed := func(pairs, extra int) []byte {
 		return []byte(strings.Repeat("kids = [{ ", pairs) + strings.Repeat("child { ", extra) + "v = 1" + strings.Repeat(" }", extra) + strings.Repeat(" }]", pairs))
 	}
+	// pairs of `branches = { k: { … } }` — the map's `{` and the value's —
+	// plus extra blocks at the deepest point (protowire#449).
+	maps := func(pairs, extra int) []byte {
+		return []byte(strings.Repeat("branches = { k: { ", pairs) + strings.Repeat("child { ", extra) + "v = 1" + strings.Repeat(" }", extra) + strings.Repeat(" } }", pairs))
+	}
+	// A scalar-valued map has no message under it; its `{` still counts.
+	scalarMap := func(blocks int) []byte {
+		return []byte(strings.Repeat("child { ", blocks) + `tags = { k: "v" }` + strings.Repeat(" }", blocks))
+	}
 	for _, tc := range []struct {
 		name string
 		doc  []byte
 		ok   bool
 	}{
+		{"maps at the bound", maps(pxf.MaxNestingDepth/2, 0), true},
+		{"maps one past", maps(pxf.MaxNestingDepth/2, 1), false},
+		{"scalar map at the bound", scalarMap(pxf.MaxNestingDepth - 1), true},
+		{"scalar map one past", scalarMap(pxf.MaxNestingDepth), false},
 		{"blocks at the bound", blocks(pxf.MaxNestingDepth), true},
 		{"blocks one past", blocks(pxf.MaxNestingDepth + 1), false},
 		{"lists and blocks at the bound", mixed(pxf.MaxNestingDepth/2, 0), true},

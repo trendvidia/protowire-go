@@ -13,8 +13,9 @@ import (
 
 // nestHolder nests itself: nestTo(n) is n structs deep.
 type nestHolder struct {
-	Child *nestHolder `protowire:"1"`
-	V     int32       `protowire:"2"`
+	Child *nestHolder       `protowire:"1"`
+	V     int32             `protowire:"2"`
+	Tags  map[string]string `protowire:"3"`
 }
 
 func nestTo(depth int) *nestHolder {
@@ -85,6 +86,28 @@ func TestNestingDepthBoundary(t *testing.T) {
 			require.NoError(t, err, "%d structs deep, root included: %d descents", tc.depth, tc.depth-1)
 		} else {
 			require.ErrorContains(t, err, "MaxNestingDepth=100", "%d structs deep", tc.depth)
+		}
+	}
+}
+
+// A map entry is a descent whatever its value's type, so a scalar-valued
+// entry just past the bound is refused (protowire#449).
+func TestNestingDepthBoundaryScalarMapEntry(t *testing.T) {
+	for _, tc := range []struct {
+		children int
+		ok       bool
+	}{{MaxNestingDepth - 1, true}, {MaxNestingDepth, false}} {
+		msg := &nestHolder{Tags: map[string]string{"k": "v"}}
+		for range tc.children {
+			msg = &nestHolder{Child: msg}
+		}
+		data, err := Marshal(msg)
+		require.NoError(t, err)
+		err = Unmarshal(data, &nestHolder{})
+		if tc.ok {
+			require.NoError(t, err, "%d submessages and an entry", tc.children)
+		} else {
+			require.ErrorContains(t, err, "MaxNestingDepth=100", "%d submessages and an entry", tc.children)
 		}
 	}
 }
