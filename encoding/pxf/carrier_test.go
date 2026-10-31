@@ -466,6 +466,11 @@ func TestCarrier_PlacementRulesApplyToBothSurfaces(t *testing.T) {
 			`message M { oneof choice { string a = 1 @default("x"); string b = 2 @default("y"); } }`,
 			`at most one member of oneof "choice" may carry a default`,
 		},
+		{
+			"required with default",
+			`message M { string f = 1 @required @default("x"); }`,
+			"@required and @default are exclusive on one field",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

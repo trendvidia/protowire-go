@@ -103,7 +103,8 @@ const (
 	// of a oneof, which draft -01 §annotation-extensions ("Oneof
 	// Members") forbids: read per field it demands that one specific arm
 	// always be chosen, which makes every other arm of the oneof
-	// undecodable.
+	// undecodable. It is also (pxf.required) beside (pxf.default) on one
+	// field, which "Required and Default" forbids.
 	ViolationRequiredOption
 	// ViolationRetiredNumber is an option carried at one of the extension
 	// numbers protowire retired when it moved into its registered block
@@ -201,10 +202,10 @@ func (v Violation) String() string {
 // closure: reserved-name collisions among messages, oneofs, and enum
 // values; invalid (pxf.key) placements (draft -01 §3.13); invalid
 // (pxf.default) placements (draft -01 §annotation-extensions, "Default
-// Placement"); and the two oneof rules of that section's "Oneof
-// Members" — at most one member of any one oneof may carry
-// (pxf.default), and (pxf.required) is not valid on a oneof member at
-// all. The returned slice is sorted by declaring file path and then by
+// Placement"); the two oneof rules of that section's "Oneof Members" —
+// at most one member of any one oneof may carry (pxf.default), and
+// (pxf.required) is not valid on a oneof member at all; and (pxf.required)
+// with (pxf.default) on one field ("Required and Default"). The returned slice is sorted by declaring file path and then by
 // element fully-qualified name, for stable output. A nil/empty slice
 // means the schema is conformant.
 //
@@ -427,6 +428,17 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 			}
 			if opts.defSet {
 				checkDefaultOption(path, f, opts.def, opts.defSurface, out)
+			}
+			if opts.required && opts.defSet {
+				*out = append(*out, Violation{
+					File:    path,
+					Element: string(f.FullName()),
+					Kind:    ViolationRequiredOption,
+					Detail: fmt.Sprintf(
+						"%s and %s are exclusive on one field: the first rejects a document where the field is absent, and the second treats it as supplied",
+						opts.reqSurface.requiredName(), opts.defSurface.defaultName()),
+					surface: opts.reqSurface,
+				})
 			}
 			if oo := realOneof(f); oo != nil {
 				if opts.required {
