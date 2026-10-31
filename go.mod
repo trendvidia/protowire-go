@@ -22,3 +22,5 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20260807164820-c8921c73eeea // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
+
+require github.com/trendvidia/release-deps-proof v0.0.0-20260101000000-abcdefabcdef
