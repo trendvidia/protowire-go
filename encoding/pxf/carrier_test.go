@@ -31,6 +31,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"
@@ -434,47 +435,148 @@ import "pxf/bignum.proto";
 ` + body
 }
 
+// graftAnnotations builds what the compiler refuses to: fd with the
+// annotations of every message but target moved onto target's like-named
+// fields, and those donor messages gone. The compiler lowers each donor
+// legally, so what lands on target is the carrier it really emits, in a
+// placement a descriptor set from another producer or an older compiler
+// can still hold. A field with two donors merges them, as two occurrences
+// of one option do on the wire.
+func graftAnnotations(t *testing.T, fd protoreflect.FileDescriptor, target string) protoreflect.FileDescriptor {
+	t.Helper()
+	fdp := protodesc.ToFileDescriptorProto(fd)
+	var msg *descriptorpb.DescriptorProto
+	var donors []*descriptorpb.DescriptorProto
+	for _, m := range fdp.MessageType {
+		if m.GetName() == target {
+			msg = m
+		} else {
+			donors = append(donors, m)
+		}
+	}
+	require.NotNil(t, msg, "message %q not found", target)
+	fields := map[string]*descriptorpb.FieldDescriptorProto{}
+	for _, f := range msg.Field {
+		fields[f.GetName()] = f
+	}
+	for _, d := range donors {
+		for _, from := range d.Field {
+			to := fields[from.GetName()]
+			require.NotNil(t, to, "donor field %q has no target", from.GetName())
+			if to.Options == nil {
+				to.Options = &descriptorpb.FieldOptions{}
+			}
+			proto.Merge(to.Options, from.Options)
+		}
+	}
+	fdp.MessageType = []*descriptorpb.DescriptorProto{msg}
+	return rebuildFile(t, fdp, fd)
+}
+
+// rebuildFile links fdp against the imports of orig, except that a file in
+// overrides stands in for its namesake.
+func rebuildFile(t *testing.T, fdp *descriptorpb.FileDescriptorProto, orig protoreflect.FileDescriptor, overrides ...protoreflect.FileDescriptor) protoreflect.FileDescriptor {
+	t.Helper()
+	reg := &protoregistry.Files{}
+	seen := map[string]bool{}
+	var register func(protoreflect.FileDescriptor)
+	register = func(f protoreflect.FileDescriptor) {
+		if seen[f.Path()] {
+			return
+		}
+		seen[f.Path()] = true
+		imps := f.Imports()
+		for i := range imps.Len() {
+			register(imps.Get(i).FileDescriptor)
+		}
+		require.NoError(t, reg.RegisterFile(f))
+	}
+	for _, f := range overrides {
+		register(f)
+	}
+	imps := orig.Imports()
+	for i := range imps.Len() {
+		register(imps.Get(i).FileDescriptor)
+	}
+	file, err := protodesc.NewFile(fdp, reg)
+	require.NoError(t, err)
+	return file
+}
+
 // TestCarrier_PlacementRulesApplyToBothSurfaces: the placement rules of
 // draft -01 §annotation-extensions are about what a single literal can
-// denote, which is a property of the field, not of the spelling. The
-// compiler leaves all of these to bind time, so this port is where they
-// are caught for either form.
+// denote, which is a property of the field, not of the spelling.
+//
+// The compiler refuses all of these since protocompile v0.37.0, and that
+// half is asserted first, from the spelling an author would write. It does
+// not retire the bind-time half: a binder takes descriptors, and a
+// descriptor need not come from this compiler. So the same shape is then
+// assembled with [graftAnnotations] and has to be caught here regardless.
 func TestCarrier_PlacementRulesApplyToBothSurfaces(t *testing.T) {
 	cases := []struct {
-		name, body, want string
+		name, body, compileErr string
+		// shape is body with the annotations moved onto donor messages,
+		// so that it compiles.
+		shape, want string
 	}{
 		{
 			"repeated", `message M { repeated string t = 1 @default("x"); }`,
+			"`@default` is not valid on a repeated field",
+			`message M { repeated string t = 1; }
+			 message D { string t = 1 @default("x"); }`,
 			"@default is not valid on repeated fields",
 		},
 		{
 			"map", `message M { map<string, string> m = 1 @default("x"); }`,
+			"`@default` is not valid on a map field",
+			`message M { map<string, string> m = 1; }
+			 message D { string m = 1 @default("x"); }`,
 			"@default is not valid on map fields",
 		},
 		{
 			"message type with no literal",
 			`message M { google.protobuf.Struct s = 1 @default("x"); }`,
+			"`@default` is not valid on a field of message type `google.protobuf.Struct`",
+			`message M { google.protobuf.Struct s = 1; }
+			 message D { string s = 1 @default("x"); }`,
 			"@default is not valid on message type google.protobuf.Struct",
 		},
 		{
 			"required on a oneof member",
 			`message M { oneof choice { string a = 1 @required; string b = 2; } }`,
+			"`@required` is not valid on a oneof member",
+			`message M { oneof choice { string a = 1; string b = 2; } }
+			 message D { string a = 1 @required; }`,
 			`@required is not valid on a member of oneof "choice"`,
 		},
 		{
 			"two defaults in one oneof",
 			`message M { oneof choice { string a = 1 @default("x"); string b = 2 @default("y"); } }`,
+			"`@default` on more than one member of a oneof",
+			`message M { oneof choice { string a = 1; string b = 2; } }
+			 message D { string a = 1 @default("x"); string b = 2 @default("y"); }`,
 			`at most one member of oneof "choice" may carry a default`,
 		},
 		{
 			"required with default",
 			`message M { string f = 1 @required @default("x"); }`,
+			"`@default` and `@required` on one field",
+			`message M { string f = 1; }
+			 message R { string f = 1 @required; }
+			 message D { string f = 1 @default("x"); }`,
 			"@required and @default are exclusive on one field",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			md := v12Msg(t, annotFile(tc.body), "M")
+			_, err := tryCompileV12(annotFile(tc.body))
+			require.Error(t, err, "the compiler must refuse this placement")
+			assert.Contains(t, err.Error(), tc.compileErr)
+
+			fd := compileV12(t, annotFile(tc.shape))
+			require.Empty(t, pxf.ValidateFile(fd), "the shape alone must be legal, so the graft is what is caught")
+
+			md := graftAnnotations(t, fd, "M").Messages().ByName("M")
 			vs := pxf.ValidateDescriptor(md)
 			require.NotEmpty(t, vs, "annotation form must be checked, not waved through")
 			var joined string
@@ -559,10 +661,20 @@ message M { annot.lib.Leaf leaf = 1; }
 syntax = "proto3";
 package annot.lib;
 import "protowire/schema/v1/annotations.proto";
-message Leaf { repeated string tags = 1 @default("x"); }
+message Leaf { repeated string tags = 1; }
+message Donor { string tags = 1 @default("x"); }
 `,
 	}
-	md := v12MsgMulti(t, sources, "annot.proto", "M")
+	compiled := v12MsgMulti(t, sources, "annot.proto", "M")
+	require.Empty(t, pxf.ValidateDescriptor(compiled), "the shape alone must be legal, so the graft is what is caught")
+
+	// The compiler refuses this placement, so the import is rebuilt around
+	// the grafted file. See [TestCarrier_PlacementRulesApplyToBothSurfaces].
+	lib := compiled.Fields().ByName("leaf").Message().ParentFile()
+	grafted := graftAnnotations(t, lib, "Leaf")
+	orig := compiled.ParentFile()
+	md := rebuildFile(t, protodesc.ToFileDescriptorProto(orig), orig, grafted).Messages().ByName("M")
+
 	vs := pxf.ValidateDescriptor(md)
 	require.NotEmpty(t, vs, "an annotation-form violation in an import must be reported")
 	assert.Equal(t, "lib.proto", vs[0].File)
