@@ -11,6 +11,15 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`Violation.Name` holds the `(pxf.default)` literal for `(pxf.required)`
+  with `(pxf.default)` on one field** ([#211]). It used to be empty. It
+  stays the oneof's name for `(pxf.required)` on a oneof member, and
+  `Violation.String` is unchanged.
+
+[#211]: https://github.com/trendvidia/protowire-go/issues/211
+
 ## [1.13.1] — 2026-10-31
 
 A patch release. protocompile moves to v0.38.1, which changes nothing the

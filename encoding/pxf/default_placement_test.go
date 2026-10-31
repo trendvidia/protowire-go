@@ -495,6 +495,7 @@ func TestValidateFile_OptionsFromUnknownBytes(t *testing.T) {
 
 	req, ok := byKind[pxf.ViolationRequiredOption]
 	require.True(t, ok, "no ViolationRequiredOption in %v", vs)
+	assert.Equal(t, "ignored", req.Name)
 	assert.Contains(t, req.Detail, "(pxf.required) and (pxf.default) are exclusive")
 }
 

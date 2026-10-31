@@ -148,12 +148,13 @@ type Violation struct {
 	Element string
 	// Name is the bare reserved identifier ("null" / "true" / "false")
 	// for reserved-name violations, the (pxf.key) annotation value for
-	// ViolationKeyOption, the (pxf.default) literal for
-	// ViolationDefaultOption, or the containing oneof's bare name for
-	// ViolationRequiredOption. [Violation.String] does not render it in
-	// the last case — Detail already names the oneof — so a caller
-	// formatting violations itself should print one or the other, not
-	// both.
+	// ViolationKeyOption, and the (pxf.default) literal for
+	// ViolationDefaultOption. For ViolationRequiredOption it depends on
+	// the error: the containing oneof's bare name for (pxf.required) on a
+	// oneof member, or the (pxf.default) literal for (pxf.required) with
+	// (pxf.default) on one field, which is empty when that literal is the
+	// empty string. [Violation.String] renders neither of those two:
+	// Detail names the oneof, and the literal is in the schema.
 	Name string
 	// Kind is the kind of element that collided.
 	Kind ViolationKind
@@ -433,6 +434,7 @@ func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Viol
 				*out = append(*out, Violation{
 					File:    path,
 					Element: string(f.FullName()),
+					Name:    opts.def,
 					Kind:    ViolationRequiredOption,
 					Detail: fmt.Sprintf(
 						"%s and %s are exclusive on one field: the first rejects a document where the field is absent, and the second treats it as supplied",
