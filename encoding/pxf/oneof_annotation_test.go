@@ -350,3 +350,50 @@ func TestDecode_SkipValidateStillProtectsWrittenOneofArm(t *testing.T) {
 	assert.Equal(t, "written", r.Get(desc.Fields().ByName("a")).String())
 	assert.Equal(t, "", r.Get(desc.Fields().ByName("b")).String())
 }
+
+// requiredDefaultFile builds a file with one string field whose options are
+// raw bytes, so this keeps running once the compiler rejects the pair too.
+func requiredDefaultFile(t *testing.T, required bool, def string) protoreflect.FileDescriptor {
+	t.Helper()
+	var raw []byte
+	v := uint64(0)
+	if required {
+		v = 1
+	}
+	raw = protowire.AppendVarint(protowire.AppendTag(raw, 1314, protowire.VarintType), v)
+	raw = protowire.AppendString(protowire.AppendTag(raw, 1315, protowire.BytesType), def)
+	opts := &descriptorpb.FieldOptions{}
+	opts.ProtoReflect().SetUnknown(protoreflect.RawFields(raw))
+	fd, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name:    proto.String("requireddefault.proto"),
+		Package: proto.String("requireddefault_test.v1"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("M"),
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:     proto.String("f"),
+				Number:   proto.Int32(1),
+				JsonName: proto.String("f"),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				Options:  opts,
+			}},
+		}},
+	}, nil)
+	require.NoError(t, err)
+	return fd
+}
+
+// The pair is refused when the schema is bound, not when a document happens
+// to omit the field (draft -01 §annotation-extensions, "Required and
+// Default"). (pxf.required) = false demands nothing, so a default beside it
+// stands.
+func TestValidateFile_RequiredWithDefault(t *testing.T) {
+	vs := pxf.ValidateFile(requiredDefaultFile(t, true, "x"))
+	require.Len(t, vs, 1)
+	assert.Equal(t, pxf.ViolationRequiredOption, vs[0].Kind)
+	assert.Equal(t, "requireddefault_test.v1.M.f", vs[0].Element)
+	assert.Contains(t, vs[0].String(), "(pxf.required) and (pxf.default) are exclusive on one field")
+
+	assert.Empty(t, pxf.ValidateFile(requiredDefaultFile(t, false, "x")))
+}
