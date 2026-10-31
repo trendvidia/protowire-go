@@ -20,6 +20,9 @@ format changes.
   and then assemble the same shapes as descriptors. The bind-time checks
   stay: a binder takes descriptors from any producer, and bracket-form
   placement is still left to it.
+- **`github.com/trendvidia/protos` v0.1.2 → v0.1.4**, indirect through
+  protocompile. No generated code or `.proto` file changed between the
+  two.
 
 ### Fixed
 

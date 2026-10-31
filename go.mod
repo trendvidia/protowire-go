@@ -15,7 +15,7 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/tidwall/btree v1.8.2 // indirect
-	github.com/trendvidia/protos v0.1.2 // indirect
+	github.com/trendvidia/protos v0.1.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect
 	golang.org/x/sync v0.24.0 // indirect
