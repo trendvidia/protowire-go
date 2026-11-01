@@ -11,6 +11,10 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A keyed entry's body can no longer undo its name** ([#215]). Inside a named entry, `null` on the key field and any binding of another member of the key field's oneof are now decode errors, and `KeyedDiagnostics` reports them as key conflicts. Before, `ko { alpha { other = "x" } }` lost the key with no error. This narrows what decodes. The anonymous form and an agreeing `name = "alpha"` are unchanged, and no schema is refused. Spec: protowire#480.
+
 ### Fixed
 
 - **A keyed entry's name now counts as supplying the key field** ([#214]).
@@ -23,6 +27,7 @@ format changes.
   presence record per entry; `Unmarshal` is unchanged.
 
 [#214]: https://github.com/trendvidia/protowire-go/issues/214
+[#215]: https://github.com/trendvidia/protowire-go/issues/215
 
 ## [1.13.2] — 2026-11-01
 

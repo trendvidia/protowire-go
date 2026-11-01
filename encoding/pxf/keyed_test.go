@@ -200,6 +200,9 @@ func TestKeyedRejectFixtures(t *testing.T) {
 		"err-duplicate-key.pxf":          pxf.KeyedDuplicateKey,
 		"err-duplicate-key-spelling.pxf": pxf.KeyedDuplicateKey,
 		"err-key-conflict.pxf":           pxf.KeyedKeyConflict,
+		"err-key-null.pxf":               pxf.KeyedKeyConflict,
+		"err-key-oneof-sibling.pxf":      pxf.KeyedKeyConflict,
+		"err-key-oneof-sibling-null.pxf": pxf.KeyedKeyConflict,
 		"err-empty-key.pxf":              pxf.KeyedEmptyKey,
 		"err-empty-key-anonymous.pxf":    pxf.KeyedEmptyKey,
 		"err-quoted-name-unkeyed.pxf":    pxf.KeyedQuotedNameUnkeyed,
@@ -228,6 +231,30 @@ func TestKeyedRejectFixtures(t *testing.T) {
 			assert.NotZero(t, diags[0].Pos.Line)
 
 			_ = doc
+		})
+	}
+}
+
+func TestKeyedAcceptFixtures(t *testing.T) {
+	fd := compileKeyedProto(t)
+	for _, name := range []string{"key-oneof-ok.pxf", "key-null-anonymous-ok.pxf"} {
+		t.Run(name, func(t *testing.T) {
+			data := readKeyedFixture(t, name)
+			desc, _ := keyedFixtureDesc(t, fd, data)
+
+			msg, err := pxf.UnmarshalDescriptor(data, desc)
+			require.NoError(t, err)
+
+			// What the marshaller writes must decode again, or a refusal
+			// here would turn a message into an unreadable document.
+			out, err := pxf.Marshal(msg)
+			require.NoError(t, err)
+			_, err = pxf.UnmarshalDescriptor(out, desc)
+			require.NoError(t, err, "marshalled:\n%s", out)
+
+			tolDoc, syntaxErrs := pxf.ParseTolerant(data)
+			require.Empty(t, syntaxErrs)
+			assert.Empty(t, pxf.KeyedDiagnostics(tolDoc, desc))
 		})
 	}
 }
