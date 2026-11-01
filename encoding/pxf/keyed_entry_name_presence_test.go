@@ -149,3 +149,66 @@ func TestKeyedEntryName_MarkedUnderSkipPostDecode(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, r.IsSet("kd[0].name"), "present: %v", r.PresentFields())
 }
+
+// The entry name binds the key field, so the body can't undo it, in any
+// spelling of the binding (#215). A oneof in a nested message is a
+// different oneof, so its members stay legal.
+func TestKeyedEntryName_BodyCannotUndoIt(t *testing.T) {
+	const src = `
+syntax = "proto3";
+package undo.v1;
+import "pxf/annotations.proto";
+message P {
+  repeated O ko = 1 [(pxf.key) = "name"];
+  repeated N kn = 2 [(pxf.key) = "name"];
+}
+message O {
+  oneof pick { string name = 1; string other = 2; Sub sub = 3; }
+  string free = 4;
+  Sub nested = 5;
+}
+message Sub { oneof pick { string name = 1; string other = 2; } }
+message N { optional string name = 1; }
+`
+	desc := compilePlacementSrc(t, src, "undo.v1", "P")
+	for _, tc := range []struct {
+		doc string
+		bad bool
+	}{
+		{`ko { alpha { other = "x" } }`, true},
+		{`ko { alpha { other = null } }`, true},
+		{`ko { alpha = { other = "x" } }`, true},
+		{`ko = { alpha { other = "x" } }`, true},
+		{`ko { "not ident" { other = "x" } }`, true},
+		{`ko { alpha { sub { name = "x" } } }`, true},
+		{`ko { alpha { sub = { name = "x" } } }`, true},
+		{`ko { alpha { free = "x" other = "y" } }`, true},
+		{`kn { alpha { name = null } }`, true},
+		{`ko { alpha { name = "alpha" } }`, false},
+		{`ko { alpha { free = "x" } }`, false},
+		{`ko { alpha { nested { other = "x" } } }`, false},
+		{`ko { alpha { nested { name = null } } }`, false},
+		{`ko = [ { other = "x" } ]`, false},
+		{`ko = [ { other = null } ]`, false},
+		{`kn { alpha { name = "alpha" } }`, false},
+		{`kn = [ { name = null } ]`, false},
+	} {
+		t.Run(tc.doc, func(t *testing.T) {
+			_, _, err := pxf.UnmarshalFullDescriptor([]byte(tc.doc), desc)
+			doc, syntaxErrs := pxf.ParseTolerant([]byte(tc.doc))
+			require.Empty(t, syntaxErrs)
+			diags := pxf.KeyedDiagnostics(doc, desc)
+			if !tc.bad {
+				require.NoError(t, err)
+				assert.Empty(t, diags)
+				return
+			}
+			var kerr *pxf.KeyedError
+			require.ErrorAs(t, err, &kerr, "want KeyedError, got %v", err)
+			assert.Equal(t, pxf.KeyedKeyConflict, kerr.Kind)
+			require.Len(t, diags, 1)
+			assert.Equal(t, pxf.KeyedKeyConflict, diags[0].Kind)
+			assert.Equal(t, kerr.Pos, diags[0].Pos, "decoder and diagnostics disagree on position")
+		})
+	}
+}

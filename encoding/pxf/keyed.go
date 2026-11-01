@@ -96,22 +96,52 @@ func quotedNameUnkeyedError(pos Position, name string) *KeyedError {
 // agree with the entry name. Used by both the direct decoder and the
 // diagnostics walker.
 type keyedElemState struct {
-	field     protoreflect.Name // the keyed repeated field's PXF name
-	keyName   protoreflect.Name // the element message's key field name
-	entryName string            // entry name; meaningful only when named
-	named     bool              // keyed-block form (true) vs anonymous list element (false)
+	field     protoreflect.Name            // the keyed repeated field's PXF name
+	keyFd     protoreflect.FieldDescriptor // the element message's key field
+	entryName string                       // entry name; meaningful only when named
+	named     bool                         // keyed-block form (true) vs anonymous list element (false)
 }
 
 func (ke *keyedElemState) checkExplicitKey(value string, pos Position) *KeyedError {
 	if value == "" {
 		return &KeyedError{Kind: KeyedEmptyKey, Pos: pos, Field: string(ke.field),
-			Msg: fmt.Sprintf("explicit empty-string assignment to key field %q of keyed field %q: the empty string is not a valid key", ke.keyName, ke.field)}
+			Msg: fmt.Sprintf("explicit empty-string assignment to key field %q of keyed field %q: the empty string is not a valid key", ke.keyFd.Name(), ke.field)}
 	}
 	if ke.named && value != ke.entryName {
 		return &KeyedError{Kind: KeyedKeyConflict, Pos: pos, Field: string(ke.field), Key: ke.entryName,
-			Msg: fmt.Sprintf("key field %q = %q conflicts with entry name %q in keyed field %q", ke.keyName, value, ke.entryName, ke.field)}
+			Msg: fmt.Sprintf("key field %q = %q conflicts with entry name %q in keyed field %q", ke.keyFd.Name(), value, ke.entryName, ke.field)}
 	}
 	return nil
+}
+
+// checkBinding refuses a binding in a named entry's body that would undo
+// the entry name, which binds the key field (draft -01 §3.13): null on the
+// key field, or another member of the key field's oneof, by value or null.
+func (ke *keyedElemState) checkBinding(fd protoreflect.FieldDescriptor, isNull bool, pos Position) error {
+	if kerr := ke.bindingConflict(fd, isNull, pos); kerr != nil {
+		return kerr
+	}
+	return nil
+}
+
+func (ke *keyedElemState) bindingConflict(fd protoreflect.FieldDescriptor, isNull bool, pos Position) *KeyedError {
+	if !ke.named {
+		return nil
+	}
+	var msg string
+	switch {
+	case fd.Name() == ke.keyFd.Name():
+		if !isNull {
+			return nil
+		}
+		msg = fmt.Sprintf("null on key field %q conflicts with entry name %q in keyed field %q", ke.keyFd.Name(), ke.entryName, ke.field)
+	case realOneof(fd) != nil && realOneof(fd) == realOneof(ke.keyFd):
+		msg = fmt.Sprintf("field %q shares oneof %q with key field %q, which entry name %q already set in keyed field %q",
+			fd.Name(), fd.ContainingOneof().Name(), ke.keyFd.Name(), ke.entryName, ke.field)
+	default:
+		return nil
+	}
+	return &KeyedError{Kind: KeyedKeyConflict, Pos: pos, Field: string(ke.field), Key: ke.entryName, Msg: msg}
 }
 
 // identSafeEntryName reports whether s can be written as an unquoted
@@ -172,7 +202,13 @@ func diagEntries(entries []Entry, desc protoreflect.MessageDescriptor, ke *keyed
 			if fd == nil {
 				continue
 			}
-			if ke != nil && fd.Name() == ke.keyName {
+			if ke != nil {
+				_, isNull := n.Value.(*NullVal)
+				if kerr := ke.bindingConflict(fd, isNull, n.Pos); kerr != nil {
+					*out = append(*out, *kerr)
+				}
+			}
+			if ke != nil && fd.Name() == ke.keyFd.Name() {
 				if sv, ok := n.Value.(*StringVal); ok {
 					if kerr := ke.checkExplicitKey(sv.Value, sv.Pos); kerr != nil {
 						*out = append(*out, *kerr)
@@ -188,6 +224,11 @@ func diagEntries(entries []Entry, desc protoreflect.MessageDescriptor, ke *keyed
 			fd := fields.ByName(protoreflect.Name(n.Name))
 			if fd == nil {
 				continue
+			}
+			if ke != nil {
+				if kerr := ke.bindingConflict(fd, false, n.Pos); kerr != nil {
+					*out = append(*out, *kerr)
+				}
 			}
 			if keyFd := KeyField(fd); keyFd != nil {
 				diagKeyedBlock(n.Entries, fd, keyFd, out)
@@ -248,7 +289,7 @@ func diagValue(v Value, fd protoreflect.FieldDescriptor, out *[]KeyedError) {
 		case *ListVal:
 			var elemState *keyedElemState
 			if keyFd != nil {
-				elemState = &keyedElemState{field: fd.Name(), keyName: keyFd.Name()}
+				elemState = &keyedElemState{field: fd.Name(), keyFd: keyFd}
 			}
 			for _, elem := range val.Elements {
 				if bv, ok := elem.(*BlockVal); ok {
@@ -304,7 +345,7 @@ func diagKeyedBlock(entries []Entry, fd, keyFd protoreflect.FieldDescriptor, out
 			seen[name] = struct{}{}
 		}
 		diagEntries(body, fd.Message(), &keyedElemState{
-			field: fd.Name(), keyName: keyFd.Name(), entryName: name, named: true,
+			field: fd.Name(), keyFd: keyFd, entryName: name, named: true,
 		}, out)
 	}
 }

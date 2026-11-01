@@ -679,6 +679,11 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 				}
 				return errorf(pos, "unknown field %q in %s", key, desc.FullName())
 			}
+			if ke != nil {
+				if err := ke.checkBinding(fd, d.current.Kind == NULL, pos); err != nil {
+					return err
+				}
+			}
 			if err := checkOneofDirect(fd, &setOneofs, pos); err != nil {
 				return err
 			}
@@ -703,7 +708,7 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 				d.advance()
 				continue
 			}
-			if ke != nil && fd.Name() == ke.keyName && d.current.Kind == STRING {
+			if ke != nil && fd.Name() == ke.keyFd.Name() && d.current.Kind == STRING {
 				// Explicit assignment to the element's key field: the
 				// empty string is never a valid key, and in the named
 				// (keyed-block) form the value must agree with the
@@ -764,6 +769,11 @@ func (d *directDecoder) decodeFields(msg protoreflect.Message, inBlock bool) err
 			}
 			if fd.IsMap() {
 				return errorf(pos, "map field %q must use assignment syntax: %s = { ... }", key, key)
+			}
+			if ke != nil {
+				if err := ke.checkBinding(fd, false, pos); err != nil {
+					return err
+				}
 			}
 			if err := checkOneofDirect(fd, &setOneofs, pos); err != nil {
 				return err
@@ -1392,7 +1402,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 	d.advance()
 	sub := list.NewElement().Message()
 	if keyFd != nil {
-		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name()}
+		d.keyedElem = &keyedElemState{field: fd.Name(), keyFd: keyFd}
 	}
 	saved := d.enterIndex(fd.Name(), list.Len())
 	err := d.decodeFields(sub, true)
@@ -1474,7 +1484,7 @@ func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd
 		}
 		sub := list.NewElement().Message()
 		fastSet(sub, keyFd, protoreflect.ValueOfString(name))
-		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name(), entryName: name, named: true}
+		d.keyedElem = &keyedElemState{field: fd.Name(), keyFd: keyFd, entryName: name, named: true}
 		saved := d.enterIndex(fd.Name(), list.Len())
 		// The entry name supplies the key field, so the post-decode pass,
 		// which reads presence only, must not treat it as absent: a
