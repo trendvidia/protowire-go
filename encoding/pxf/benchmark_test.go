@@ -292,6 +292,21 @@ func BenchmarkPXFUnmarshalKeyed(b *testing.B) {
 	b.SetBytes(int64(len(data)))
 }
 
+// BenchmarkPXFUnmarshalFullKeyed is the path that records presence, which
+// BenchmarkPXFUnmarshalKeyed does not reach: each entry name marks its
+// element's key field (#214).
+func BenchmarkPXFUnmarshalFullKeyed(b *testing.B) {
+	data := []byte(benchKeyedPXF)
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		if _, err := pxf.UnmarshalFull(data, dynamicpb.NewMessage(benchKeyedDesc)); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.SetBytes(int64(len(data)))
+}
+
 func BenchmarkPXFMarshalKeyed(b *testing.B) {
 	msg, err := pxf.UnmarshalDescriptor([]byte(benchKeyedPXF), benchKeyedDesc)
 	require.NoError(b, err)

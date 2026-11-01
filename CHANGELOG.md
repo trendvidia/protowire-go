@@ -11,6 +11,19 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A keyed entry's name now counts as supplying the key field** ([#214]).
+  `kd { alpha {} }` keeps `name: "alpha"` when the key field has a
+  `(pxf.default)`, where the default used to replace the name with no
+  error. A `(pxf.required)` key field is no longer reported absent in the
+  block form, and a `(pxf.default)` on a oneof sibling of the key no longer
+  clears the key. `Result` now reports the key as set (`kd[0].name`), so
+  layered callers see it in `PresentFields`. This costs `UnmarshalFull` one
+  presence record per entry; `Unmarshal` is unchanged.
+
+[#214]: https://github.com/trendvidia/protowire-go/issues/214
+
 ## [1.13.2] — 2026-11-01
 
 A patch release. `Violation.Name` now has a defined value for
