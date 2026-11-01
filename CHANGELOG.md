@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+## [1.13.2] — 2026-11-01
+
+A patch release. `Violation.Name` now has a defined value for
+`(pxf.required)` with `(pxf.default)` on one field ([#211]). No wire-format
+change, and nothing decodes differently.
+
 ### Changed
 
 - **`Violation.Name` holds the `(pxf.default)` literal for `(pxf.required)`
