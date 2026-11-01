@@ -393,7 +393,15 @@ func TestValidateFile_RequiredWithDefault(t *testing.T) {
 	require.Len(t, vs, 1)
 	assert.Equal(t, pxf.ViolationRequiredOption, vs[0].Kind)
 	assert.Equal(t, "requireddefault_test.v1.M.f", vs[0].Element)
+	assert.Equal(t, "x", vs[0].Name, "Name is the default's literal (#211)")
 	assert.Contains(t, vs[0].String(), "(pxf.required) and (pxf.default) are exclusive on one field")
 
 	assert.Empty(t, pxf.ValidateFile(requiredDefaultFile(t, false, "x")))
+
+	// An empty default is still a default: the pair is refused, and Name is
+	// empty because that is the literal.
+	vs = pxf.ValidateFile(requiredDefaultFile(t, true, ""))
+	require.Len(t, vs, 1)
+	assert.Equal(t, pxf.ViolationRequiredOption, vs[0].Kind)
+	assert.Empty(t, vs[0].Name)
 }

@@ -593,6 +593,18 @@ func TestCarrier_PlacementRulesApplyToBothSurfaces(t *testing.T) {
 	}
 }
 
+// Violation.Name for required-with-default is the default's literal in the
+// annotation form too, so it cannot depend on which spelling set it (#211).
+func TestCarrier_RequiredWithDefaultNamesTheLiteral(t *testing.T) {
+	fd := compileV12(t, annotFile(`message M { string f = 1; }
+		 message R { string f = 1 @required; }
+		 message D { string f = 1 @default("x"); }`))
+	vs := pxf.ValidateDescriptor(graftAnnotations(t, fd, "M").Messages().ByName("M"))
+	require.Len(t, vs, 1, "%v", vs)
+	assert.Equal(t, pxf.ViolationRequiredOption, vs[0].Kind)
+	assert.Equal(t, "x", vs[0].Name)
+}
+
 // TestCarrier_ListLiteralDefaultIsRejected: a list argument reduces to no
 // single literal, so it cannot be applied. The point is that it is
 // reported rather than dropped — dropping it is the silent
