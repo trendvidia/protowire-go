@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+## [1.14.0] — 2026-11-01
+
+A minor release, because it narrows what decodes. A keyed entry's name is now
+a binding of the key field: the entry's body can no longer undo it ([#215]),
+and a default or a required check on the key no longer ignores it ([#214]).
+No wire-format change.
+
+[#214]: https://github.com/trendvidia/protowire-go/issues/214
+[#215]: https://github.com/trendvidia/protowire-go/issues/215
+
 ### Changed
 
 - **A keyed entry's body can no longer undo its name** ([#215]). Inside a named entry, `null` on the key field and any binding of another member of the key field's oneof are now decode errors, and `KeyedDiagnostics` reports them as key conflicts. Before, `ko { alpha { other = "x" } }` lost the key with no error. This narrows what decodes. The anonymous form and an agreeing `name = "alpha"` are unchanged, and no schema is refused. Spec: protowire#480.
@@ -25,9 +35,6 @@ format changes.
   clears the key. `Result` now reports the key as set (`kd[0].name`), so
   layered callers see it in `PresentFields`. This costs `UnmarshalFull` one
   presence record per entry; `Unmarshal` is unchanged.
-
-[#214]: https://github.com/trendvidia/protowire-go/issues/214
-[#215]: https://github.com/trendvidia/protowire-go/issues/215
 
 ## [1.13.2] — 2026-11-01
 
