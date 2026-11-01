@@ -1476,6 +1476,12 @@ func (d *directDecoder) decodeKeyedBlockBody(msg protoreflect.Message, fd, keyFd
 		fastSet(sub, keyFd, protoreflect.ValueOfString(name))
 		d.keyedElem = &keyedElemState{field: fd.Name(), keyName: keyFd.Name(), entryName: name, named: true}
 		saved := d.enterIndex(fd.Name(), list.Len())
+		// The entry name supplies the key field, so the post-decode pass,
+		// which reads presence only, must not treat it as absent: a
+		// default would replace the name (#214).
+		if d.result != nil {
+			d.result.markPresent(d.pathPrefix + string(keyFd.Name()))
+		}
 		err := d.decodeFields(sub, true)
 		d.leaveElem(saved)
 		if err != nil {
