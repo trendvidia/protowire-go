@@ -158,7 +158,7 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 			continue
 		}
 
-		if e.cellBodies && !msg.Has(fd) && !fd.IsList() && !fd.IsMap() {
+		if e.cellBodies && !msg.Has(fd) {
 			write, null, err := cellUnset(msg, fd, i, path)
 			switch {
 			case err != nil:
@@ -168,6 +168,12 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 				e.buf.WriteString("null\n")
 				continue
 			case !write:
+				continue
+			}
+			if fd.IsList() || fd.IsMap() {
+				e.writeFieldPrefix(level, fd.Name())
+				e.buf.WriteString(emptyCollection(fd))
+				e.buf.WriteByte('\n')
 				continue
 			}
 			// The zero value, written out; falls through below.
