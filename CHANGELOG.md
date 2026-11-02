@@ -17,6 +17,7 @@ format changes.
 [#221]: https://github.com/trendvidia/protowire-go/issues/221
 [#225]: https://github.com/trendvidia/protowire-go/issues/225
 [#227]: https://github.com/trendvidia/protowire-go/issues/227
+[#229]: https://github.com/trendvidia/protowire-go/issues/229
 
 ### Changed
 
@@ -25,6 +26,7 @@ format changes.
 
 ### Fixed
 
+- **`pb.Marshal` no longer panics on a `big.Float` with a precision of 2^31 bits or more** ([#229]). An 11-byte message could set that precision through `pb.Unmarshal`, so a program that decoded and re-encoded untrusted input could be crashed. `Marshal` now returns an error for such a value, and a zero at any precision still encodes. `pb.Unmarshal` still accepts the precision. `pxf` had the same panic on a literal such as `1p2147483648`, reachable only with `MaxNumericLiteralDigits` raised past about 646 million, and now returns an error. With that limit raised, a zero with a precision past 2^31 bits is no longer refused.
 - **A Duration past about 292 years is written as a block** ([#225]): `dur_field { seconds = 9500000000 }`. A duration literal holds 64 bits of nanoseconds, so a longer value wrapped: `Marshal` wrote a wrong value, often negative, with no error, and it decoded without complaint. Literals for shorter values are unchanged, and a longer literal is still an error. Applies to a field, a list element, a map value and a `@dataset` cell.
 - **A redefined well-known type no longer panics** ([#218]). `Unmarshal`, `UnmarshalFull` and `Marshal` panicked on such a message, and `Marshal` could write a list's address for a `repeated string value`. The codec now checks the shape as well as the name, so where validation does not run, as in `Marshal` and with `SkipValidate`, the message is ordinary and has no literal form. `OnSecretField` does not fire for a `pxf.Secret` of the wrong shape.
 - **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** ([#219]). The reader counts both as supplied. Before, the row panicked with `type mismatch` for a scalar column, wrote the list's address into the row for a `repeated string`, or returned `unsupported kind: message` for a repeated message or a map. Inside a block cell the same field was left out, and the reader refused the row.

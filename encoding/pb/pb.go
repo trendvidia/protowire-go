@@ -774,8 +774,13 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 		}
 		return nil, nil
 	}
-	if prec > math.MaxUint32 {
-		return nil, fmt.Errorf("pxf.BigFloat precision %d exceeds uint32", prec)
+	// The wire mantissa is the value scaled up to prec bits, and scaling a
+	// value to 2^31 bits or more leaves big.Float's range: the shift below
+	// gives +Inf, and mant.Int returns nil for that. Unmarshal stores any
+	// uint32 precision without touching those bits, so eleven bytes reach
+	// this (#229). A zero has no mantissa to scale, and keeps its precision.
+	if prec > math.MaxInt32 && bf.Sign() != 0 {
+		return nil, fmt.Errorf("pxf.BigFloat precision %d exceeds the widest mantissa big.Float can hold, %d bits", prec, math.MaxInt32)
 	}
 	mant := new(big.Float).SetPrec(prec)
 	exp := bf.MantExp(mant)
