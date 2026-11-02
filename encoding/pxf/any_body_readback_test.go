@@ -177,6 +177,7 @@ func TestAnyBody_WrittenOnlyWhenItReadsBack(t *testing.T) {
 		// Never unpacked at all.
 		{"unresolved", "anyback.v1.Nope", tagT, false},
 		{"unparsable", "anyback.v1.Leaf", []byte{0xff}, false},
+		{"map key that panics proto.Unmarshal", "anyback.v1.Rich", lenField(4, cat(lenField(1, []byte("a")), varintField(1, 5))), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := assertReadsBack(t, desc, res, anyHolder(desc, tc.typeName, tc.value))

@@ -703,7 +703,7 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	}
 
 	inner := dynamicpb.NewMessage(innerDesc)
-	if err := proto.Unmarshal(valueBytes, inner); err != nil {
+	if !parseAnyValue(valueBytes, inner) {
 		return false, nil
 	}
 
@@ -735,6 +735,20 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	e.writeIndent(level)
 	e.buf.WriteString("}\n")
 	return true, nil
+}
+
+// parseAnyValue parses value, bytes that nothing has checked, into inner
+// and reports whether it could. proto.Unmarshal panics rather than failing
+// on one such value: a dynamicpb map entry with a good key followed by a
+// key of the wrong wire type (protobuf-go v1.36.12, unmarshalMap). That
+// value is as unparsable as any other, so it takes the same fallback.
+func parseAnyValue(value []byte, inner proto.Message) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return proto.Unmarshal(value, inner) == nil
 }
 
 // isValidIdent reports whether a string map key is identifier-safe: it
