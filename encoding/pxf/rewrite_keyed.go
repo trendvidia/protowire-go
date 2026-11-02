@@ -270,9 +270,7 @@ func (r *Rewriter) SetKeyed(fieldPath, key, subpath string, v Value) error {
 		if err != nil {
 			return err
 		}
-		last := &bs[len(bs)-1]
-		at, text := r.renderAppendKeyedElement(last, key, chain)
-		r.stage(spanEdit{path: pathKey, start: at, end: at, text: text})
+		r.stageSplice(pathKey, r.renderAppendKeyedElement(&bs[len(bs)-1], key, chain))
 		return nil
 	}
 	t, err := r.resolveIn(elem.body, elem.container(), subpath)
@@ -285,11 +283,12 @@ func (r *Rewriter) SetKeyed(fieldPath, key, subpath string, v Value) error {
 // renderAppendKeyedElement builds the insertion that appends a new
 // element with the given key and body to a binding, in the binding's
 // form.
-func (r *Rewriter) renderAppendKeyedElement(b *keyedBinding, key string, body []Entry) (at int, text []byte) {
+func (r *Rewriter) renderAppendKeyedElement(b *keyedBinding, key string, body []Entry) listSplice {
 	if b.anon {
 		return r.renderAppendListElement(b, newAnonElement(b.keyField, key, body))
 	}
-	return r.renderAppendEntry(b.scopeStart, b.closeOff, b.entries, newKeyedElementBlock(key, body))
+	at, text := r.renderAppendEntry(b.scopeStart, b.closeOff, b.entries, newKeyedElementBlock(key, body))
+	return listSplice{at: at, text: text, commaAt: -1}
 }
 
 // buildEntryChain turns a dotted subpath and a leaf value into nested
@@ -341,8 +340,10 @@ func (r *Rewriter) RemoveKeyed(fieldPath, key, subpath string) error {
 // RemoveKeyedElement stages the deletion of the whole element named key
 // from the keyed collection at fieldPath. In the keyed-block form the
 // element is removed like any entry ([Rewriter.Remove]'s whole-line
-// handling); in the anonymous list form the element and its separating
-// comma are removed, leaving the surrounding list well-formed.
+// handling); in the anonymous list form the element, its separating
+// comma and a trailing comment on its last line are removed, leaving the
+// surrounding list well-formed. As with Remove, comments on the lines
+// around the element are kept, and so is a trailing comma on the list.
 func (r *Rewriter) RemoveKeyedElement(fieldPath, key string) error {
 	op := fmt.Sprintf("RemoveKeyedElement %s[%q]", fieldPath, key)
 	bs, err := r.keyedBindings(op, fieldPath)
@@ -355,8 +356,7 @@ func (r *Rewriter) RemoveKeyedElement(fieldPath, key string) error {
 	}
 	pathKey := fmt.Sprintf("\x00keyed:rmel:%s\x00%s", fieldPath, key)
 	if elem.b.anon {
-		start, end := r.listElementRemovalSpan(elem.b.list, elem.idx)
-		r.stage(spanEdit{path: pathKey, start: start, end: end})
+		r.stageListRemoval(pathKey, r.listElementRemovalSpans(elem.b.list, elem.idx, false))
 		return nil
 	}
 	start, end, _ := r.entryRemovalSpan(elem.node)
@@ -370,8 +370,7 @@ func (r *Rewriter) RemoveKeyedElement(fieldPath, key string) error {
 // matters: with before == "" the element is appended to the last
 // binding; otherwise it is inserted immediately before the existing
 // element named before (in whatever binding holds it, and in that
-// binding's form — above the anchor's glued doc comments in the
-// keyed-block form). Inserting a key that already names an element,
+// binding's form — above the anchor's glued doc comments). Inserting a key that already names an element,
 // anywhere across the field's bindings, is an error — duplicate keys
 // have no keyed-form representation.
 func (r *Rewriter) InsertKeyedElement(fieldPath, key, before string, body []Entry) error {
@@ -397,9 +396,7 @@ func (r *Rewriter) InsertKeyedElement(fieldPath, key, before string, body []Entr
 	pathKey := fmt.Sprintf("\x00keyed:ins:%s\x00%s", fieldPath, key)
 
 	if before == "" {
-		last := &bs[len(bs)-1]
-		at, text := r.renderAppendKeyedElement(last, key, body)
-		r.stage(spanEdit{path: pathKey, start: at, end: at, text: text})
+		r.stageSplice(pathKey, r.renderAppendKeyedElement(&bs[len(bs)-1], key, body))
 		return nil
 	}
 	anchor := findKeyedElem(bs, before)
@@ -407,8 +404,7 @@ func (r *Rewriter) InsertKeyedElement(fieldPath, key, before string, body []Entr
 		return fmt.Errorf("pxf: %s: no element %q to insert before", op, before)
 	}
 	if anchor.b.anon {
-		at, text := r.renderInsertListElementBefore(anchor.b, anchor.idx, newAnonElement(anchor.b.keyField, key, body))
-		r.stage(spanEdit{path: pathKey, start: at, end: at, text: text})
+		r.stageSplice(pathKey, r.renderInsertListElementBefore(anchor.b, anchor.idx, newAnonElement(anchor.b.keyField, key, body)))
 		return nil
 	}
 	at, text := r.renderInsertBlockElementBefore(anchor.b, anchor.node, newKeyedElementBlock(key, body))
@@ -508,7 +504,9 @@ func anonKeyAssignment(entries []Entry, keyField string) *Assignment {
 // keyed collection at fieldPath: its source text moves verbatim. In the
 // keyed-block form its glued leading `#` / `//` comment lines travel
 // with it (a group header separated by a blank line stays put); in the
-// anonymous list form the element value and one separating comma move.
+// anonymous list form the element value moves, with a trailing comment
+// on its line when the new position is a line of its own. A comment that
+// cannot go there stays where it was.
 // With before == "" the element moves to the end of the collection;
 // otherwise it lands immediately before the existing element named
 // before. An element and its anchor must share the same surface form.
@@ -537,7 +535,7 @@ func (r *Rewriter) MoveKeyedElement(fieldPath, key, before string) error {
 		}
 	}
 	if elem.b.anon {
-		return r.moveListElement(op, fieldPath, elem, anchor)
+		return r.moveListElement(fieldPath, elem, anchor)
 	}
 	return r.moveBlockElement(op, fieldPath, elem, anchor)
 }
@@ -595,28 +593,44 @@ func (r *Rewriter) moveBlockElement(op, fieldPath string, elem, anchor *keyedEle
 
 // moveListElement reorders an anonymous-form element by capturing its
 // value span and reinserting it before the anchor (or at the list end).
-func (r *Rewriter) moveListElement(op, fieldPath string, elem, anchor *keyedElem) error {
-	captureStart := elem.bv.Pos.Offset
-	captureEnd := elem.bv.End.Offset
-	text := append([]byte(nil), r.src[captureStart:captureEnd]...)
-	delStart, delEnd := r.listElementRemovalSpan(elem.b.list, elem.idx)
-	delKey := fmt.Sprintf("\x00keyed:mv:%s\x00%s", fieldPath, elem.key)
-	insKey := delKey + "\x00ins"
-
-	var at int
-	var insText []byte
-	if anchor != nil {
-		at, insText = r.spliceListElementBefore(elem.b, anchor.idx, text)
-	} else {
-		at, insText = r.spliceListElementAppend(elem.b, text)
-	}
-	// The move must not straddle: if the delete span and insert offset
-	// overlap, the element already sits where asked — reproduce the input.
-	if at >= delStart && at <= delEnd {
+func (r *Rewriter) moveListElement(fieldPath string, elem, anchor *keyedElem) error {
+	lv := elem.b.list
+	// Already where it was asked to go: reproduce the input.
+	if anchor == nil && elem.idx == len(lv.Elements)-1 {
 		return nil
 	}
-	r.stage(spanEdit{path: delKey, start: delStart, end: delEnd})
-	r.stage(spanEdit{path: insKey, start: at, end: at, text: insText})
+	if anchor != nil && anchor.b.list == lv && anchor.idx == elem.idx+1 {
+		return nil
+	}
+	text := append([]byte(nil), r.src[elem.bv.Pos.Offset:elem.bv.End.Offset]...)
+	delKey := fmt.Sprintf("\x00keyed:mv:%s\x00%s", fieldPath, elem.key)
+
+	// A line comment would swallow whatever followed it on an inline
+	// target, so the comment only goes along to a line of the element's own.
+	to := elem.b
+	if anchor != nil {
+		to = anchor.b
+	}
+	onOwnLine := r.listMultiline(to.list)
+	if anchor != nil {
+		p := to.list.Elements[anchor.idx].pos().Offset
+		onOwnLine = onOwnLine && isBlank(r.src[lineStartOffset(r.src, p):p])
+	}
+	var comment []byte
+	if onOwnLine {
+		if cs, ce, _ := r.trailingComment(r.listElemTail(lv, elem.idx)); cs >= 0 {
+			comment = r.src[cs:ce]
+		}
+	}
+
+	var ins listSplice
+	if anchor != nil {
+		ins = r.spliceListElementBefore(anchor.b, anchor.idx, text, comment)
+	} else {
+		ins = r.spliceListElementAppend(elem.b, text, comment)
+	}
+	r.stageListRemoval(delKey, r.listElementRemovalSpans(lv, elem.idx, !onOwnLine))
+	r.stageSplice(delKey+"\x00ins", ins)
 	return nil
 }
 
@@ -642,51 +656,169 @@ func (r *Rewriter) listElementIndent(lv *ListVal, scopeStart int) string {
 	return r.lineLeadingIndent(scopeStart) + r.indentStep()
 }
 
-// listElementRemovalSpan returns the span to delete for element idx of
-// lv, including the comma that separates it from a neighbour, so the
-// list stays well-formed.
-func (r *Rewriter) listElementRemovalSpan(lv *ListVal, idx int) (start, end int) {
-	elems := lv.Elements
-	e := elems[idx]
-	start = e.pos().Offset
-	end = e.end().Offset
+// listComma returns the offset of the first comma in src[from:to), which
+// must be the gap between two list tokens, or -1. Comments in the gap are
+// stepped over, since one may hold a comma of its own.
+func (r *Rewriter) listComma(from, to int) int {
+	for i := from; i < to; {
+		switch {
+		case r.src[i] == ',':
+			return i
+		case r.src[i] == '#', bytes.HasPrefix(r.src[i:to], []byte("//")):
+			for i < to && r.src[i] != '\n' {
+				i++
+			}
+		case bytes.HasPrefix(r.src[i:to], []byte("/*")):
+			n := bytes.Index(r.src[i:to], []byte("*/"))
+			if n < 0 {
+				return -1
+			}
+			i += n + 2
+		default:
+			i++
+		}
+	}
+	return -1
+}
 
-	if len(elems) == 1 {
-		// Sole element: leave empty brackets.
-		if ls := lineStartOffset(r.src, start); isBlank(r.src[ls:start]) {
-			start = ls
-		}
-		return start, end
+// listElemComma returns the offset of the comma following element idx of
+// lv, or -1 for a last element with no trailing comma.
+func (r *Rewriter) listElemComma(lv *ListVal, idx int) int {
+	limit := lv.End.Offset - 1
+	if idx < len(lv.Elements)-1 {
+		limit = lv.Elements[idx+1].pos().Offset
 	}
-	if idx < len(elems)-1 {
-		// Not last: consume the following comma and up to the next
-		// element's line, and this element's own leading indent.
-		if ls := lineStartOffset(r.src, start); isBlank(r.src[ls:start]) {
-			start = ls
-		}
-		next := elems[idx+1].pos().Offset
-		nls := lineStartOffset(r.src, next)
-		if isBlank(r.src[nls:next]) {
-			return start, nls
-		}
-		// Inline: stop just before the next element, having eaten the comma.
-		j := end
-		for j < next && r.src[j] != ',' {
-			j++
-		}
-		if j < next {
-			j++ // comma
-		}
-		for j < next && (r.src[j] == ' ' || r.src[j] == '\t') {
-			j++
-		}
-		return start, j
+	return r.listComma(lv.Elements[idx].end().Offset, limit)
+}
+
+// listElemTail returns the offset where a trailing comment of element
+// idx of lv would start to look: past its comma when that sits on the
+// element's last line, else just past the element.
+func (r *Rewriter) listElemTail(lv *ListVal, idx int) int {
+	end := lv.Elements[idx].end().Offset
+	if c := r.listElemComma(lv, idx); c >= 0 && !bytes.Contains(r.src[end:c], []byte("\n")) {
+		return c + 1
 	}
-	// Last element: consume the preceding comma back to the previous
-	// element's end, and any inline padding after this element (a
-	// trailing newline stays with the closing-bracket line).
-	prevEnd := elems[idx-1].end().Offset
-	return prevEnd, end + r.trailingListPad(end)
+	return end
+}
+
+// trailingComment finds the comment that ends the line at off. It returns
+// the comment's span, or -1s when there is none, and the offset of the
+// line's end, or -1 when something other than a comment follows off on
+// the line. A block comment counts only when it closes on the line, as in
+// [Rewriter.entryRemovalSpan].
+func (r *Rewriter) trailingComment(off int) (start, end, lineEnd int) {
+	i := off + r.trailingListPad(off)
+	start, end = -1, -1
+	switch {
+	case i >= len(r.src):
+	case r.src[i] == '#', bytes.HasPrefix(r.src[i:], []byte("//")):
+		start = i
+		for i < len(r.src) && r.src[i] != '\n' {
+			i++
+		}
+		end = i
+	case bytes.HasPrefix(r.src[i:], []byte("/*")):
+		n := bytes.Index(r.src[i:], []byte("*/"))
+		if n >= 0 && !bytes.Contains(r.src[i:i+n], []byte("\n")) {
+			start, end = i, i+n+2
+			i = end + r.trailingListPad(end)
+		}
+	}
+	if i >= len(r.src) || r.src[i] == '\n' {
+		return start, end, i
+	}
+	return -1, -1, -1
+}
+
+// byteSpan is a half-open range of source offsets.
+type byteSpan struct{ start, end int }
+
+// listElementRemovalSpans returns the spans to delete for element idx of
+// lv: the element, the comma that separates it from a neighbour so the
+// list stays well-formed, and a trailing comment on its last line unless
+// keepComment is set. Those can be apart, with a comment on the element
+// that stays between them, which is why this is more than one span.
+//
+// An element on lines of its own goes with those lines, so the lines
+// around it survive. A last element with no trailing comma gives up the
+// comma before it, which is then not its own: a list with a trailing
+// comma keeps that shape.
+func (r *Rewriter) listElementRemovalSpans(lv *ListVal, idx int, keepComment bool) []byteSpan {
+	elems := lv.Elements
+	start := elems[idx].pos().Offset
+	end := elems[idx].end().Offset
+	comma := r.listElemComma(lv, idx)
+	tail := r.listElemTail(lv, idx)
+	commentStart, _, lineEnd := r.trailingComment(tail)
+	if keepComment && commentStart >= 0 {
+		lineEnd = -1
+	}
+
+	var out []byteSpan
+	switch {
+	case comma >= tail: // on a later line than the element
+		out = append(out, byteSpan{comma, comma + 1 + r.trailingListPad(comma+1)})
+	case comma < 0 && idx > 0:
+		prevEnd := elems[idx-1].end().Offset
+		prev := r.listComma(prevEnd, start)
+		if commentStart < 0 && prev >= 0 && !r.gapHasComment(prevEnd, start) {
+			// Nothing to keep between the two elements: they close up.
+			return []byteSpan{{prevEnd, end + r.trailingListPad(end)}}
+		}
+		if prev >= 0 {
+			out = append(out, byteSpan{prev, prev + 1})
+		}
+	}
+
+	ls := lineStartOffset(r.src, start)
+	switch {
+	case lineEnd < 0: // shares its last line with what follows
+		return append(out, byteSpan{start, tail + r.trailingListPad(tail)})
+	case !isBlank(r.src[ls:start]):
+		for start > ls && (r.src[start-1] == ' ' || r.src[start-1] == '\t') {
+			start--
+		}
+		return append(out, byteSpan{start, lineEnd})
+	case lineEnd < len(r.src):
+		return append(out, byteSpan{ls, lineEnd + 1})
+	}
+	return append(out, byteSpan{ls, lineEnd})
+}
+
+// gapHasComment reports whether src[from:to), the gap between two list
+// tokens, holds a comment.
+func (r *Rewriter) gapHasComment(from, to int) bool {
+	for _, c := range r.src[from:to] {
+		if c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != ',' {
+			return true
+		}
+	}
+	return false
+}
+
+// stageListRemoval stages the deletion of spans under one identity.
+func (r *Rewriter) stageListRemoval(pathKey string, spans []byteSpan) {
+	for i, s := range spans {
+		r.stage(spanEdit{path: fmt.Sprintf("%s\x00%d", pathKey, i), start: s.start, end: s.end})
+	}
+}
+
+// listSplice is an insertion into a list, and the comma it needs after
+// the element before it when that is not next to the insertion: a comment
+// on that element must stay on it. commaAt is -1 when there is none.
+type listSplice struct {
+	at      int
+	text    []byte
+	commaAt int
+}
+
+// stageSplice stages an insertion under one identity.
+func (r *Rewriter) stageSplice(pathKey string, s listSplice) {
+	r.stage(spanEdit{path: pathKey, start: s.at, end: s.at, text: s.text})
+	if s.commaAt >= 0 {
+		r.stage(spanEdit{path: pathKey + "\x00comma", start: s.commaAt, end: s.commaAt, text: []byte(",")})
+	}
 }
 
 // trailingListPad returns the count of spaces/tabs immediately after off
@@ -702,14 +834,14 @@ func (r *Rewriter) trailingListPad(off int) int {
 
 // renderAppendListElement builds the insertion that appends bv as the
 // last element of the anonymous list b.
-func (r *Rewriter) renderAppendListElement(b *keyedBinding, bv *BlockVal) (at int, text []byte) {
-	return r.spliceListElementAppend(b, r.renderListElement(b, bv))
+func (r *Rewriter) renderAppendListElement(b *keyedBinding, bv *BlockVal) listSplice {
+	return r.spliceListElementAppend(b, r.renderListElement(b, bv), nil)
 }
 
 // renderInsertListElementBefore builds the insertion that places bv
 // immediately before element idx of the anonymous list b.
-func (r *Rewriter) renderInsertListElementBefore(b *keyedBinding, idx int, bv *BlockVal) (at int, text []byte) {
-	return r.spliceListElementBefore(b, idx, r.renderListElement(b, bv))
+func (r *Rewriter) renderInsertListElementBefore(b *keyedBinding, idx int, bv *BlockVal) listSplice {
+	return r.spliceListElementBefore(b, idx, r.renderListElement(b, bv), nil)
 }
 
 // renderListElement formats bv as a list element (no surrounding comma
@@ -720,8 +852,11 @@ func (r *Rewriter) renderListElement(b *keyedBinding, bv *BlockVal) []byte {
 }
 
 // spliceListElementAppend returns the insertion that adds elemText as
-// the last element of b's list.
-func (r *Rewriter) spliceListElementAppend(b *keyedBinding, elemText []byte) (at int, text []byte) {
+// the last element of b's list, with comment after it on its line. It
+// goes after the last element's line, so a comment there stays on that
+// element, and after a trailing comma, which the new element then ends
+// with too: the list keeps its shape.
+func (r *Rewriter) spliceListElementAppend(b *keyedBinding, elemText, comment []byte) listSplice {
 	lv := b.list
 	indent := r.listElementIndent(lv, b.scopeStart)
 	if len(lv.Elements) == 0 {
@@ -733,45 +868,85 @@ func (r *Rewriter) spliceListElementAppend(b *keyedBinding, elemText []byte) (at
 		sb.Write(elemText)
 		sb.WriteByte('\n')
 		sb.WriteString(base)
-		return b.closeOff, sb.Bytes()
+		return listSplice{at: b.closeOff, text: sb.Bytes(), commaAt: -1}
 	}
-	lastEnd := lv.Elements[len(lv.Elements)-1].end().Offset
-	if r.listMultiline(lv) {
-		var sb bytes.Buffer
-		sb.WriteString(",\n")
-		sb.WriteString(indent)
-		sb.Write(elemText)
-		return lastEnd, sb.Bytes()
-	}
+	last := len(lv.Elements) - 1
+	lastEnd := lv.Elements[last].end().Offset
+	comma := r.listElemComma(lv, last)
+	multiline := r.listMultiline(lv)
+
 	var sb bytes.Buffer
-	sb.WriteString(", ")
+	if !multiline {
+		if comma >= 0 {
+			sb.WriteByte(' ')
+			sb.Write(elemText)
+			sb.WriteByte(',')
+			return listSplice{at: comma + 1, text: sb.Bytes(), commaAt: -1}
+		}
+		sb.WriteString(", ")
+		sb.Write(elemText)
+		return listSplice{at: lastEnd, text: sb.Bytes(), commaAt: -1}
+	}
+
+	after := lastEnd
+	if comma >= 0 {
+		after = comma + 1
+	}
+	_, commentEnd, _ := r.trailingComment(after)
+	at := after
+	if commentEnd >= 0 {
+		at = commentEnd
+	}
+	commaAt := -1
+	switch {
+	case comma >= 0:
+	case commentEnd >= 0:
+		commaAt = lastEnd
+	default:
+		sb.WriteByte(',')
+	}
+	sb.WriteByte('\n')
+	sb.WriteString(indent)
 	sb.Write(elemText)
-	return lastEnd, sb.Bytes()
+	if comma >= 0 {
+		sb.WriteByte(',')
+	}
+	if len(comment) > 0 {
+		sb.WriteByte(' ')
+		sb.Write(comment)
+	}
+	return listSplice{at: at, text: sb.Bytes(), commaAt: commaAt}
 }
 
 // spliceListElementBefore returns the insertion that places elemText
-// immediately before element idx of b's list.
-func (r *Rewriter) spliceListElementBefore(b *keyedBinding, idx int, elemText []byte) (at int, text []byte) {
+// immediately before element idx of b's list, with comment after it on
+// its line. On a list of lines it goes above the target's glued leading
+// comments, which belong to the target.
+func (r *Rewriter) spliceListElementBefore(b *keyedBinding, idx int, elemText, comment []byte) listSplice {
 	lv := b.list
 	indent := r.listElementIndent(lv, b.scopeStart)
 	target := lv.Elements[idx].pos().Offset
+	var sb bytes.Buffer
 	if r.listMultiline(lv) {
 		ls := lineStartOffset(r.src, target)
 		if isBlank(r.src[ls:target]) {
-			// Insert at the target's line start: the new element takes the
-			// target's indent, then the comma and newline, leaving the
-			// target's own leading indent (already in source) intact.
-			var sb bytes.Buffer
+			// Insert at a line start: the new element takes the target's
+			// indent, then the comma and newline, leaving the lines after
+			// it intact.
 			sb.WriteString(indent)
 			sb.Write(elemText)
-			sb.WriteString(",\n")
-			return ls, sb.Bytes()
+			sb.WriteByte(',')
+			if len(comment) > 0 {
+				sb.WriteByte(' ')
+				sb.Write(comment)
+			}
+			sb.WriteByte('\n')
+			return listSplice{at: r.extendOverLeadingComments(ls), text: sb.Bytes(), commaAt: -1}
 		}
 	}
-	var sb bytes.Buffer
 	sb.Write(elemText)
 	sb.WriteString(", ")
-	return target, sb.Bytes()
+	return listSplice{at: target, text: sb.Bytes(), commaAt: -1}
 }
 
 // --- shared helpers -------------------------------------------------
