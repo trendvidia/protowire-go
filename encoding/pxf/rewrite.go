@@ -482,7 +482,7 @@ func containsBadVal(v Value) bool {
 		}
 	case *BlockVal:
 		for _, e := range n.Entries {
-			if val, ok := entryValue(e); ok && containsBadVal(val) {
+			if entryContainsBadVal(e) {
 				return true
 			}
 		}
