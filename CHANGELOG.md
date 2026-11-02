@@ -16,9 +16,11 @@ format changes.
 [#219]: https://github.com/trendvidia/protowire-go/issues/219
 [#221]: https://github.com/trendvidia/protowire-go/issues/221
 [#225]: https://github.com/trendvidia/protowire-go/issues/225
+[#227]: https://github.com/trendvidia/protowire-go/issues/227
 
 ### Changed
 
+- **`encoding/sbe` and `encoding/pb` reject invalid UTF-8 in a string field** ([#227]), as `docs/HARDENING.md` § UTF-8 requires. This narrows what decodes. `Codec.Unmarshal`, `Codec.UnmarshalDescriptor` and the stream `Decoder` now return `sbe: invalid UTF-8 in string field symbol`. In `pb`, `Unmarshal` and the stream `Decoder` return `field Name: invalid UTF-8 in string`, for a Go string, list element, map key or map value. A stream decoder can carry on to the next frame. `XMLToProto` maps every `char` type to `string`, so a feed carrying Latin-1 or another encoding needs that field changed to `bytes` (protowire#494 tracks declaring an encoding). A Go `string` field that reads a proto `bytes` field in `pb` needs to become `[]byte`. `Codec.View` is unchanged, and `View.String` returns the buffer's bytes unchecked, as its trust model says. One known consequence: `sbe` `Marshal` still cuts an overlong string at a byte, which can split a character and produce a message `Unmarshal` refuses (protowire#495).
 - **A schema that redefines a well-known type with the wrong shape is refused at bind time** ([#218]). This narrows what binds. A message named, say, `pxf.Secret` or `google.protobuf.Timestamp` without the fields the codec reads now gives a `ViolationWellKnownShape`, which is a new `ViolationKind`. Copies of the canonical schemas are unaffected, and field numbers are not checked. Spec: protowire#487.
 
 ### Fixed
