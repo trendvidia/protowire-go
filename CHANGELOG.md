@@ -11,6 +11,15 @@ format changes.
 
 ## [Unreleased]
 
+## [1.15.0] — 2026-11-02
+
+A minor release, because it narrows what decodes and what binds. `encoding/sbe`
+and `encoding/pb` reject invalid UTF-8 in a string field, and a schema that
+redefines a well-known type with the wrong shape is refused. An 11-byte message
+can no longer crash a program that decodes and re-encodes it with `pb`, and a
+Duration past about 292 years is now written correctly, as a block. No
+wire-format change.
+
 [#218]: https://github.com/trendvidia/protowire-go/issues/218
 
 [#219]: https://github.com/trendvidia/protowire-go/issues/219
