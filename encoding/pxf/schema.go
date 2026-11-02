@@ -113,6 +113,10 @@ const (
 	// looks only at the registered numbers would otherwise silently see
 	// none of its annotations (#98). Name is the retired number.
 	ViolationRetiredNumber
+	// ViolationWellKnownShape is a message that has the full name of a
+	// well-known type a codec handles by name, without the fields that
+	// handling reads (draft -01 §wkt-shapes). Detail says which.
+	ViolationWellKnownShape
 )
 
 func (k ViolationKind) String() string {
@@ -131,6 +135,8 @@ func (k ViolationKind) String() string {
 		return "required field option"
 	case ViolationRetiredNumber:
 		return "retired option number"
+	case ViolationWellKnownShape:
+		return "well-known type shape"
 	default:
 		return "unknown"
 	}
@@ -138,8 +144,9 @@ func (k ViolationKind) String() string {
 
 // Violation describes one schema element that fails a PXF bind-time
 // check: a name colliding with a reserved PXF keyword, an invalid
-// (pxf.key), (pxf.default) or (pxf.required) placement, or an option at
-// a retired extension number. Returned by [ValidateDescriptor].
+// (pxf.key), (pxf.default) or (pxf.required) placement, an option at a
+// retired extension number, or a message redefining a well-known type
+// with the wrong shape. Returned by [ValidateDescriptor].
 type Violation struct {
 	// File is the .proto file path the offending element is declared in.
 	File string
@@ -159,8 +166,8 @@ type Violation struct {
 	// Kind is the kind of element that collided.
 	Kind ViolationKind
 	// Detail is a human-readable explanation; set for ViolationKeyOption,
-	// ViolationDefaultOption and ViolationRequiredOption, empty for the
-	// reserved-name kinds.
+	// ViolationDefaultOption, ViolationRequiredOption and
+	// ViolationWellKnownShape, empty for the reserved-name kinds.
 	Detail string
 
 	// surface is which of the two spellings the offending annotation was
@@ -193,6 +200,8 @@ func (v Violation) String() string {
 			v.File, v.Element, v.surface.requiredName(), v.Detail)
 	case ViolationRetiredNumber:
 		return fmt.Sprintf("%s: %q: %s (STABILITY.md promise 3)", v.File, v.Element, v.Detail)
+	case ViolationWellKnownShape:
+		return fmt.Sprintf("%s: message %q redefines a well-known type: %s (draft -01 §wkt-shapes)", v.File, v.Element, v.Detail)
 	}
 	return fmt.Sprintf("%s: %s %q uses PXF-reserved name %q (draft §3.13)",
 		v.File, v.Kind, v.Element, v.Name)
@@ -395,6 +404,14 @@ func fileViolations(fd protoreflect.FileDescriptor) []Violation {
 func walkMessages(path string, msgs protoreflect.MessageDescriptors, out *[]Violation) {
 	for i := range msgs.Len() {
 		md := msgs.Get(i)
+		if detail := wktShapeProblem(md); detail != "" {
+			*out = append(*out, Violation{
+				File:    path,
+				Element: string(md.FullName()),
+				Kind:    ViolationWellKnownShape,
+				Detail:  detail,
+			})
+		}
 		fields := md.Fields()
 		// Members of this message's oneofs that carry (pxf.default),
 		// collected during the field pass and capped once the message's

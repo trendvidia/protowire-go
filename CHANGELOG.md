@@ -11,11 +11,18 @@ format changes.
 
 ## [Unreleased]
 
+[#218]: https://github.com/trendvidia/protowire-go/issues/218
+
 [#219]: https://github.com/trendvidia/protowire-go/issues/219
 [#221]: https://github.com/trendvidia/protowire-go/issues/221
 
+### Changed
+
+- **A schema that redefines a well-known type with the wrong shape is refused at bind time** ([#218]). This narrows what binds. A message named, say, `pxf.Secret` or `google.protobuf.Timestamp` without the fields the codec reads now gives a `ViolationWellKnownShape`, which is a new `ViolationKind`. Copies of the canonical schemas are unaffected, and field numbers are not checked. Spec: protowire#487.
+
 ### Fixed
 
+- **A redefined well-known type no longer panics** ([#218]). `Unmarshal`, `UnmarshalFull` and `Marshal` panicked on such a message, and `Marshal` could write a list's address for a `repeated string value`. The codec now checks the shape as well as the name, so where validation does not run, as in `Marshal` and with `SkipValidate`, the message is ordinary and has no literal form. `OnSecretField` does not fire for a `pxf.Secret` of the wrong shape.
 - **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** ([#219]). The reader counts both as supplied. Before, the row panicked with `type mismatch` for a scalar column, wrote the list's address into the row for a `repeated string`, or returned `unsupported kind: message` for a repeated message or a map. Inside a block cell the same field was left out, and the reader refused the row.
 - **`Rewriter` keeps comments with their own element in an anonymous keyed list** ([#221]). `RemoveKeyedElement` and `MoveKeyedElement` used to delete comments between elements, and removing a last element took the comment of the one before it. Appending put the new element ahead of the last element's trailing comma or comment, so the comment moved to the new element. Inserting before an anchor now goes above the anchor's glued comments, as in the keyed-block form. A moved element takes its trailing comment along when it lands on a line of its own, and otherwise leaves it behind. A list with a trailing comma keeps one after an append, and removing the only element now leaves `[\n]` rather than a blank line.
 - **`MoveKeyedElement` with an anchor in another binding of the field** used the anchor's index in the wrong list, so the element landed elsewhere or the call panicked ([#221]).

@@ -8,8 +8,11 @@ import (
 	"math"
 	"math/big"
 	"math/bits"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -30,19 +33,117 @@ var wrapperTypes = map[protoreflect.FullName]protoreflect.Kind{
 
 func isWrapperType(desc protoreflect.MessageDescriptor) bool {
 	_, ok := wrapperTypes[desc.FullName()]
+	return ok && hasKnownShape(desc)
+}
+
+// wktField is one field a codec reads on a well-known type.
+type wktField struct {
+	name     protoreflect.Name
+	kind     protoreflect.Kind
+	repeated bool
+	optional bool // may be undeclared; when declared it must still match
+}
+
+// wktShapes is draft -01 §wkt-shapes: the fields a message must declare
+// to be treated as the well-known type its full name says it is. Field
+// numbers are not in it, since PXF binds fields by name. The canonical
+// definition of each type has this shape, and any copy of it.
+var wktShapes = func() map[protoreflect.FullName][]wktField {
+	seconds := []wktField{{name: "seconds", kind: protoreflect.Int64Kind}, {name: "nanos", kind: protoreflect.Int32Kind}}
+	m := map[protoreflect.FullName][]wktField{
+		"google.protobuf.Timestamp": seconds,
+		"google.protobuf.Duration":  seconds,
+		"google.protobuf.Any": {
+			{name: "type_url", kind: protoreflect.StringKind},
+			{name: "value", kind: protoreflect.BytesKind},
+		},
+		"google.protobuf.FieldMask": {{name: "paths", kind: protoreflect.StringKind, repeated: true}},
+		"pxf.BigInt": {
+			{name: "abs", kind: protoreflect.BytesKind},
+			{name: "negative", kind: protoreflect.BoolKind},
+		},
+		"pxf.Decimal": {
+			{name: "unscaled", kind: protoreflect.BytesKind},
+			{name: "scale", kind: protoreflect.Int32Kind},
+			{name: "negative", kind: protoreflect.BoolKind},
+		},
+		"pxf.BigFloat": {
+			{name: "mantissa", kind: protoreflect.BytesKind},
+			{name: "exponent", kind: protoreflect.Int32Kind},
+			{name: "prec", kind: protoreflect.Uint32Kind},
+			{name: "negative", kind: protoreflect.BoolKind},
+		},
+		"pxf.Secret": {
+			{name: "value", kind: protoreflect.StringKind},
+			{name: "hint", kind: protoreflect.StringKind, optional: true},
+			{name: "fingerprint", kind: protoreflect.StringKind, optional: true},
+		},
+	}
+	for name, kind := range wrapperTypes {
+		m[name] = []wktField{{name: "value", kind: kind}}
+	}
+	return m
+}()
+
+// wktShapeProblem says what stops desc having the shape its full name
+// needs, or returns "" when it has it or the name needs none.
+func wktShapeProblem(desc protoreflect.MessageDescriptor) string {
+	for _, f := range wktShapes[desc.FullName()] {
+		fd := desc.Fields().ByName(f.name)
+		switch {
+		case fd == nil && f.optional:
+		case fd == nil:
+			return fmt.Sprintf("it has no field %q", f.name)
+		case fd.Kind() != f.kind:
+			return fmt.Sprintf("field %q is %s, and must be %s", f.name, fd.Kind(), f.kind)
+		case fd.IsMap() || fd.IsList() != f.repeated:
+			return fmt.Sprintf("field %q has the wrong cardinality", f.name)
+		}
+	}
+	return ""
+}
+
+// wktShapeCache memoizes hasKnownShape per descriptor, bounded like the
+// bind-time validation caches. The check runs for every value of a
+// well-known type, and walking the fields cost 13% on a document of
+// nothing else.
+var (
+	wktShapeCache sync.Map // protoreflect.MessageDescriptor -> bool
+	wktShapeCount atomic.Int64
+)
+
+// hasKnownShape reports whether desc, whose name is already known to be
+// a well-known type's, can be handled as that type. One that cannot is
+// an ordinary message (draft -01 §wkt-shapes): bind-time validation
+// refuses it, and this is what holds on the paths that do not validate,
+// Marshal and SkipValidate among them.
+func hasKnownShape(desc protoreflect.MessageDescriptor) bool {
+	// A sync.Map panics on an unhashable key; see loadCached.
+	cacheable := reflect.TypeOf(desc).Comparable()
+	if cacheable {
+		if v, hit := wktShapeCache.Load(desc); hit {
+			return v.(bool)
+		}
+	}
+	ok := wktShapeProblem(desc) == ""
+	if cacheable && wktShapeCount.Load() < maxCachedDescriptors {
+		if _, loaded := wktShapeCache.LoadOrStore(desc, ok); !loaded {
+			wktShapeCount.Add(1)
+		}
+	}
 	return ok
 }
 
 func isTimestamp(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "google.protobuf.Timestamp"
+	return desc.FullName() == "google.protobuf.Timestamp" && hasKnownShape(desc)
 }
 
 func isDuration(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "google.protobuf.Duration"
+	return desc.FullName() == "google.protobuf.Duration" && hasKnownShape(desc)
 }
 
 func isAny(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "google.protobuf.Any"
+	return desc.FullName() == "google.protobuf.Any" && hasKnownShape(desc)
 }
 
 func setTimestampFields(msg protoreflect.Message, t time.Time) {
@@ -77,15 +178,15 @@ func readDuration(msg protoreflect.Message) time.Duration {
 // Big number type detection.
 
 func isBigInt(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "pxf.BigInt"
+	return desc.FullName() == "pxf.BigInt" && hasKnownShape(desc)
 }
 
 func isDecimal(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "pxf.Decimal"
+	return desc.FullName() == "pxf.Decimal" && hasKnownShape(desc)
 }
 
 func isBigFloat(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "pxf.BigFloat"
+	return desc.FullName() == "pxf.BigFloat" && hasKnownShape(desc)
 }
 
 // defaultableMessage reports whether a (pxf.default) literal can denote
@@ -150,7 +251,7 @@ func msgValueForms(desc protoreflect.MessageDescriptor) string {
 // stay free of any memguard dependency.
 
 func isSecret(desc protoreflect.MessageDescriptor) bool {
-	return desc.FullName() == "pxf.Secret"
+	return desc.FullName() == "pxf.Secret" && hasKnownShape(desc)
 }
 
 // secretHasMetadata reports whether the Secret message carries hint or

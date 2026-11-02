@@ -115,7 +115,7 @@ func findNullMaskField(desc protoreflect.MessageDescriptor) protoreflect.FieldDe
 		return nil
 	}
 	if fd.Kind() == protoreflect.MessageKind &&
-		fd.Message().FullName() == "google.protobuf.FieldMask" {
+		fd.Message().FullName() == "google.protobuf.FieldMask" && hasKnownShape(fd.Message()) {
 		return fd
 	}
 	return nil

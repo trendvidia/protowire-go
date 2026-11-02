@@ -983,7 +983,7 @@ func (d *directDecoder) decodeMsgValue(msg protoreflect.Message, fd protoreflect
 		d.advance()
 		return nil
 	}
-	if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
+	if d.current.Kind != LBRACE && isWrapperType(mdesc) {
 		innerFd := mdesc.Fields().ByName("value")
 		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
@@ -1308,7 +1308,7 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 		d.advance()
 		return protoreflect.ValueOfMessage(sub), nil
 	}
-	if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
+	if d.current.Kind != LBRACE && isWrapperType(mdesc) {
 		innerFd := mdesc.Fields().ByName("value")
 		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
@@ -1590,7 +1590,7 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 				fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
 				continue
 			}
-			if _, ok := wrapperTypes[mdesc.FullName()]; ok && d.current.Kind != LBRACE {
+			if d.current.Kind != LBRACE && isWrapperType(mdesc) {
 				innerFd := mdesc.Fields().ByName("value")
 				v, err := d.consumeScalarAs(innerFd, fd)
 				if err != nil {
@@ -1937,6 +1937,9 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 				d.result.markPresent(path + ".value")
 			}
 		case "hint":
+			if hintFd == nil {
+				return errorf(namePos, "unknown pxf.Secret field %q: this schema does not declare it", name)
+			}
 			if err := bound.bind(hintFd, namePos); err != nil {
 				return err
 			}
@@ -1945,6 +1948,9 @@ func (d *directDecoder) decodeSecretBlockInto(sub protoreflect.Message, path str
 				d.result.markPresent(path + ".hint")
 			}
 		case "fingerprint":
+			if fingerprintFd == nil {
+				return errorf(namePos, "unknown pxf.Secret field %q: this schema does not declare it", name)
+			}
 			if err := bound.bind(fingerprintFd, namePos); err != nil {
 				return err
 			}
@@ -2371,7 +2377,8 @@ func applyMessageDefault(msg protoreflect.Message, fd protoreflect.FieldDescript
 		return nil
 	}
 
-	if innerKind, ok := wrapperTypes[mdesc.FullName()]; ok {
+	if isWrapperType(mdesc) {
+		innerKind := wrapperTypes[mdesc.FullName()]
 		// Parse before Mutable: allocating the wrapper first left an
 		// empty shell on the parent when the literal was rejected, so
 		// Has(fd) reported true for a default that never applied
