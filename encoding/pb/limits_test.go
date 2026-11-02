@@ -4,6 +4,7 @@
 package pb
 
 import (
+	"bytes"
 	"math"
 	"math/big"
 	"strings"
@@ -247,6 +248,39 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 					t.Fatalf("prec %d sign %d: err = %v, want the infinity error", prec, sign, err)
 				}
 			}
+		}
+	})
+	t.Run("BigFloat precision too wide to scale", func(t *testing.T) {
+		const want = "exceeds the widest mantissa"
+		// #229's eleven bytes: Unmarshal stores the precision, and Marshal
+		// used to dereference nil. Above uint32 the varint clamps to MaxPrec.
+		for _, prec := range []uint64{1 << 31, 1<<31 + 1, big.MaxPrec, 1 << 32} {
+			sub := protowire.AppendTag(nil, 1, protowire.BytesType)
+			sub = protowire.AppendBytes(sub, []byte{0x19})
+			sub = protowire.AppendTag(sub, 3, protowire.VarintType)
+			sub = protowire.AppendVarint(sub, prec)
+			wire := protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), sub)
+			if prec == 1<<31 && !bytes.Equal(wire, []byte{0x0a, 0x09, 0x0a, 0x01, 0x19, 0x18, 0x80, 0x80, 0x80, 0x80, 0x08}) {
+				t.Fatalf("wire = % x, not the reported message", wire)
+			}
+			h := &bigFloatHolder{F: new(big.Float)}
+			if err := Unmarshal(wire, h); err != nil {
+				t.Fatalf("prec %d: Unmarshal: %v", prec, err)
+			}
+			if _, err := Marshal(h); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("prec %d: Marshal err = %v, want %q", prec, err, want)
+			}
+		}
+		// The same value built in memory, on both signs and through a list.
+		neg := new(big.Float).SetPrec(1 << 31).SetInt64(-3)
+		if _, err := Marshal(&bigFloatHolder{F: neg}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("negative: err = %v, want %q", err, want)
+		}
+		type list struct {
+			F []*big.Float `protowire:"1"`
+		}
+		if _, err := Marshal(&list{F: []*big.Float{neg}}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("list element: err = %v, want %q", err, want)
 		}
 	})
 	t.Run("BigFloat exponent below int32 after adjustment", func(t *testing.T) {

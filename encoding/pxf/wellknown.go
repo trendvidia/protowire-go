@@ -739,10 +739,18 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 	if bf.Sign() == 0 && hasNonZeroMantissaDigit(s) {
 		return nil, fmt.Errorf("big float literal %s is below big.Float's range", clipLiteral(s))
 	}
+	// setBigFloatFields scales a value up to prec bits, which leaves
+	// big.Float's range at 2^31 bits or more: its mant.Int then returns nil
+	// (#229). Only a MaxNumericLiteralDigits raised past 646 million admits
+	// a suffix that wide. A zero has no mantissa to scale.
+	if bf.Sign() != 0 && readPrec > math.MaxInt32 {
+		return nil, fmt.Errorf("big float literal %s: precision p%d exceeds the widest mantissa big.Float can hold, %d bits", clipLiteral(s), readPrec, math.MaxInt32)
+	}
 	// The wire carries exp - prec as an int32 (pxf/bignum.proto). A value
 	// near big.Float's floor parses but cannot be encoded, and the int32
-	// subtraction in setBigFloatFields wrapped silently.
-	if int64(bf.MantExp(nil))-int64(readPrec) < math.MinInt32 {
+	// subtraction in setBigFloatFields wrapped silently. A zero is stored
+	// with exponent 0 at any precision.
+	if bf.Sign() != 0 && int64(bf.MantExp(nil))-int64(readPrec) < math.MinInt32 {
 		return nil, fmt.Errorf("big float literal %s is below the wire's exponent range", clipLiteral(s))
 	}
 	// The value's binary exponent is bounded as one read off the wire is

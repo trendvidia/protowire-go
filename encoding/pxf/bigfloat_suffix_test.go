@@ -4,6 +4,7 @@
 package pxf_test
 
 import (
+	"math"
 	"strings"
 	"testing"
 
@@ -93,6 +94,21 @@ func TestPrecisionSuffixBoundFollowsTheLimit(t *testing.T) {
 		require.NoError(t, opts.Unmarshal([]byte(at), dynamicpb.NewMessage(md)), at)
 		past := strings.Replace(form, "%s", "1p30", 1)
 		require.ErrorContains(t, opts.Unmarshal([]byte(past), dynamicpb.NewMessage(md)), "precision p30 renders to 11 digits; MaxNumericLiteralDigits=10", past)
+	}
+}
+
+// A suffix of 2^31 bits or more is past what the decoder can scale a value
+// to. It takes a raised limit to get here, and used to panic (#229). A zero
+// has nothing to scale, at any precision.
+func TestPrecisionSuffixTooWideToScale(t *testing.T) {
+	md := compilePlacementSrc(t, suffixSchemaSrc, "bfs.v1", "H")
+	opts := pxf.UnmarshalOptions{MaxNumericLiteralDigits: math.MaxInt}
+	for _, lit := range []string{"1p2147483648", "-1024p2147483648", "1p4294967295"} {
+		err := opts.Unmarshal([]byte("bf = "+lit+"\n"), dynamicpb.NewMessage(md))
+		require.ErrorContains(t, err, "exceeds the widest mantissa", lit)
+	}
+	for _, lit := range []string{"0p2147483648", "-0p4294967295"} {
+		require.NoError(t, opts.Unmarshal([]byte("bf = "+lit+"\n"), dynamicpb.NewMessage(md)), lit)
 	}
 }
 
