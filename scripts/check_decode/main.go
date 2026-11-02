@@ -10,7 +10,7 @@
 //
 // Contract:
 //
-//	check_decode --format <pxf|pb|sbe|envelope> \
+//	check_decode --format <pxf|pb|pb-render|pb-text|sbe|envelope> \
 //	             --schema <fully.qualified.MessageType> \
 //	             --proto  <path-to-adversarial.proto> \
 //	             --input  <path>
@@ -114,6 +114,8 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 		return pbDecode(data, schema, lim)
 	case "pb-render":
 		return pbRender(data, schema, protoPath)
+	case "pb-text":
+		return pbText(data, schema, protoPath)
 	case "envelope":
 		return errors.New("envelope decode not yet implemented in this reference")
 	case "sbe":
@@ -174,6 +176,29 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 // runtime, which stores the fields and bounds nothing, and then written as
 // PXF. The hardened decoder is bypassed on purpose, or it would refuse the row
 // and the encoder would go untested (protowire#448).
+// pbText writes the PXF for data on stdout, for the text gate
+// (protowire/scripts/cross_text_check.sh). The stock runtime reads the bytes,
+// as in pbRender, so the comparison is of the marshaller alone.
+func pbText(data []byte, schema, protoPath string) error {
+	if protoPath == "" {
+		return errors.New("--proto is required for format=pb-text")
+	}
+	desc, err := loadDescriptor(protoPath, schema)
+	if err != nil {
+		return err
+	}
+	msg := dynamicpb.NewMessage(desc)
+	if err := proto.Unmarshal(data, msg); err != nil {
+		return err
+	}
+	text, err := pxf.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(text)
+	return err
+}
+
 func pbRender(data []byte, schema, protoPath string) error {
 	if protoPath == "" {
 		return errors.New("--proto is required for format=pb-render")
