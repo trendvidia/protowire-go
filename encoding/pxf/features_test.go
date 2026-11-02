@@ -121,7 +121,9 @@ func TestAnyEncode(t *testing.T) {
 	detail.Set(detailDesc.Fields().ByName("code"), protoreflect.ValueOfInt32(42))
 	detail.Set(detailDesc.Fields().ByName("reason"), protoreflect.ValueOfString("not found"))
 
-	packed, err := proto.Marshal(detail)
+	// Deterministic: Marshal unpacks only a body that reads back unchanged, and
+	// a dynamic message's default order varies between runs.
+	packed, err := proto.MarshalOptions{Deterministic: true}.Marshal(detail)
 	require.NoError(t, err)
 
 	anyFd := containerDesc.Fields().ByName("payload")
