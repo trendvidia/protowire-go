@@ -76,8 +76,9 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 //     off. A set member that is not a column is not written, so the
 //     oneof is treated as having no member set.
 //   - A (pxf.required) field would be rejected. A proto3 scalar is
-//     written as its zero value; an unset field with presence is an
-//     error.
+//     written as its zero value, an empty repeated field `[]` and an
+//     empty map `{}`, which the reader counts as supplied; an unset field
+//     with presence is an error.
 //
 // A message-typed field named in the message's `_null` FieldMask is
 // written `null`, as Marshal writes it. A scalar field named there is
@@ -103,10 +104,10 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 // it, on one line, so a table keeps one row per line. Inside it, an
 // unset field with (pxf.default) or (pxf.required) follows the rules
 // above, since the reader applies both in every body of a cell (#161):
-// a scalar without presence is written as its zero value, a
-// message-typed field `null`, an `optional` or oneof scalar not at all
-// (it reads back as its default), and an unset required field with
-// presence is an error.
+// a scalar without presence is written as its zero value, an empty
+// repeated field or map `[]` or `{}`, a message-typed field `null`, an
+// `optional` or oneof scalar not at all (it reads back as its default),
+// and an unset required field with presence is an error.
 //
 // It returns an error, and dst unchanged, for the column errors of
 // AppendDatasetHeader and for a value Marshal refuses.
@@ -254,6 +255,10 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 	if !o.hasDefault && !o.required {
 		return nil // empty: absent, and absent is what it reads back as
 	}
+	if fd.IsList() || fd.IsMap() {
+		e.buf.WriteString(emptyCollection(fd)) // only required gets here: a default is refused on these
+		return nil
+	}
 	if !fd.HasPresence() {
 		return e.writeScalar(fd, m.Get(fd)) // the zero value, explicitly
 	}
@@ -279,13 +284,23 @@ func (e *encoder) writeCell(m protoreflect.Message, fd protoreflect.FieldDescrip
 	return nil
 }
 
+// emptyCollection is the literal for a list or map field with nothing in
+// it. An empty keyed list could be `{}` as well; the reader takes `[]`.
+func emptyCollection(fd protoreflect.FieldDescriptor) string {
+	if fd.IsMap() {
+		return "{}"
+	}
+	return "[]"
+}
+
 // cellUnset decides how a value cell writes fd, the i'th field of msg,
 // which msg does not set. Inside a cell, as in a row, the reader applies
 // (pxf.default) to an absent field and checks (pxf.required) (#161), so
 // an unset annotated field is written the way writeCell writes one: a
 // field without presence as its zero value (write), a message-typed
 // field as null, and an optional or oneof scalar not at all, which reads
-// back as its default. A oneof member is not written when a sibling is
+// back as its default. A required list or map has no presence, so it is
+// a write too, of [emptyCollection]. A oneof member is not written when a sibling is
 // set: the sibling keeps its default off. An unset required field with
 // presence cannot be written. An unannotated field is not written.
 func cellUnset(msg protoreflect.Message, fd protoreflect.FieldDescriptor, i int, path string) (write, null bool, err error) {

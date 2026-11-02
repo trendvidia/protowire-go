@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+[#219]: https://github.com/trendvidia/protowire-go/issues/219
+
+### Fixed
+
+- **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** ([#219]). The reader counts both as supplied. Before, the row panicked with `type mismatch` for a scalar column, wrote the list's address into the row for a `repeated string`, or returned `unsupported kind: message` for a repeated message or a map. Inside a block cell the same field was left out, and the reader refused the row.
+
 ## [1.14.0] — 2026-11-01
 
 A minor release, because it narrows what decodes. A keyed entry's name is now
