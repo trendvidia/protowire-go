@@ -329,7 +329,7 @@ func cellUnset(msg protoreflect.Message, fd protoreflect.FieldDescriptor, i int,
 // newline it writes separates tokens.
 func (e *encoder) writeValueCell(fd protoreflect.FieldDescriptor, v protoreflect.Value, sub protoreflect.Message) error {
 	var tmp bytes.Buffer
-	inner := &encoder{buf: &tmp, nullSet: e.nullSet, cellBodies: true}
+	inner := &encoder{buf: &tmp, nullSet: e.nullSet, cellBodies: true, maxDepth: MaxNestingDepth}
 	var err error
 	switch {
 	case fd.IsMap():

@@ -79,7 +79,7 @@ func TestNestingDepthBoundary(t *testing.T) {
 		depth int
 		ok    bool
 	}{{MaxNestingDepth + 1, true}, {MaxNestingDepth + 2, false}} {
-		data, err := Marshal(nestTo(tc.depth))
+		data, err := MarshalOptions{MaxNestingDepth: 1000}.Marshal(nestTo(tc.depth))
 		require.NoError(t, err)
 		err = Unmarshal(data, &nestHolder{})
 		if tc.ok {
@@ -101,7 +101,7 @@ func TestNestingDepthBoundaryScalarMapEntry(t *testing.T) {
 		for range tc.children {
 			msg = &nestHolder{Child: msg}
 		}
-		data, err := Marshal(msg)
+		data, err := MarshalOptions{MaxNestingDepth: 1000}.Marshal(msg)
 		require.NoError(t, err)
 		err = Unmarshal(data, &nestHolder{})
 		if tc.ok {
