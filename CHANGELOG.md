@@ -15,6 +15,7 @@ format changes.
 
 [#219]: https://github.com/trendvidia/protowire-go/issues/219
 [#221]: https://github.com/trendvidia/protowire-go/issues/221
+[#225]: https://github.com/trendvidia/protowire-go/issues/225
 
 ### Changed
 
@@ -22,6 +23,7 @@ format changes.
 
 ### Fixed
 
+- **A Duration past about 292 years is written as a block** ([#225]): `dur_field { seconds = 9500000000 }`. A duration literal holds 64 bits of nanoseconds, so a longer value wrapped: `Marshal` wrote a wrong value, often negative, with no error, and it decoded without complaint. Literals for shorter values are unchanged, and a longer literal is still an error. Applies to a field, a list element, a map value and a `@dataset` cell.
 - **A redefined well-known type no longer panics** ([#218]). `Unmarshal`, `UnmarshalFull` and `Marshal` panicked on such a message, and `Marshal` could write a list's address for a `repeated string value`. The codec now checks the shape as well as the name, so where validation does not run, as in `Marshal` and with `SkipValidate`, the message is ordinary and has no literal form. `OnSecretField` does not fire for a `pxf.Secret` of the wrong shape.
 - **`AppendDatasetRow` writes an empty `(pxf.required)` repeated field or map as `[]` or `{}`** ([#219]). The reader counts both as supplied. Before, the row panicked with `type mismatch` for a scalar column, wrote the list's address into the row for a `repeated string`, or returned `unsupported kind: message` for a repeated message or a map. Inside a block cell the same field was left out, and the reader refused the row.
 - **`Rewriter` keeps comments with their own element in an anonymous keyed list** ([#221]). `RemoveKeyedElement` and `MoveKeyedElement` used to delete comments between elements, and removing a last element took the comment of the one before it. Appending put the new element ahead of the last element's trailing comma or comment, so the comment moved to the new element. Inserting before an anchor now goes above the anchor's glued comments, as in the keyed-block form. A moved element takes its trailing comment along when it lands on a line of its own, and otherwise leaves it behind. A list with a trailing comma keeps one after an append, and removing the only element now leaves `[\n]` rather than a blank line.

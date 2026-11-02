@@ -274,11 +274,15 @@ func isLiteralMessageType(mdesc protoreflect.MessageDescriptor) bool {
 
 // isLiteralMessage reports whether sub is written as one literal. A
 // Secret is, only without a hint or fingerprint: the literal would
-// drop that authoring metadata.
+// drop that authoring metadata. A Duration is, only within the literal's
+// range: see durationFitsLiteral.
 func isLiteralMessage(sub protoreflect.Message) bool {
 	mdesc := sub.Descriptor()
 	if isSecret(mdesc) {
 		return !secretHasMetadata(sub)
+	}
+	if isDuration(mdesc) {
+		return durationFitsLiteral(sub)
 	}
 	return isLiteralMessageType(mdesc)
 }
@@ -462,7 +466,8 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 			// BigFloat / Secret value renders as `key: <scalar>`
 			// rather than `key: { value = <scalar> }`. Secret falls
 			// back to block form when hint or fingerprint is set, so
-			// authoring metadata round-trips.
+			// authoring metadata round-trips, and a Duration past the
+			// literal's range does too, so its value does.
 			if isTimestamp(mdesc) {
 				t := readTimestamp(sub)
 				e.writeIndent(level + 1)
@@ -472,7 +477,7 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 				e.buf.WriteByte('\n')
 				continue
 			}
-			if isDuration(mdesc) {
+			if isDuration(mdesc) && isLiteralMessage(sub) {
 				d := readDuration(sub)
 				e.writeIndent(level + 1)
 				e.buf.WriteString(kv.keyStr)
