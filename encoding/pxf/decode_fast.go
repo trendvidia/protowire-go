@@ -1220,6 +1220,40 @@ func (d *directDecoder) decodeAnyBody(anyMsg protoreflect.Message) error {
 	return nil
 }
 
+// anyBodyReadsBack reports whether body, the entries of an Any block at
+// the given depth, decodes to exactly want, the bytes of the Any's value.
+// A reader's own check is the only complete one: a body loses what the
+// text has no way to say at any level of the value, and what else the
+// reader does to it, an annotation's default or required rule among them,
+// is the decoder's to know. Limits are the defaults; the post-decode pass
+// runs, as it does for UnmarshalFull, because a value it would change is
+// not safe for that reader even if Unmarshal leaves it alone.
+func anyBodyReadsBack(body []byte, desc protoreflect.MessageDescriptor, resolver TypeResolver, depth int, want []byte) bool {
+	var d directDecoder
+	d.lim = defaultLimits
+	if len(body) >= d.lim.maxMessageSize {
+		return false
+	}
+	input := make([]byte, 0, len(body)+1)
+	input = append(append(input, body...), '}')
+	d.lex = lexer{input: input, line: 1, col: 1, maxBytesLiteral: d.lim.maxBytesLiteral}
+	d.resolver = resolver
+	d.result = newResult()
+	d.postDecodeAny = true
+	d.depth = depth
+	d.advance()
+
+	inner := dynamicpb.NewMessage(desc)
+	if err := d.decodeFields(inner.ProtoReflect(), true); err != nil {
+		return false
+	}
+	if err := postDecode(inner.ProtoReflect(), d.result, nil, ""); err != nil {
+		return false
+	}
+	packed, err := proto.MarshalOptions{Deterministic: true}.Marshal(inner)
+	return err == nil && slices.Equal(packed, want)
+}
+
 func (d *directDecoder) decodeListInline(msg protoreflect.Message, fd protoreflect.FieldDescriptor) error {
 	if d.current.Kind != LBRACKET {
 		return errorf(d.current.Pos, "expected '[' for repeated field %q", fd.Name())
