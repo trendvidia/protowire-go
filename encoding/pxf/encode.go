@@ -6,6 +6,7 @@ package pxf
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -24,6 +25,14 @@ type MarshalOptions struct {
 	TypeURL      string       // emit @type directive if non-empty
 	TypeResolver TypeResolver // resolve Any type URLs for sugar encoding; an Any whose body would not read back unchanged stays type_url and value
 	NullFields   *Result      // emit null fields from a Result (for messages without null_mask)
+
+	// MaxNestingDepth is the deepest document Marshal writes, counted as a
+	// decoder counts it: the root is depth 0, and every '{' or '[' is one
+	// descent. A message that needs more is an error, because a reader at
+	// the same limit would refuse the document. An Any past the limit is
+	// not: it stays as type_url and value. Zero means the package constant.
+	// Raise it only with UnmarshalOptions.MaxNestingDepth on every reader.
+	MaxNestingDepth int
 }
 
 // Marshal formats msg as PXF text with default options.
@@ -37,7 +46,10 @@ func (o MarshalOptions) Marshal(msg proto.Message) ([]byte, error) {
 		o.Indent = "  "
 	}
 	var buf bytes.Buffer
-	enc := &encoder{buf: &buf, indent: o.Indent, emitDefaults: o.EmitDefaults, resolver: o.TypeResolver, nullFields: o.NullFields}
+	enc := &encoder{buf: &buf, indent: o.Indent, emitDefaults: o.EmitDefaults, resolver: o.TypeResolver, nullFields: o.NullFields, maxDepth: MaxNestingDepth}
+	if o.MaxNestingDepth > 0 {
+		enc.maxDepth = o.MaxNestingDepth
+	}
 
 	// Discover null_mask once at the top level.
 	desc := msg.ProtoReflect().Descriptor()
@@ -66,6 +78,7 @@ type encoder struct {
 	buf          *bytes.Buffer
 	indent       string
 	emitDefaults bool
+	maxDepth     int  // the deepest level a document may reach
 	cellBodies   bool // writing a @dataset value cell: unset annotated fields follow cellUnset
 	resolver     TypeResolver
 	nullFields   *Result
@@ -74,6 +87,22 @@ type encoder struct {
 	pathPrefix   string                       // dotted path prefix for nested null lookup
 	skipKeyFd    protoreflect.FieldDescriptor // key field to omit from the NEXT encodeMessage call (keyed-block entry body, draft -01 §3.13)
 	scratch      [64]byte                     // scratch buffer for number formatting
+}
+
+// nestingError is the error for a message deeper than the writer's limit.
+type nestingError struct{ limit int }
+
+func (err nestingError) Error() string {
+	return fmt.Sprintf("pxf: nesting depth exceeds MaxNestingDepth=%d", err.limit)
+}
+
+// checkDepth refuses a block or list whose contents sit at level. The
+// level of a body is the decoder's depth there (HARDENING.md § Recursion).
+func (e *encoder) checkDepth(level int) error {
+	if level > e.maxDepth {
+		return nestingError{e.maxDepth}
+	}
+	return nil
 }
 
 func (e *encoder) writeIndent(level int) {
@@ -132,6 +161,10 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 	skipKey := e.skipKeyFd
 	e.skipKeyFd = nil
 
+	if err := e.checkDepth(level); err != nil {
+		return err
+	}
+
 	for i := range fields.Len() {
 		fd := fields.Get(i)
 		if skipKey != nil && fd == skipKey {
@@ -171,6 +204,9 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 				continue
 			}
 			if fd.IsList() || fd.IsMap() {
+				if err := e.checkDepth(level + 1); err != nil {
+					return err
+				}
 				e.writeFieldPrefix(level, fd.Name())
 				e.buf.WriteString(emptyCollection(fd))
 				e.buf.WriteByte('\n')
@@ -333,6 +369,9 @@ func (e *encoder) encodeListField(fd protoreflect.FieldDescriptor, val protorefl
 		}
 	}
 
+	if err := e.checkDepth(level + 1); err != nil {
+		return err
+	}
 	e.writeFieldPrefix(level, fd.Name())
 	e.buf.WriteString("[\n")
 
@@ -433,6 +472,9 @@ func (e *encoder) encodeMapField(fd protoreflect.FieldDescriptor, val protorefle
 		return nil
 	}
 
+	if err := e.checkDepth(level + 1); err != nil {
+		return err
+	}
 	e.writeFieldPrefix(level, fd.Name())
 	e.buf.WriteString("{\n")
 
@@ -693,7 +735,7 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	typeURL := anyMsg.Get(anyDesc.Fields().ByName("type_url")).String()
 	valueBytes := anyMsg.Get(anyDesc.Fields().ByName("value")).Bytes()
 
-	if typeURL == "" || level >= MaxNestingDepth {
+	if typeURL == "" || level >= e.maxDepth {
 		return false, nil
 	}
 
@@ -714,10 +756,13 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	err = e.encodeMessage(inner.ProtoReflect(), level+1)
 	e.pathPrefix = saved
 	e.buf = out
+	if errors.As(err, new(nestingError)) {
+		return false, nil // the value is too deep to unpack here; its bytes are not
+	}
 	if err != nil {
 		return false, err
 	}
-	if !anyBodyReadsBack(body.Bytes(), innerDesc, e.resolver, level, valueBytes) {
+	if !anyBodyReadsBack(body.Bytes(), innerDesc, e.resolver, level, e.maxDepth, valueBytes) {
 		return false, nil
 	}
 

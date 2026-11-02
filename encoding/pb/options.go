@@ -3,7 +3,40 @@
 
 package pb
 
-import "github.com/trendvidia/protowire-go/check"
+import (
+	"io"
+
+	"github.com/trendvidia/protowire-go/check"
+)
+
+// MarshalOptions configures PB encoding. The zero value is equivalent to
+// the package-level [Marshal].
+type MarshalOptions struct {
+	// MaxNestingDepth is the deepest value Marshal writes, counted as a
+	// decoder counts it: the root is depth 0, and every submessage or map
+	// entry is one descent. Zero means the package constant. Raise it only
+	// with UnmarshalOptions.MaxNestingDepth on every reader.
+	MaxNestingDepth int
+}
+
+func (o MarshalOptions) maxDepth() int {
+	if o.MaxNestingDepth > 0 {
+		return o.MaxNestingDepth
+	}
+	return MaxNestingDepth
+}
+
+// Marshal encodes a struct under the options' limit. v must be a pointer
+// to a struct with protowire:"N" tags.
+func (o MarshalOptions) Marshal(v any) ([]byte, error) {
+	return marshal(v, o.maxDepth())
+}
+
+// NewEncoder returns an [Encoder] that marshals each message under the
+// options' limit.
+func (o MarshalOptions) NewEncoder(w io.Writer) *Encoder {
+	return &Encoder{w: w, maxDepth: o.maxDepth()}
+}
 
 // UnmarshalOptions configures PB decoding. The zero value is equivalent
 // to the package-level [Unmarshal].

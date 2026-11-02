@@ -143,8 +143,14 @@ var defaultLimits = limits{
 }
 
 // Marshal encodes a struct into protobuf binary format.
-// v must be a pointer to a struct with protowire:"N" tags.
+// v must be a pointer to a struct with protowire:"N" tags. A value nested
+// deeper than [MaxNestingDepth] is an error, since Unmarshal would refuse
+// it; [MarshalOptions] sets another limit.
 func Marshal(v any) ([]byte, error) {
+	return marshal(v, MaxNestingDepth)
+}
+
+func marshal(v any, maxDepth int) ([]byte, error) {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() == reflect.Ptr {
 		rv = rv.Elem()
@@ -152,7 +158,7 @@ func Marshal(v any) ([]byte, error) {
 	if rv.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("pb.Marshal: expected struct, got %s", rv.Kind())
 	}
-	return marshalStruct(rv)
+	return marshalStruct(rv, 0, maxDepth)
 }
 
 // Unmarshal decodes protobuf binary into a struct.
@@ -219,14 +225,21 @@ func getStructInfo(t reflect.Type) *structInfo {
 	return v.(*structInfo)
 }
 
-func marshalStruct(rv reflect.Value) ([]byte, error) {
+// marshalStruct encodes rv at the given submessage depth, counted as
+// unmarshalStruct counts it: the root is 0, a submessage or a map entry is
+// one descent, and a pointer cycle ends here rather than in a stack
+// overflow.
+func marshalStruct(rv reflect.Value, depth, maxDepth int) ([]byte, error) {
+	if depth > maxDepth {
+		return nil, fmt.Errorf("nesting depth exceeds MaxNestingDepth=%d", maxDepth)
+	}
 	info := getStructInfo(rv.Type())
 	var b []byte
 
 	for _, fi := range info.fields {
 		fv := rv.Field(fi.index)
 		var err error
-		b, err = marshalField(b, fi.fieldNum, fv, fi.zigzag, false)
+		b, err = marshalField(b, fi.fieldNum, fv, fi.zigzag, false, depth, maxDepth)
 		if err != nil {
 			return nil, fmt.Errorf("field %s: %w", rv.Type().Field(fi.index).Name, err)
 		}
@@ -240,7 +253,7 @@ func marshalStruct(rv reflect.Value) ([]byte, error) {
 // singular fields, so elements are always emitted — presence lives in
 // the list or the entry, not the value, and dropping zeros would corrupt
 // element counts or write a map entry no protobuf encoder writes.
-func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool, element bool) ([]byte, error) {
+func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool, element bool, depth, maxDepth int) ([]byte, error) {
 	// Handle pointer: dereference; a nil singular field is absent, but a
 	// nil element emits its pointee's zero record so the list length
 	// survives the round trip (decode reallocates the pointer).
@@ -277,7 +290,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 		// Other element types: one tag+value per element.
 		for i := 0; i < fv.Len(); i++ {
 			var err error
-			b, err = marshalField(b, num, fv.Index(i), zigzag, true)
+			b, err = marshalField(b, num, fv.Index(i), zigzag, true, depth, maxDepth)
 			if err != nil {
 				return nil, err
 			}
@@ -374,7 +387,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 			b = protowire.AppendTag(b, num, protowire.BytesType)
 			b = protowire.AppendBytes(b, msg)
 		default:
-			msg, err := marshalStruct(fv)
+			msg, err := marshalStruct(fv, depth+1, maxDepth)
 			if err != nil {
 				return nil, err
 			}
@@ -393,15 +406,18 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 		if fv.Len() == 0 {
 			return b, nil
 		}
+		if depth+1 > maxDepth {
+			return nil, fmt.Errorf("nesting depth exceeds MaxNestingDepth=%d", maxDepth)
+		}
 		iter := fv.MapRange()
 		for iter.Next() {
 			var entry []byte
 			var err error
-			entry, err = marshalField(entry, 1, iter.Key(), zigzag, true)
+			entry, err = marshalField(entry, 1, iter.Key(), zigzag, true, depth+1, maxDepth)
 			if err != nil {
 				return nil, fmt.Errorf("map key: %w", err)
 			}
-			entry, err = marshalField(entry, 2, iter.Value(), zigzag, true)
+			entry, err = marshalField(entry, 2, iter.Value(), zigzag, true, depth+1, maxDepth)
 			if err != nil {
 				return nil, fmt.Errorf("map value: %w", err)
 			}

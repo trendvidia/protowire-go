@@ -1225,12 +1225,13 @@ func (d *directDecoder) decodeAnyBody(anyMsg protoreflect.Message) error {
 // A reader's own check is the only complete one: a body loses what the
 // text has no way to say at any level of the value, and what else the
 // reader does to it, an annotation's default or required rule among them,
-// is the decoder's to know. Limits are the defaults; the post-decode pass
-// runs, as it does for UnmarshalFull, because a value it would change is
+// is the decoder's to know. maxDepth is the writer's limit and the other
+// limits are the defaults; the post-decode pass runs, as it does for UnmarshalFull, because a value it would change is
 // not safe for that reader even if Unmarshal leaves it alone.
-func anyBodyReadsBack(body []byte, desc protoreflect.MessageDescriptor, resolver TypeResolver, depth int, want []byte) bool {
+func anyBodyReadsBack(body []byte, desc protoreflect.MessageDescriptor, resolver TypeResolver, depth, maxDepth int, want []byte) bool {
 	var d directDecoder
 	d.lim = defaultLimits
+	d.lim.maxDepth = maxDepth
 	if len(body) >= d.lim.maxMessageSize {
 		return false
 	}

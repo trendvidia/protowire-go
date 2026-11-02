@@ -25,14 +25,15 @@ var ErrFramingCorrupt = errors.New("pb: stream framing corrupt")
 // Encoder writes length-prefixed pb-encoded messages using the
 // protobuf-delimited framing convention (varint length + body).
 type Encoder struct {
-	w   io.Writer
-	hdr [binary.MaxVarintLen64]byte
+	w        io.Writer
+	hdr      [binary.MaxVarintLen64]byte
+	maxDepth int
 }
 
-func NewEncoder(w io.Writer) *Encoder { return &Encoder{w: w} }
+func NewEncoder(w io.Writer) *Encoder { return MarshalOptions{}.NewEncoder(w) }
 
 func (e *Encoder) Encode(v any) error {
-	body, err := Marshal(v)
+	body, err := marshal(v, e.maxDepth)
 	if err != nil {
 		return err
 	}
