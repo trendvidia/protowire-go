@@ -175,6 +175,22 @@ func readDuration(msg protoreflect.Message) time.Duration {
 	return time.Duration(secs)*time.Second + time.Duration(nanos)*time.Nanosecond
 }
 
+// durationFitsLiteral reports whether msg, a google.protobuf.Duration, can
+// be written as a literal. A literal holds 64 bits of nanoseconds, about
+// 292 years, while the type reaches about 10,000 years; a longer value is
+// written as a block, and readDuration must not see it, because it wraps.
+func durationFitsLiteral(msg protoreflect.Message) bool {
+	d := msg.Descriptor()
+	secs := msg.Get(d.Fields().ByName("seconds")).Int()
+	nanos := msg.Get(d.Fields().ByName("nanos")).Int()
+	// Well inside the limit whatever nanos holds; int32 is about 2.1s.
+	if secs > -9_223_372_030 && secs < 9_223_372_030 {
+		return true
+	}
+	total := new(big.Int).Mul(big.NewInt(secs), big.NewInt(int64(time.Second)))
+	return total.Add(total, big.NewInt(nanos)).IsInt64()
+}
+
 // Big number type detection.
 
 func isBigInt(desc protoreflect.MessageDescriptor) bool {
