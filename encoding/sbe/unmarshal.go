@@ -6,6 +6,7 @@ package sbe
 import (
 	"fmt"
 	"math"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -74,7 +75,9 @@ func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTempla
 
 	block := data[headerSize:end]
 	for _, ft := range tmpl.fields {
-		readField(block, ft, msg)
+		if err := readField(block, ft, msg); err != nil {
+			return err
+		}
 	}
 
 	// Read repeating groups.
@@ -90,14 +93,16 @@ func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTempla
 	return nil
 }
 
-func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) {
+func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) error {
 	if len(ft.composite) > 0 {
 		subMsg := msg.Mutable(ft.fd).Message()
 		sub := block[ft.offset : int(ft.offset)+int(ft.size)]
 		for _, sf := range ft.composite {
-			readField(sub, sf, subMsg)
+			if err := readField(sub, sf, subMsg); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
 
 	off := int(ft.offset)
@@ -136,9 +141,16 @@ func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) {
 			for n > 0 && raw[n-1] == 0 {
 				n--
 			}
+			// HARDENING.md § UTF-8: a string field is valid UTF-8 whatever the
+			// source encoding, and a char[] says nothing about its own. Bytes
+			// that are text in another encoding belong in a bytes field.
+			if !utf8.Valid(raw[:n]) {
+				return fmt.Errorf("sbe: invalid UTF-8 in string field %s", ft.fd.Name())
+			}
 			fastSet(msg, ft.fd, protoreflect.ValueOfString(string(raw[:n])))
 		}
 	}
+	return nil
 }
 
 func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate, maxRepeated int) (int, error) {
@@ -177,7 +189,9 @@ func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate, max
 		start := groupHeaderSize + i*blockLength
 		entry := data[start : start+blockLength]
 		for _, ft := range gt.fields {
-			readField(entry, ft, entryMsg)
+			if err := readField(entry, ft, entryMsg); err != nil {
+				return 0, err
+			}
 		}
 		fastAppend(list, entryVal)
 	}

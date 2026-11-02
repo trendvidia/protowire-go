@@ -32,6 +32,9 @@
 // The wire format is standard protobuf binary, compatible with any .proto
 // definition using the same field numbers and matching types.
 //
+// A Go string is a proto string, so Unmarshal rejects one that is not valid
+// UTF-8. Declare the field []byte for a proto bytes field.
+//
 // # Concurrency
 //
 // The package-level [Marshal] and [Unmarshal] functions are safe for
@@ -51,6 +54,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -603,6 +607,11 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 		v, n := protowire.ConsumeString(data)
 		if n < 0 {
 			return 0, fmt.Errorf("corrupt string")
+		}
+		// HARDENING.md § UTF-8. Every string reaches this case: a singular
+		// field, a list element, a map key and a map value.
+		if !utf8.ValidString(v) {
+			return 0, fmt.Errorf("invalid UTF-8 in string")
 		}
 		fv.SetString(v)
 		return n, nil

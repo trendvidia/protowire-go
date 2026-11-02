@@ -75,7 +75,8 @@ func buildFieldsViewSchema(fields []fieldTemplate) *viewSchema {
 // which return an error on every malformed-input path. View's constructor
 // validates the message header and rejects buffers shorter than the
 // template's declared block length, but accessor-level checks are
-// intentionally skipped.
+// intentionally skipped. That includes UTF-8: unlike Unmarshal,
+// [View.String] returns the buffer's bytes unchecked.
 type View struct {
 	data   []byte      // full SBE message (for group traversal)
 	block  []byte      // current block (root, entry, or composite)

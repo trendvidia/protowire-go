@@ -19,6 +19,10 @@
 // A [Codec] is created from proto file descriptors and produces standard SBE
 // binary compatible with any SBE implementation.
 //
+// A string field holds UTF-8, so [Codec.Unmarshal], [Codec.UnmarshalDescriptor]
+// and [Decoder.Decode] reject a char[] that is not valid UTF-8. A field carrying
+// another text encoding is declared bytes.
+//
 // Supported proto field types:
 //   - Scalar integers (int32, int64, uint32, uint64, sint32, sint64, fixed*, sfixed*)
 //   - bool, float, double, enum
