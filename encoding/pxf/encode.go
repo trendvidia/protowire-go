@@ -22,7 +22,7 @@ type MarshalOptions struct {
 	Indent       string       // indentation per level, default "  "
 	EmitDefaults bool         // emit fields with zero values
 	TypeURL      string       // emit @type directive if non-empty
-	TypeResolver TypeResolver // resolve Any type URLs for sugar encoding
+	TypeResolver TypeResolver // resolve Any type URLs for sugar encoding; an Any whose body would not read back unchanged stays type_url and value
 	NullFields   *Result      // emit null fields from a Result (for messages without null_mask)
 }
 
@@ -680,14 +680,20 @@ func formatMapKey(fd protoreflect.FieldDescriptor, key protoreflect.MapKey) stri
 	}
 }
 
-// tryEncodeAny encodes a google.protobuf.Any with sugar syntax.
-// Returns (true, nil) if successful, (false, nil) to fall back to regular encoding.
+// tryEncodeAny writes a google.protobuf.Any as a type entry and a body.
+// It returns false, having written nothing, to leave the Any to the block
+// of its own fields, type_url and value: when the type does not resolve,
+// when the value does not parse, and when the body would not read back as
+// the same value (#232). An Any at the depth limit is not unpacked at all:
+// its block has no room for a body's submessages, and stopping here
+// bounds a chain of Anys, which proto.Unmarshal does not, since each one
+// parses its own bytes with a fresh recursion budget.
 func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protoreflect.Message, level int) (bool, error) {
 	anyDesc := fd.Message()
 	typeURL := anyMsg.Get(anyDesc.Fields().ByName("type_url")).String()
 	valueBytes := anyMsg.Get(anyDesc.Fields().ByName("value")).Bytes()
 
-	if typeURL == "" {
+	if typeURL == "" || level >= MaxNestingDepth {
 		return false, nil
 	}
 
@@ -697,7 +703,21 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	}
 
 	inner := dynamicpb.NewMessage(innerDesc)
-	if err := proto.Unmarshal(valueBytes, inner); err != nil {
+	if !parseAnyValue(valueBytes, inner) {
+		return false, nil
+	}
+
+	var body bytes.Buffer
+	out := e.buf
+	e.buf = &body
+	saved := e.enter(fd.Name())
+	err = e.encodeMessage(inner.ProtoReflect(), level+1)
+	e.pathPrefix = saved
+	e.buf = out
+	if err != nil {
+		return false, err
+	}
+	if !anyBodyReadsBack(body.Bytes(), innerDesc, e.resolver, level, valueBytes) {
 		return false, nil
 	}
 
@@ -710,16 +730,25 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	e.writeQuotedString(typeURL)
 	e.buf.WriteByte('\n')
 
-	saved := e.enter(fd.Name())
-	err = e.encodeMessage(inner.ProtoReflect(), level+1)
-	e.pathPrefix = saved
-	if err != nil {
-		return false, err
-	}
+	e.buf.Write(body.Bytes())
 
 	e.writeIndent(level)
 	e.buf.WriteString("}\n")
 	return true, nil
+}
+
+// parseAnyValue parses value, bytes that nothing has checked, into inner
+// and reports whether it could. proto.Unmarshal panics rather than failing
+// on one such value: a dynamicpb map entry with a good key followed by a
+// key of the wrong wire type (protobuf-go v1.36.12, unmarshalMap). That
+// value is as unparsable as any other, so it takes the same fallback.
+func parseAnyValue(value []byte, inner proto.Message) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return proto.Unmarshal(value, inner) == nil
 }
 
 // isValidIdent reports whether a string map key is identifier-safe: it

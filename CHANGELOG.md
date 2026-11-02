@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+[#232]: https://github.com/trendvidia/protowire-go/issues/232
+
+### Fixed
+
+- **`pxf.Marshal` no longer writes an Any body that changes the message or cannot be read** ([#232]). With a `TypeResolver`, an Any now gets `@type` and a body only if reading that body gives back its `value`, byte for byte. Otherwise it stays as `type_url` and `value`. That covers unknown fields at any level of the value, field or map order a decoder would not reproduce, a Timestamp no literal can hold, a `@default` or `@required` field left unset, and a chain of Anys deeper than `MaxNestingDepth`. The check uses the default limits, so a reader that lowers `MaxNestingDepth` can still refuse a deep body. Each body is now decoded once while marshalling, which took a one-field-pair Any from about 0.86µs to 2.1µs. Marshal also no longer panics on an Any value holding a map entry with a good key followed by a key of the wrong wire type, a `proto.Unmarshal` panic on `dynamicpb` messages. That value stays as `type_url` and `value`.
+
 ## [1.15.0] — 2026-11-02
 
 A minor release, because it narrows what decodes and what binds. `encoding/sbe`
