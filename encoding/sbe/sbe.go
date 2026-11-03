@@ -21,7 +21,9 @@
 //
 // A string field holds UTF-8, so [Codec.Unmarshal], [Codec.UnmarshalDescriptor]
 // and [Decoder.Decode] reject a char[] that is not valid UTF-8. A field carrying
-// another text encoding is declared bytes.
+// another text encoding is declared bytes. For the same reason [Codec.Marshal]
+// cuts a string longer than its (sbe.length) at the last whole character that
+// fits and NUL-pads the rest, while a bytes field is cut at the limit.
 //
 // Supported proto field types:
 //   - Scalar integers (int32, int64, uint32, uint64, sint32, sint64, fixed*, sfixed*)
