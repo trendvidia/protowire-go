@@ -155,6 +155,7 @@ func TestView_BlockLengthTooSmall(t *testing.T) {
 	buf := make([]byte, 8+8)
 	binary.LittleEndian.PutUint16(buf[0:], 4) // blockLength: lie
 	binary.LittleEndian.PutUint16(buf[2:], 2) // templateID: Simple
+	binary.LittleEndian.PutUint16(buf[4:], 1) // schemaID
 
 	err = mustNotPanic(t, "Codec.View(undersized blockLength)", func() error {
 		_, e := codec.View(buf)

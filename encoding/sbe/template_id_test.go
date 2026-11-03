@@ -113,30 +113,53 @@ func TestTemplateIDSameFileTwice(t *testing.T) {
 	require.Equal(t, uint64(42), v.Uint("x"))
 }
 
-// TestTemplateIDAcrossSchemas pins an open question, not a decision (issue
-// #253). Uniqueness is per schema, so two schemas may each have a template 7,
-// and NewCodec binds them. But the codec looks a template up by id alone, so
-// the last one registered wins, and View on bytes Marshal wrote for A
-// resolves them to B. Whether NewCodec should refuse this, or look templates
-// up by (schema id, template id) from the header, is the owner's call. When
-// it is decided, this test changes with it.
+// TestTemplateIDAcrossSchemas: uniqueness is per schema, so two schemas may
+// each use template 7 and both bind. View picks the template from the
+// header's schemaId and templateId together (issue #253, owner's call).
+// Before, it looked the id up alone, found whichever message was registered
+// last, and failed on A's bytes with "wire blockLength 4 < schema
+// blockLength 8 for template 7"; with B's block no longer than A's it would
+// have read A as B with no error.
 func TestTemplateIDAcrossSchemas(t *testing.T) {
 	fds := idFiles(t, []int{1, 2},
-		`message A { option (sbe.template_id) = 7; uint32 x = 1; }`,
+		`message A { option (sbe.template_id) = 7; uint32 x = 1; message Only1 { option (sbe.template_id) = 9; uint32 z = 1; } }`,
 		`message B { option (sbe.template_id) = 7; uint64 y = 1; }`)
+
+	mdA, mdB := fds[0].Messages().ByName("A"), fds[1].Messages().ByName("B")
+	a := dynamicpb.NewMessage(mdA)
+	a.Set(mdA.Fields().ByName("x"), protoreflect.ValueOfUint32(0xA))
+	b := dynamicpb.NewMessage(mdB)
+	b.Set(mdB.Fields().ByName("y"), protoreflect.ValueOfUint64(0xB))
+
+	// Registration order does not matter: each schema's bytes reach their own
+	// message whichever file came last.
+	for _, order := range [][]protoreflect.FileDescriptor{fds, {fds[1], fds[0]}} {
+		codec, err := sbe.NewCodec(order...)
+		require.NoError(t, err, "two schemas may each use template 7")
+		dataA, err := codec.Marshal(a)
+		require.NoError(t, err)
+		dataB, err := codec.Marshal(b)
+		require.NoError(t, err)
+		require.Equal(t, uint16(1), le16(dataA[4:]), "A's header names schema 1")
+		require.Equal(t, uint16(2), le16(dataB[4:]), "B's header names schema 2")
+
+		v, err := codec.View(dataA)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0xA), v.Uint("x"))
+		v, err = codec.View(dataB)
+		require.NoError(t, err)
+		require.Equal(t, uint64(0xB), v.Uint("y"))
+	}
+
+	// Template 9 exists in schema 1 only. A header naming it in schema 2 is
+	// refused, where an id-only lookup would have found it.
 	codec, err := sbe.NewCodec(fds...)
-	require.NoError(t, err, "two schemas may each use template 7")
-
-	md := fds[0].Messages().ByName("A")
-	data, err := codec.Marshal(dynamicpb.NewMessage(md))
 	require.NoError(t, err)
-	require.Equal(t, uint16(1), le16(data[4:]), "the header names A's schema")
-
-	// Unmarshal is given the descriptor and reads A correctly.
-	_, err = codec.UnmarshalDescriptor(data, md)
+	data9, err := codec.Marshal(dynamicpb.NewMessage(mdA.Messages().ByName("Only1")))
 	require.NoError(t, err)
-
-	// View picks the template from the header's template id alone, and finds B.
-	_, err = codec.View(data)
-	require.EqualError(t, err, "sbe: wire blockLength 4 < schema blockLength 8 for template 7")
+	_, err = codec.View(data9)
+	require.NoError(t, err)
+	data9[4] = 2
+	_, err = codec.View(data9)
+	require.EqualError(t, err, "sbe: unknown template ID 9 in schema 2")
 }
