@@ -15,6 +15,7 @@ format changes.
 [#232]: https://github.com/trendvidia/protowire-go/issues/232
 [#234]: https://github.com/trendvidia/protowire-go/issues/234
 [#238]: https://github.com/trendvidia/protowire-go/issues/238
+[#243]: https://github.com/trendvidia/protowire-go/issues/243
 
 ### Added
 
@@ -28,6 +29,7 @@ format changes.
 
 ### Fixed
 
+- **`sbe` cuts an overlong string on a character boundary** ([#243]; trendvidia/protowire#495, draft `-01` § SBE Annotations). A string longer than its `(sbe.length)` was cut at the byte limit, which can split a multi-byte character. `ABCDEFGé` at length 8 was written as `41 42 43 44 45 46 47 C3`, and every strict decoder, this one included, then refused the whole message. It is now cut at the last whole character and NUL-padded: `41 42 43 44 45 46 47 00`. A limit shorter than the first character leaves the field empty. A `bytes` field is still cut at the limit. Only bytes that no strict decoder accepted change.
 - **`pxf.Marshal` no longer writes an Any body that changes the message or cannot be read** ([#232]). With a `TypeResolver`, an Any now gets `@type` and a body only if reading that body gives back its `value`, byte for byte. Otherwise it stays as `type_url` and `value`. That covers unknown fields at any level of the value, field or map order a decoder would not reproduce, a Timestamp no literal can hold, a `@default` or `@required` field left unset, and a chain of Anys deeper than `MaxNestingDepth`. The check uses the default limits, so a reader that lowers `MaxNestingDepth` can still refuse a deep body. Each body is now decoded once while marshalling, which took a one-field-pair Any from about 0.86µs to 2.1µs. Marshal also no longer panics on an Any value holding a map entry with a good key followed by a key of the wrong wire type, a `proto.Unmarshal` panic on `dynamicpb` messages. That value stays as `type_url` and `value`.
 - **`pb.Marshal` writes a `false` map key or value as `false`** ([#238]). Since v1.6.0 it was written as `1`, so it read back as `true`. A map with both `false` and `true` keys came back with one entry. A nil element of a `[]*bool` had the same defect since v1.3.2.
 - **`pb.Unmarshal` reads a `pxf.BigFloat` precision past 32 bits as a protobuf reader does** ([#230]). `prec` is a `uint32`, so a wider varint keeps its low 32 bits. It used to reach `big.Float.SetPrec` whole and be clamped to 2^32-1, so a wire `prec` of 2^32 read as a value at 2^32-1 bits where protobuf-go reads precision 0, a zero. Only a producer that writes such a varint is affected; `pb.Marshal` never does.

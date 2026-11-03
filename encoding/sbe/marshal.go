@@ -5,6 +5,7 @@ package sbe
 
 import (
 	"math"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -81,9 +82,24 @@ func writeField(block []byte, ft fieldTemplate, msg protoreflect.Message) {
 		case protoreflect.BytesKind:
 			copy(block[off:end], val.Bytes())
 		default:
-			copy(block[off:end], val.String())
+			copy(block[off:end], cutString(val.String(), int(ft.size)))
 		}
 	}
+}
+
+// cutString shortens s to at most n bytes without splitting a UTF-8
+// character (draft -01 § SBE Annotations): a byte-exact cut can leave half a
+// character, and a strict decoder then rejects the whole message. The bytes
+// the cut leaves over stay NUL, as the block is zeroed. A bytes field is cut
+// at the limit instead.
+func cutString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func marshalGroup(buf []byte, msg protoreflect.Message, gt groupTemplate) int {

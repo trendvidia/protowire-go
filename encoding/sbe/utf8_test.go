@@ -41,6 +41,27 @@ message Quote {
   Code code = 3;
   repeated Row rows = 4;
 }
+
+message CutCode {
+  string text = 1 [(sbe.length) = 8];
+}
+
+message CutRow {
+  string tag = 1 [(sbe.length) = 8];
+}
+
+message Cut {
+  option (sbe.template_id) = 2;
+  string text = 1 [(sbe.length) = 8];
+  bytes raw = 2 [(sbe.length) = 8];
+  CutCode code = 3;
+  repeated CutRow rows = 4;
+}
+
+message CutTiny {
+  option (sbe.template_id) = 3;
+  string text = 1 [(sbe.length) = 3];
+}
 `
 
 func compileUTF8Proto(t *testing.T) protoreflect.FileDescriptor {
@@ -158,6 +179,82 @@ func TestStringFieldAcceptsValidUTF8(t *testing.T) {
 	require.Equal(t, 1, rows.Len())
 	row := rows.Get(0).Message()
 	require.Equal(t, "😀", row.Get(row.Descriptor().Fields().ByName("tag")).String())
+}
+
+// Draft -01 § SBE Annotations (trendvidia/protowire#495): an overlong string is
+// cut at the last whole character at or before the limit and NUL-padded, so it
+// still decodes; a bytes field is cut at the limit.
+func TestOverlongStringCutOnCharacterBoundary(t *testing.T) {
+	fd := compileUTF8Proto(t)
+	desc := fd.Messages().ByName("Cut")
+	codec, err := sbe.NewCodec(fd)
+	require.NoError(t, err)
+
+	marshal := func(text string) []byte {
+		t.Helper()
+		msg := dynamicpb.NewMessage(desc)
+		fields := desc.Fields()
+		msg.Set(fields.ByName("text"), protoreflect.ValueOfString(text))
+		msg.Set(fields.ByName("raw"), protoreflect.ValueOfBytes([]byte(text)))
+		code := msg.Mutable(fields.ByName("code")).Message()
+		code.Set(code.Descriptor().Fields().ByName("text"), protoreflect.ValueOfString(text))
+		rows := msg.Mutable(fields.ByName("rows")).List()
+		row := rows.NewElement()
+		row.Message().Set(row.Message().Descriptor().Fields().ByName("tag"), protoreflect.ValueOfString(text))
+		rows.Append(row)
+		frame, err := codec.Marshal(msg)
+		require.NoError(t, err)
+		return frame
+	}
+	// Header 8; block: text 0-8, raw 8-16, code.text 16-24; group header 4;
+	// the one row's tag 28-36.
+	const block = 8
+	sites := []struct {
+		name string
+		at   int
+	}{{"root field", block}, {"composite field", block + 16}, {"group field", block + 28}}
+
+	cases := []struct {
+		name, in, text string
+	}{
+		{"2-byte character across the limit", "ABCDEFGé", "ABCDEFG"},
+		{"3-byte character across the limit", "ABCDEF€", "ABCDEF"},
+		{"3-byte character, one byte over", "ABCDE€x", "ABCDE€"},
+		{"4-byte character across the limit", "ABCDE😀", "ABCDE"},
+		{"limit between two 4-byte characters", "😀😀😀", "😀😀"},
+		{"cut already on a boundary", "ABCDEFGHI", "ABCDEFGH"},
+		{"fits exactly", "ABCDEFé", "ABCDEFé"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			frame := marshal(c.in)
+			want := append([]byte(c.text), make([]byte, 8-len(c.text))...)
+			for _, s := range sites {
+				require.Equal(t, want, frame[s.at:s.at+8], s.name)
+			}
+			require.Equal(t, []byte(c.in)[:8], frame[block+8:block+16], "bytes field")
+
+			got, err := codec.UnmarshalDescriptor(frame, desc)
+			require.NoError(t, err)
+			require.Equal(t, c.text, got.Get(desc.Fields().ByName("text")).String())
+		})
+	}
+
+	// The case the issue names, byte for byte.
+	frame := marshal("ABCDEFGé")
+	require.Equal(t, []byte{0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x00}, frame[block:block+8])
+	require.Equal(t, []byte{0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0xC3}, frame[block+8:block+16])
+
+	// A limit shorter than the first character leaves the field empty.
+	tiny := fd.Messages().ByName("CutTiny")
+	msg := dynamicpb.NewMessage(tiny)
+	msg.Set(tiny.Fields().ByName("text"), protoreflect.ValueOfString("😀"))
+	frame, err = codec.Marshal(msg)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0, 0, 0}, frame[block:block+3])
+	got, err := codec.UnmarshalDescriptor(frame, tiny)
+	require.NoError(t, err)
+	require.Equal(t, "", got.Get(tiny.Fields().ByName("text")).String())
 }
 
 // Bad text is a bad message, not a bad stream: the frame was read whole, so the
