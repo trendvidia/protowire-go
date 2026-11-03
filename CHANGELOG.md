@@ -17,6 +17,8 @@ format changes.
 
 ### Changed
 
+- **A NaN is written as the canonical quiet NaN** (trendvidia/protowire-java#161; draft `-01` § Numeric Literals). PXF `nan` used to be stored as `math.NaN()`, whose bits are `0x7FF8000000000001`; it is now stored as `0x7FF8000000000000`, as every other port measured stores it. That covers a double field, a list element, a `DoubleValue` and a `(pxf.default)`, so the PB and SBE bytes for a double `nan` change. `pb.Marshal` also writes any NaN in a struct field canonically, payload or not, for float as well as double. A message's fields are still written as they are, so a NaN read from PB keeps its payload through `proto.Marshal` and the SBE codec. Float `nan` bytes do not change.
+
 - **`Marshal` refuses a message nested past `MaxNestingDepth`** ([#234]), in `pxf` and `pb`, and so do `pb.Encoder` and `pxf.AppendDatasetRow`. This narrows what encodes. A message deeper than 100 levels used to be written with no error, and a default reader then refused it. Levels are counted as a decoder counts them, so lists and maps can reach the limit at 50 levels of nesting. To write deeper, set the new `pxf.MarshalOptions.MaxNestingDepth` or `pb.MarshalOptions.MaxNestingDepth`, with the matching option on every reader; `pb.MarshalOptions.NewEncoder` does the same for a stream. `AppendDatasetRow` has no such option. An Any too deep to unpack stays as `type_url` and `value`, so its contents are never the reason for a refusal. A pointer cycle in `pb.Marshal` is now this error instead of a stack overflow.
 
 ### Fixed

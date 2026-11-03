@@ -335,7 +335,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.Fixed64Type)
-		b = protowire.AppendFixed64(b, math.Float64bits(v))
+		b = protowire.AppendFixed64(b, float64Bits(v))
 
 	case reflect.Float32:
 		v := float32(fv.Float())
@@ -343,7 +343,7 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.Fixed32Type)
-		b = protowire.AppendFixed32(b, math.Float32bits(v))
+		b = protowire.AppendFixed32(b, float32Bits(v))
 
 	case reflect.String:
 		v := fv.String()
@@ -470,9 +470,9 @@ func appendPacked(b []byte, num protowire.Number, fv reflect.Value, zigzag bool)
 		case reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8:
 			payload = protowire.AppendVarint(payload, ev.Uint())
 		case reflect.Float64:
-			payload = protowire.AppendFixed64(payload, math.Float64bits(ev.Float()))
+			payload = protowire.AppendFixed64(payload, float64Bits(ev.Float()))
 		case reflect.Float32:
-			payload = protowire.AppendFixed32(payload, math.Float32bits(float32(ev.Float())))
+			payload = protowire.AppendFixed32(payload, float32Bits(float32(ev.Float())))
 		}
 	}
 	b = protowire.AppendTag(b, num, protowire.BytesType)
@@ -1113,4 +1113,23 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
 		bf.Neg(bf)
 	}
 	return nil
+}
+
+// float64Bits and float32Bits are the bits Marshal writes for a float field.
+// A struct field is a language value, so a NaN is written as the canonical
+// quiet NaN whatever its payload (draft -01 § Numeric Literals;
+// protowire-java#161): Go's math.NaN() is 0x7FF8000000000001, and the same
+// struct in another port's language would hold 0x7FF8000000000000.
+func float64Bits(v float64) uint64 {
+	if v != v {
+		return 0x7FF8000000000000
+	}
+	return math.Float64bits(v)
+}
+
+func float32Bits(v float32) uint32 {
+	if v != v {
+		return 0x7FC00000
+	}
+	return math.Float32bits(v)
 }
