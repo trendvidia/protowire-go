@@ -4,6 +4,7 @@
 package sbe
 
 import (
+	"fmt"
 	"math"
 	"unicode/utf8"
 
@@ -14,8 +15,14 @@ func marshalMessage(msg protoreflect.Message, tmpl *messageTemplate) ([]byte, er
 	// Pre-calculate total size including groups.
 	totalSize := headerSize + int(tmpl.blockLength)
 	for _, gt := range tmpl.groups {
-		list := msg.Get(gt.fd).List()
-		totalSize += groupHeaderSize + list.Len()*int(gt.blockLength)
+		n := msg.Get(gt.fd).List().Len()
+		// numInGroup is a uint16: a larger count would be written as its low
+		// 16 bits, and a reader would take the entries past them for trailing
+		// bytes (issue #250).
+		if n > maxUint16 {
+			return nil, fmt.Errorf("sbe: field %s has %d entries, past %d, the largest numInGroup SBE can state", gt.fd.FullName(), n, maxUint16)
+		}
+		totalSize += groupHeaderSize + n*int(gt.blockLength)
 	}
 
 	buf := make([]byte, totalSize)

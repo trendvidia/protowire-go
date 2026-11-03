@@ -18,6 +18,7 @@ format changes.
 [#244]: https://github.com/trendvidia/protowire-go/issues/244
 [#243]: https://github.com/trendvidia/protowire-go/issues/243
 [#249]: https://github.com/trendvidia/protowire-go/issues/249
+[#250]: https://github.com/trendvidia/protowire-go/issues/250
 
 ### Added
 
@@ -25,6 +26,7 @@ format changes.
 
 ### Changed
 
+- **`sbe.NewCodec` refuses a schema the SBE header cannot describe, and `Marshal` a group it cannot count** ([#250]). This narrows what binds and what encodes. Every SBE header field is a 16-bit number, and the codec used to keep the low 16 bits of a larger one. `bytes b = 1 [(sbe.length) = 65537]` bound as a 1-byte field. A block longer than 65535 bytes, in a message, a group entry or a composite, bound, and then `Marshal` panicked with `slice bounds out of range`. A `(sbe.template_id)`, `(sbe.schema_id)` or `(sbe.version)` of 65537 was written as 1. `NewCodec` now refuses each of these and names the field, message or file; 65535 still binds. `Marshal` refuses a repeated field with more than 65535 entries: 65536 entries used to be written with a count of 0, and the message read back empty with no error.
 - **`sbe.ProtoToXML` writes a `bytes` field as a `uint8` array** ([#249], decided by the owner; draft `-01` § Fixed-Length Arrays, trendvidia/protowire#544). A `bytes` field with `(sbe.length) = N` was written as a `char` array with no `characterEncoding`, which `XMLToProto` reads back as a `string`, so a `bytes` field did not survive a round trip. It is now `primitiveType="uint8" length="N"`, declared once per length as `bytesN` beside the `strN` types. The wire bytes are the same; an SBE code generator now sees a byte array instead of text. A `bytes` field of length 1 is written as `length="1"`, which FIX SBE reads as a single `uint8`, so it reads back as `uint32` with `(sbe.encoding) = "uint8"`: the same byte in the block, not `bytes`.
 - **`sbe.XMLToProto` refuses an array of a primitive wider than a byte** ([#249]). This narrows what imports. A type such as `primitiveType="int32" length="4"` used to import as one `int32`, which misplaced every later field in the block; no proto field holds such an array, so the import now fails and names the type, the field and the message.
 - **`sbe.XMLToProto` imports a char type in a non-UTF-8 encoding as `bytes`** (trendvidia/protowire#494, decided by the owner). The importer ignored `characterEncoding`, so a char declared as, say, `ISO-8859-1` became a `string`, and a byte that is not UTF-8 then failed the whole message at run time with no warning at import. Such a field is now `bytes` with the same `(sbe.length)`, with a comment naming the encoding. A char with no encoding (FIX SBE's default is US-ASCII), or with a US-ASCII or UTF-8 name or IANA alias, stays a `string`, so no schema that worked before changes. Names are compared ignoring case and punctuation.
