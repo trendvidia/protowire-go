@@ -58,7 +58,8 @@ type UnmarshalOptions struct {
 	// MaxMessageSize caps the input to this call and is checked before
 	// anything is read; MaxNestingDepth caps submessage / map-entry
 	// recursion; MaxNumericLiteralDigits bounds the magnitude of a
-	// pxf.Decimal's scale; MaxBigFloatExponent the magnitude of a
+	// pxf.Decimal's scale and the digits a pxf.BigFloat's prec implies
+	// (13603 bits at the default); MaxBigFloatExponent the magnitude of a
 	// pxf.BigFloat's exponent; MaxRepeatedCount caps the element count of
 	// any repeated or map field.
 	MaxMessageSize          int

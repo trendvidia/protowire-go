@@ -57,6 +57,8 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/protobuf/encoding/protowire"
+
+	"github.com/trendvidia/protowire-go/internal/bigprec"
 )
 
 var (
@@ -80,7 +82,10 @@ const MaxNestingDepth = 100
 // numeric-literal digit cap is the bound rather than a new one: a
 // Decimal with scale 4096 is the wire form of a 4096-digit literal.
 //
-// BigFloat.exponent has a bound of its own, MaxBigFloatExponent.
+// It also bounds BigFloat.prec, as it bounds a literal's precision suffix:
+// a prec whose literal needs more than this many digits, above 13603 at the
+// default, is rejected (protowire#499). BigFloat.exponent has a bound of
+// its own, MaxBigFloatExponent.
 const MaxNumericLiteralDigits = 4096
 
 // MaxBigFloatExponent bounds the magnitude of a BigFloat value's binary
@@ -660,7 +665,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 			}
 		case bigFloatType:
 			bf := fv.Addr().Interface().(*big.Float)
-			if err := unmarshalBigFloatMsg(v, bf, lim.maxBigFloatExp); err != nil {
+			if err := unmarshalBigFloatMsg(v, bf, lim.maxBigFloatExp, lim.maxDigits); err != nil {
 				return 0, err
 			}
 		default:
@@ -791,13 +796,15 @@ func marshalBigFloat(bf *big.Float) ([]byte, error) {
 		}
 		return nil, nil
 	}
-	// The wire mantissa is the value scaled up to prec bits, and scaling a
-	// value to 2^31 bits or more leaves big.Float's range: the shift below
-	// gives +Inf, and mant.Int returns nil for that. Unmarshal stores any
-	// uint32 precision without touching those bits, so eleven bytes reach
-	// this (#229). A zero has no mantissa to scale, and keeps its precision.
-	if prec > math.MaxInt32 && bf.Sign() != 0 {
-		return nil, fmt.Errorf("pxf.BigFloat precision %d exceeds the widest mantissa big.Float can hold, %d bits", prec, math.MaxInt32)
+	// The wire mantissa is the value scaled up to prec bits, so prec sets
+	// the size of what is written, and a conformant decoder rejects a prec
+	// past the bound a precision suffix has (protowire#499); writing one
+	// would produce bytes this package's own Unmarshal refuses, as for the
+	// exponent below. A zero is bounded too: it carries its prec. The
+	// bound also keeps the shift below inside big.Float's range, which a
+	// prec of 2^31 or more leaves, giving +Inf and a nil mant.Int (#229).
+	if n, ok := bigprec.Digits(uint32(prec), MaxNumericLiteralDigits); !ok {
+		return nil, fmt.Errorf("pxf.BigFloat prec %d implies %d digits; MaxNumericLiteralDigits=%d", prec, n, MaxNumericLiteralDigits)
 	}
 	mant := new(big.Float).SetPrec(prec)
 	exp := bf.MantExp(mant)
@@ -1026,7 +1033,7 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat, maxDigits int) error {
 	return nil
 }
 
-func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
+func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp, maxDigits int) error {
 	var mantBytes []byte
 	var exp int32
 	var prec uint
@@ -1088,6 +1095,15 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
 			bf.Neg(bf)
 		}
 		return nil
+	}
+	// prec is bounded as a literal's precision suffix is: by the digits N
+	// its literal needs, which MaxNumericLiteralDigits caps (prec 13603 at
+	// the default). Marshal writes the mantissa widened to prec bits, so an
+	// 11-byte message at prec 2^31-1 re-encoded to 256 MiB. Checked before
+	// anything is built for the value (draft -01 § Mandatory Limits,
+	// protowire#499).
+	if n, ok := bigprec.Digits(uint32(prec), maxDigits); !ok {
+		return fmt.Errorf("pxf.BigFloat prec %d implies %d digits; MaxNumericLiteralDigits=%d", prec, n, maxDigits)
 	}
 	// Storing the exponent is cheap: big.Float keeps it as an int32, and
 	// SetMantExp adds to it without allocating, measured flat at ~4µs from

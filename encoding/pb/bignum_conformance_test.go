@@ -313,6 +313,13 @@ func TestBignumConformance_SchemaBytesAreReadableHere(t *testing.T) {
 				}
 
 				got := &conformanceStruct{Price: new(big.Rat), Coefficient: new(big.Float)}
+				// The low 32 bits are what the prec bound sees too
+				// (protowire#499): 2^32+53 is 53 bits and reads, and only
+				// ^uint64(0), 2^32-1 bits, is past the bound.
+				if prec > 13603 {
+					require.ErrorContains(t, pb.Unmarshal(wrap(2, sub), got), "MaxNumericLiteralDigits", "prec %d", wirePrec)
+					continue
+				}
 				require.NoError(t, pb.Unmarshal(wrap(2, sub), got), "prec %d", wirePrec)
 				assert.Equal(t, prec, got.Coefficient.Prec(), "wire prec %d", wirePrec)
 				assert.Zero(t, want.Cmp(got.Coefficient), "wire prec %d: got %s, want %s",

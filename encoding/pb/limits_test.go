@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"math"
 	"math/big"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +212,47 @@ func TestBigFloatExponentBoundEdges(t *testing.T) {
 	})
 }
 
+// TestBigFloatPrecBound: a BigFloat's prec is bounded as a precision
+// suffix is, by the digits N its literal needs (protowire#499): 13603 bits
+// at the default reads, 13604 does not. Marshal writes the mantissa widened
+// to prec bits, so an 11-byte message at 2^31-1 re-encoded to 256 MiB; it
+// is refused before anything is built for it.
+func TestBigFloatPrecBound(t *testing.T) {
+	var h bigFloatHolder
+	if err := Unmarshal(bigFloatWire([]byte{0x19}, -3, 13603), &h); err != nil {
+		t.Fatalf("prec 13603: %v", err)
+	}
+	if h.F.Prec() != 13603 || h.F.Cmp(big.NewFloat(3.125)) != 0 {
+		t.Fatalf("prec 13603 reads as %v at prec %d, want 3.125 at 13603", h.F, h.F.Prec())
+	}
+	for _, prec := range []uint32{13604, 1 << 27, math.MaxInt32, math.MaxUint32} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		err := Unmarshal(bigFloatWire([]byte{0x19}, -3, prec), &h)
+		runtime.ReadMemStats(&after)
+		if err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits=4096") {
+			t.Fatalf("prec %d: err = %v, want the prec bound", prec, err)
+		}
+		// A widened mantissa at 2^27 bits is 16 MiB; the refusal is a
+		// few small allocations.
+		if got := after.TotalAlloc - before.TotalAlloc; got > 64<<10 {
+			t.Fatalf("prec %d: refusing allocated %d bytes", prec, got)
+		}
+	}
+	// The bound is a per-call limit, through MaxNumericLiteralDigits: 2^29
+	// has 9 digits, so N is 10, and 2^30 has 10.
+	if err := (UnmarshalOptions{MaxNumericLiteralDigits: 10}).Unmarshal(bigFloatWire([]byte{0x19}, -3, 29), &h); err != nil {
+		t.Fatalf("MaxNumericLiteralDigits=10, prec 29: %v", err)
+	}
+	if err := (UnmarshalOptions{MaxNumericLiteralDigits: 10}).Unmarshal(bigFloatWire([]byte{0x19}, -3, 30), &h); err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits=10") {
+		t.Fatalf("MaxNumericLiteralDigits=10, prec 30: err = %v", err)
+	}
+	if err := (UnmarshalOptions{MaxNumericLiteralDigits: 5000}).Unmarshal(bigFloatWire([]byte{0x19}, -3, 13604), &h); err != nil {
+		t.Fatalf("MaxNumericLiteralDigits=5000, prec 13604: %v", err)
+	}
+}
+
 // TestMarshalRefusesWhatUnmarshalRejects: the encoders refuse a value the
 // wire cannot carry, instead of writing bytes no conformant decoder
 // accepts (a scale past the limit), a wrong exponent (int32 wrap), or
@@ -251,9 +293,10 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 		}
 	})
 	t.Run("BigFloat precision too wide to scale", func(t *testing.T) {
-		const want = "exceeds the widest mantissa"
-		// #229's eleven bytes: Unmarshal stores the precision, and Marshal
-		// used to dereference nil. A varint past uint32 keeps its low 32
+		const want = "MaxNumericLiteralDigits=4096"
+		// #229's eleven bytes: Unmarshal stored the precision, and Marshal
+		// used to dereference nil. Unmarshal now refuses the precision
+		// itself (protowire#499). A varint past uint32 keeps its low 32
 		// bits (#230), so 1<<32 + 1<<31 is 1<<31 again.
 		for _, prec := range []uint64{1 << 31, 1<<31 + 1, big.MaxPrec, 1<<32 + 1<<31} {
 			sub := protowire.AppendTag(nil, 1, protowire.BytesType)
@@ -265,23 +308,33 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 				t.Fatalf("wire = % x, not the reported message", wire)
 			}
 			h := &bigFloatHolder{F: new(big.Float)}
-			if err := Unmarshal(wire, h); err != nil {
-				t.Fatalf("prec %d: Unmarshal: %v", prec, err)
-			}
-			if _, err := Marshal(h); err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("prec %d: Marshal err = %v, want %q", prec, err, want)
+			if err := Unmarshal(wire, h); err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits") {
+				t.Fatalf("prec %d: Unmarshal err = %v, want the prec bound", prec, err)
 			}
 		}
-		// The same value built in memory, on both signs and through a list.
-		neg := new(big.Float).SetPrec(1 << 31).SetInt64(-3)
-		if _, err := Marshal(&bigFloatHolder{F: neg}); err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("negative: err = %v, want %q", err, want)
-		}
+		// The same value built in memory, on both signs and through a list,
+		// and the one past the bound: Marshal refuses what Unmarshal would.
 		type list struct {
 			F []*big.Float `protowire:"1"`
 		}
-		if _, err := Marshal(&list{F: []*big.Float{neg}}); err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("list element: err = %v, want %q", err, want)
+		for _, prec := range []uint{1 << 31, 13604} {
+			neg := new(big.Float).SetPrec(prec).SetInt64(-3)
+			if _, err := Marshal(&bigFloatHolder{F: neg}); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("prec %d negative: err = %v, want %q", prec, err, want)
+			}
+			if _, err := Marshal(&list{F: []*big.Float{neg}}); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("prec %d list element: err = %v, want %q", prec, err, want)
+			}
+		}
+		// At the bound the value is written and reads back.
+		at := new(big.Float).SetPrec(13603).SetInt64(-3)
+		out, err := Marshal(&bigFloatHolder{F: at})
+		if err != nil {
+			t.Fatalf("prec 13603: %v", err)
+		}
+		var back bigFloatHolder
+		if err := Unmarshal(out, &back); err != nil || back.F.Cmp(at) != 0 || back.F.Prec() != 13603 {
+			t.Fatalf("prec 13603 round trip: %v at prec %d, %v", back.F, back.F.Prec(), err)
 		}
 	})
 	t.Run("BigFloat exponent below int32 after adjustment", func(t *testing.T) {
