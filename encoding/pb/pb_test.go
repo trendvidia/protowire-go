@@ -4,6 +4,7 @@
 package pb
 
 import (
+	"bytes"
 	"math"
 	"math/big"
 	"reflect"
@@ -557,6 +558,36 @@ func TestRepeatedBigNumZeroElements(t *testing.T) {
 		if orig.Rats[i].Cmp(&got.Rats[i]) != 0 {
 			t.Errorf("Rats[%d] = %v, want %v", i, &got.Rats[i], &orig.Rats[i])
 		}
+	}
+}
+
+func TestFalseBoolElements(t *testing.T) {
+	// #238: a false bool that is an element — a map value, or a nil
+	// pointer element standing for its zero — is written as 0, not 1.
+	type flags struct {
+		M map[string]bool `protowire:"1"`
+		P []*bool         `protowire:"2"`
+	}
+	f := false
+	orig := &flags{M: map[string]bool{"a": false}, P: []*bool{nil, &f}}
+
+	data, err := Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := []byte{0x0a, 0x05, 0x0a, 0x01, 'a', 0x10, 0x00, 0x10, 0x00, 0x10, 0x00}
+	if !bytes.Equal(data, want) {
+		t.Errorf("Marshal = % x, want % x", data, want)
+	}
+	got := &flags{}
+	if err := Unmarshal(data, got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if v, ok := got.M["a"]; !ok || v {
+		t.Errorf(`M["a"] = %v (present %v), want false`, v, ok)
+	}
+	if len(got.P) != 2 || got.P[0] == nil || *got.P[0] || got.P[1] == nil || *got.P[1] {
+		t.Errorf("P = %v, want two pointers to false", got.P)
 	}
 }
 
