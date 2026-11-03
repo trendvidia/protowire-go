@@ -14,6 +14,10 @@ format changes.
 [#232]: https://github.com/trendvidia/protowire-go/issues/232
 [#234]: https://github.com/trendvidia/protowire-go/issues/234
 
+### Added
+
+- **`check_decode --format pxf-pb`** writes the PB bytes for a PXF document on stdout, for the spec's write gate (trendvidia/protowire#509). It decodes as `dump_envelope` does, with the full decode, and writes deterministically, so map entries are in key order. Its output is the golden every port is compared with. The library is unchanged.
+
 ### Changed
 
 - **`Marshal` refuses a message nested past `MaxNestingDepth`** ([#234]), in `pxf` and `pb`, and so do `pb.Encoder` and `pxf.AppendDatasetRow`. This narrows what encodes. A message deeper than 100 levels used to be written with no error, and a default reader then refused it. Levels are counted as a decoder counts them, so lists and maps can reach the limit at 50 levels of nesting. To write deeper, set the new `pxf.MarshalOptions.MaxNestingDepth` or `pb.MarshalOptions.MaxNestingDepth`, with the matching option on every reader; `pb.MarshalOptions.NewEncoder` does the same for a stream. `AppendDatasetRow` has no such option. An Any too deep to unpack stays as `type_url` and `value`, so its contents are never the reason for a refusal. A pointer cycle in `pb.Marshal` is now this error instead of a stack overflow.
