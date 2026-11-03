@@ -30,6 +30,7 @@ func ProtoToXML(files ...protoreflect.FileDescriptor) ([]byte, error) {
 
 	// Pre-collect types needed for the <types> section.
 	strLengths := make(map[uint32]bool)
+	bytesLengths := make(map[uint32]bool)
 	var composites []protoreflect.MessageDescriptor
 	compSeen := make(map[protoreflect.FullName]bool)
 	var enums []protoreflect.EnumDescriptor
@@ -48,7 +49,7 @@ func ProtoToXML(files ...protoreflect.FileDescriptor) ([]byte, error) {
 	for i := 0; i < msgs.Len(); i++ {
 		md := msgs.Get(i)
 		if _, ok := getMessageUint32Option(md, extTemplateID); ok {
-			collectXMLTypes(md, strLengths, &composites, compSeen, &enums, enumSeen)
+			collectXMLTypes(md, strLengths, bytesLengths, &composites, compSeen, &enums, enumSeen)
 		} else {
 			// Non-template top-level message → composite.
 			if !compSeen[md.FullName()] {
@@ -57,13 +58,6 @@ func ProtoToXML(files ...protoreflect.FileDescriptor) ([]byte, error) {
 			}
 		}
 	}
-
-	// Sort string lengths for deterministic output.
-	var lengths []uint32
-	for l := range strLengths {
-		lengths = append(lengths, l)
-	}
-	sort.Slice(lengths, func(i, j int) bool { return lengths[i] < lengths[j] })
 
 	var b strings.Builder
 
@@ -89,9 +83,12 @@ func ProtoToXML(files ...protoreflect.FileDescriptor) ([]byte, error) {
 	b.WriteString("            <type name=\"numInGroup\" primitiveType=\"uint16\"/>\n")
 	b.WriteString("        </composite>\n")
 
-	// Named string types.
-	for _, l := range lengths {
-		fmt.Fprintf(&b, "        <type name=\"str%d\" primitiveType=\"char\" length=\"%d\"/>\n", l, l)
+	// Named string and bytes types, sorted for deterministic output.
+	for _, l := range sortedLengths(strLengths) {
+		fmt.Fprintf(&b, "        <type name=\"%s\" primitiveType=\"char\" length=\"%d\"/>\n", strTypeName(l), l)
+	}
+	for _, l := range sortedLengths(bytesLengths) {
+		fmt.Fprintf(&b, "        <type name=\"%s\" primitiveType=\"uint8\" length=\"%d\"/>\n", bytesTypeName(l), l)
 	}
 
 	// Enums.
@@ -119,7 +116,22 @@ func ProtoToXML(files ...protoreflect.FileDescriptor) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-func collectXMLTypes(md protoreflect.MessageDescriptor, strLengths map[uint32]bool,
+// sortedLengths returns the lengths in set in ascending order.
+func sortedLengths(set map[uint32]bool) []uint32 {
+	lengths := make([]uint32, 0, len(set))
+	for l := range set {
+		lengths = append(lengths, l)
+	}
+	sort.Slice(lengths, func(i, j int) bool { return lengths[i] < lengths[j] })
+	return lengths
+}
+
+// strTypeName and bytesTypeName name the <types> entry a field of that
+// fixed length refers to.
+func strTypeName(length uint32) string   { return fmt.Sprintf("str%d", length) }
+func bytesTypeName(length uint32) string { return fmt.Sprintf("bytes%d", length) }
+
+func collectXMLTypes(md protoreflect.MessageDescriptor, strLengths, bytesLengths map[uint32]bool,
 	composites *[]protoreflect.MessageDescriptor, compSeen map[protoreflect.FullName]bool,
 	enums *[]protoreflect.EnumDescriptor, enumSeen map[protoreflect.FullName]bool) {
 
@@ -137,9 +149,12 @@ func collectXMLTypes(md protoreflect.MessageDescriptor, strLengths map[uint32]bo
 	for i := 0; i < fields.Len(); i++ {
 		f := fields.Get(i)
 
-		if f.Kind() == protoreflect.StringKind || f.Kind() == protoreflect.BytesKind {
-			if length, ok := getFieldUint32Option(f, extLength); ok {
+		if length, ok := getFieldUint32Option(f, extLength); ok {
+			switch f.Kind() {
+			case protoreflect.StringKind:
 				strLengths[length] = true
+			case protoreflect.BytesKind:
+				bytesLengths[length] = true
 			}
 		}
 
@@ -153,13 +168,13 @@ func collectXMLTypes(md protoreflect.MessageDescriptor, strLengths map[uint32]bo
 
 		if f.Kind() == protoreflect.MessageKind {
 			if f.IsList() {
-				collectXMLTypes(f.Message(), strLengths, composites, compSeen, enums, enumSeen)
+				collectXMLTypes(f.Message(), strLengths, bytesLengths, composites, compSeen, enums, enumSeen)
 			} else {
 				msgDesc := f.Message()
 				if !compSeen[msgDesc.FullName()] {
 					compSeen[msgDesc.FullName()] = true
 					*composites = append(*composites, msgDesc)
-					collectXMLTypes(msgDesc, strLengths, composites, compSeen, enums, enumSeen)
+					collectXMLTypes(msgDesc, strLengths, bytesLengths, composites, compSeen, enums, enumSeen)
 				}
 			}
 		}
@@ -227,11 +242,7 @@ func p2xWriteField(b *strings.Builder, fd protoreflect.FieldDescriptor, indent s
 	}
 
 	info := protoFieldToSBEType(fd)
-	if info.length > 0 {
-		fmt.Fprintf(b, "%s<field name=\"%s\" id=\"%d\" type=\"str%d\"/>\n", indent, fieldName, fieldID, info.length)
-	} else {
-		fmt.Fprintf(b, "%s<field name=\"%s\" id=\"%d\" type=\"%s\"/>\n", indent, fieldName, fieldID, info.xmlType)
-	}
+	fmt.Fprintf(b, "%s<field name=\"%s\" id=\"%d\" type=\"%s\"/>\n", indent, fieldName, fieldID, info.xmlType)
 }
 
 func p2xWriteGroup(b *strings.Builder, fd protoreflect.FieldDescriptor, indent string) {
@@ -251,8 +262,10 @@ func p2xWriteGroup(b *strings.Builder, fd protoreflect.FieldDescriptor, indent s
 
 type sbeTypeInfo struct {
 	primitiveType string
-	xmlType       string
-	length        uint32
+	// xmlType is what a <field> names: the primitive, or for a fixed-length
+	// array the <types> entry declared for its length.
+	xmlType string
+	length  uint32
 }
 
 func protoFieldToSBEType(fd protoreflect.FieldDescriptor) sbeTypeInfo {
@@ -260,9 +273,20 @@ func protoFieldToSBEType(fd protoreflect.FieldDescriptor) sbeTypeInfo {
 		return sbeTypeInfo{primitiveType: enc, xmlType: enc}
 	}
 
+	// A bytes field is a uint8 array, not a char array: a char array imports
+	// back as a string, and a char in a non-UTF-8 encoding as bytes only
+	// because nothing carries the encoding. Both are the same N bytes on the
+	// wire.
 	if fd.Kind() == protoreflect.StringKind || fd.Kind() == protoreflect.BytesKind {
-		length, _ := getFieldUint32Option(fd, extLength)
-		return sbeTypeInfo{primitiveType: "char", xmlType: "char", length: length}
+		length, ok := getFieldUint32Option(fd, extLength)
+		switch {
+		case !ok || length == 0:
+			return sbeTypeInfo{primitiveType: "char", xmlType: "char"}
+		case fd.Kind() == protoreflect.BytesKind:
+			return sbeTypeInfo{primitiveType: "uint8", xmlType: bytesTypeName(length), length: length}
+		default:
+			return sbeTypeInfo{primitiveType: "char", xmlType: strTypeName(length), length: length}
+		}
 	}
 
 	switch fd.Kind() {

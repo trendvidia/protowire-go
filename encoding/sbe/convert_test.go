@@ -5,6 +5,7 @@ package sbe_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -457,4 +458,165 @@ func TestXMLToProtoCharacterEncoding(t *testing.T) {
 	got := dynamicpb.NewMessage(desc)
 	require.NoError(t, codec.Unmarshal(data, got))
 	require.Equal(t, latin1, got.Get(desc.Fields().ByName("latin1")).Bytes())
+}
+
+// fixedArraySchema has the two fixed-length arrays that are not text: a char
+// in a non-UTF-8 encoding and a uint8 array, each followed by a field whose
+// offset moves if the array's length is lost (#249).
+const fixedArraySchema = `<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="arr.v1" id="3" version="0" byteOrder="littleEndian">
+    <types>
+        <type name="Latin1" primitiveType="char" length="4" characterEncoding="ISO-8859-1"/>
+        <type name="Uuid" primitiveType="uint8" length="16"/>
+        <type name="Signed" primitiveType="int8" length="3"/>
+        <composite name="Key">
+            <type name="raw" primitiveType="uint8" length="6"/>
+            <type name="seq" primitiveType="uint32"/>
+        </composite>
+    </types>
+    <sbe:message name="Record" id="1">
+        <field name="name" id="1" type="Latin1"/>
+        <field name="uuid" id="2" type="Uuid"/>
+        <field name="signed" id="3" type="Signed"/>
+        <field name="key" id="4" type="Key"/>
+        <field name="tail" id="5" type="uint32"/>
+    </sbe:message>
+</sbe:messageSchema>`
+
+// A uint8 or int8 array imports as bytes of the same length, so the block
+// keeps its layout; before #249 it imported as one uint8.
+func TestXMLToProtoOctetArray(t *testing.T) {
+	protoBytes, err := sbe.XMLToProto([]byte(fixedArraySchema))
+	require.NoError(t, err)
+	proto := string(protoBytes)
+	for _, line := range []string{
+		`bytes uuid = 2 [(sbe.length) = 16];`,
+		`bytes signed = 3 [(sbe.length) = 3];`,
+		`bytes raw = 1 [(sbe.length) = 6];`,
+		`uint32 tail = 5;`,
+	} {
+		require.Contains(t, proto, line)
+	}
+
+	fd := compileProtoSource(t, proto)
+	codec, err := sbe.NewCodec(fd)
+	require.NoError(t, err)
+
+	desc := fd.Messages().ByName("Record")
+	msg := dynamicpb.NewMessage(desc)
+	uuid := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0xFF}
+	msg.Set(desc.Fields().ByName("uuid"), protoreflect.ValueOfBytes(uuid))
+	msg.Set(desc.Fields().ByName("tail"), protoreflect.ValueOfUint32(0xA1B2C3D4))
+	data, err := codec.Marshal(msg)
+	require.NoError(t, err)
+	// Header(8) + name(4) + uuid(16) + signed(3) + key(6+4) + tail(4).
+	require.Len(t, data, 8+4+16+3+10+4)
+	require.Equal(t, uuid, data[12:28])
+	require.Equal(t, []byte{0xD4, 0xC3, 0xB2, 0xA1}, data[len(data)-4:])
+
+	got := dynamicpb.NewMessage(desc)
+	require.NoError(t, codec.Unmarshal(data, got))
+	require.Equal(t, uuid, got.Get(desc.Fields().ByName("uuid")).Bytes())
+	require.Equal(t, uint64(0xA1B2C3D4), got.Get(desc.Fields().ByName("tail")).Uint())
+}
+
+// An array of a wider primitive has no proto field that holds it, so the
+// import refuses it and names it rather than misplacing the fields after it.
+func TestXMLToProtoRefusesWideArray(t *testing.T) {
+	for _, tc := range []struct{ name, types, field string }{
+		{"field", `<type name="Quad" primitiveType="int32" length="4"/>`, `<field name="q" id="1" type="Quad"/>`},
+		{"composite", `<composite name="Box"><type name="sides" primitiveType="uint16" length="2"/></composite>`, `<field name="b" id="1" type="Box"/>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := `<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe" package="w" id="1" version="0" byteOrder="littleEndian">
+    <types>` + tc.types + `</types>
+    <sbe:message name="M" id="1">` + tc.field + `</sbe:message>
+</sbe:messageSchema>`
+			_, err := sbe.XMLToProto([]byte(schema))
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "which no proto field represents")
+		})
+	}
+	_, err := sbe.XMLToProto([]byte(strings.Replace(fixedArraySchema, `primitiveType="uint8" length="16"`, `primitiveType="uint64" length="2"`, 1)))
+	require.EqualError(t, err, `sbe: message "Record": field "uuid": type "Uuid" is an array of 2 uint64, which no proto field represents`)
+}
+
+// XML → proto → XML → proto keeps every field's proto type, its SBE
+// annotations, and the block layout (#249). Before, ProtoToXML wrote a bytes
+// field as a char with no encoding, which imports back as a string.
+func TestXMLRoundTripFixedArrays(t *testing.T) {
+	proto1, err := sbe.XMLToProto([]byte(fixedArraySchema))
+	require.NoError(t, err)
+	fd1 := compileProtoSource(t, string(proto1))
+
+	xml2, err := sbe.ProtoToXML(fd1)
+	require.NoError(t, err)
+	require.Contains(t, string(xml2), `<type name="bytes16" primitiveType="uint8" length="16"/>`)
+	require.Contains(t, string(xml2), `<field name="name" id="1" type="bytes4"/>`)
+	require.Contains(t, string(xml2), `<type name="raw" primitiveType="uint8" length="6"/>`)
+
+	proto2, err := sbe.XMLToProto(xml2)
+	require.NoError(t, err)
+	fd2 := compileProtoSource(t, string(proto2))
+
+	for _, name := range []protoreflect.Name{"Record", "Key"} {
+		require.Equal(t, fieldShapes(fd1.Messages().ByName(name)), fieldShapes(fd2.Messages().ByName(name)), "message %s", name)
+	}
+
+	// The same values encode to the same bytes under both schemas.
+	encode := func(fd protoreflect.FileDescriptor) []byte {
+		codec, err := sbe.NewCodec(fd)
+		require.NoError(t, err)
+		desc := fd.Messages().ByName("Record")
+		msg := dynamicpb.NewMessage(desc)
+		msg.Set(desc.Fields().ByName("name"), protoreflect.ValueOfBytes([]byte{'c', 'a', 'f', 0xE9}))
+		msg.Set(desc.Fields().ByName("uuid"), protoreflect.ValueOfBytes([]byte("0123456789abcdef")))
+		msg.Set(desc.Fields().ByName("signed"), protoreflect.ValueOfBytes([]byte{0x80, 0x7F, 0x01}))
+		key := desc.Fields().ByName("key")
+		km := msg.Mutable(key).Message()
+		km.Set(key.Message().Fields().ByName("raw"), protoreflect.ValueOfBytes([]byte("abcdef")))
+		km.Set(key.Message().Fields().ByName("seq"), protoreflect.ValueOfUint32(7))
+		msg.Set(desc.Fields().ByName("tail"), protoreflect.ValueOfUint32(9))
+		data, err := codec.Marshal(msg)
+		require.NoError(t, err)
+		return data
+	}
+	require.Equal(t, encode(fd1), encode(fd2))
+}
+
+// fieldShapes lists each field's number, name, proto kind and SBE
+// annotations, the parts of a field that decide its type and block layout.
+func fieldShapes(md protoreflect.MessageDescriptor) []string {
+	var out []string
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		f := fields.Get(i)
+		opts := f.Options().(interface{ String() string }).String()
+		out = append(out, fmt.Sprintf("%d %s %s [%s]", f.Number(), f.Name(), f.Kind(), opts))
+	}
+	return out
+}
+
+// A bytes field of length 1 exports as a uint8 with length 1, which FIX SBE
+// reads as a single uint8, so it imports back as uint32 with
+// (sbe.encoding) = "uint8": the same one byte in the block, but not bytes.
+// Pinned so a change to that reading is a decision, not an accident.
+func TestXMLRoundTripBytesLengthOne(t *testing.T) {
+	fd := compileProtoSource(t, `syntax = "proto3";
+package one.v1;
+import "sbe/annotations.proto";
+option (sbe.schema_id) = 1;
+message M {
+  option (sbe.template_id) = 1;
+  bytes b = 1 [(sbe.length) = 1];
+}
+`)
+	xmlBytes, err := sbe.ProtoToXML(fd)
+	require.NoError(t, err)
+	require.Contains(t, string(xmlBytes), `<type name="bytes1" primitiveType="uint8" length="1"/>`)
+	proto, err := sbe.XMLToProto(xmlBytes)
+	require.NoError(t, err)
+	require.Contains(t, string(proto), `uint32 b = 1 [(sbe.encoding) = "uint8"];`)
 }
