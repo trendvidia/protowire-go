@@ -1058,7 +1058,11 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp int) error {
 			if vn < 0 {
 				return fmt.Errorf("corrupt prec in BigFloat")
 			}
-			prec = uint(v)
+			// uint32: keep the low 32 bits, as a protobuf reader does
+			// and as exponent does above. The whole varint reached
+			// SetPrec, which clamped it to MaxPrec, so 2^32 read as
+			// 2^32-1 bits rather than as precision 0 (#230).
+			prec = uint(uint32(v))
 			data = data[vn:]
 		case 4:
 			v, vn := protowire.ConsumeVarint(data)

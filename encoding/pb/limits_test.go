@@ -253,8 +253,9 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 	t.Run("BigFloat precision too wide to scale", func(t *testing.T) {
 		const want = "exceeds the widest mantissa"
 		// #229's eleven bytes: Unmarshal stores the precision, and Marshal
-		// used to dereference nil. Above uint32 the varint clamps to MaxPrec.
-		for _, prec := range []uint64{1 << 31, 1<<31 + 1, big.MaxPrec, 1 << 32} {
+		// used to dereference nil. A varint past uint32 keeps its low 32
+		// bits (#230), so 1<<32 + 1<<31 is 1<<31 again.
+		for _, prec := range []uint64{1 << 31, 1<<31 + 1, big.MaxPrec, 1<<32 + 1<<31} {
 			sub := protowire.AppendTag(nil, 1, protowire.BytesType)
 			sub = protowire.AppendBytes(sub, []byte{0x19})
 			sub = protowire.AppendTag(sub, 3, protowire.VarintType)
