@@ -272,6 +272,55 @@ func TestBignumConformance_SchemaBytesAreReadableHere(t *testing.T) {
 		assert.Zero(t, big.NewFloat(1).Cmp(got.Coefficient),
 			"got %s", got.Coefficient.Text('g', 20))
 	})
+
+	// prec is a uint32, and a varint wider than 32 bits keeps its low 32
+	// bits in a protobuf reader. Unmarshal used to keep the whole varint,
+	// and big.Float.SetPrec clamped it to MaxPrec: 2^32 read as 2^32-1
+	// bits here and as precision 0, a zero, to the schema (#230).
+	t.Run("prec varint past uint32", func(t *testing.T) {
+		for _, wirePrec := range []uint64{
+			1 << 32, 1<<32 + 1, 1<<32 + 53, 1<<33 + 64, 1<<63 + 53, ^uint64(0),
+		} {
+			for _, neg := range []bool{false, true} {
+				// 25 x 2^-3 at whatever precision the wire's low bits say.
+				sub := protowire.AppendTag(nil, 1, protowire.BytesType)
+				sub = protowire.AppendBytes(sub, []byte{0x19})
+				sub = protowire.AppendTag(sub, 2, protowire.VarintType)
+				exp := int64(-3)
+				sub = protowire.AppendVarint(sub, uint64(exp))
+				sub = protowire.AppendTag(sub, 3, protowire.VarintType)
+				sub = protowire.AppendVarint(sub, wirePrec)
+				if neg {
+					sub = protowire.AppendTag(sub, 4, protowire.VarintType)
+					sub = protowire.AppendVarint(sub, 1)
+				}
+
+				oracle := dynamicpb.NewMessage(bigFloatDesc)
+				require.NoError(t, proto.Unmarshal(sub, oracle))
+				prec := uint(oracle.Get(bigFloatDesc.Fields().ByName("prec")).Uint())
+				require.Equal(t, uint(uint32(wirePrec)), prec, "the oracle keeps the low 32 bits")
+
+				// The schema's value: precision 0 is a zero signed by
+				// negative, as in Unmarshal; otherwise mantissa x 2^exponent
+				// rounded to prec.
+				want := new(big.Float).SetPrec(prec)
+				if prec != 0 {
+					want.SetInt(new(big.Int).SetBytes(oracle.Get(bigFloatDesc.Fields().ByName("mantissa")).Bytes()))
+					want.SetMantExp(want, int(intField(oracle, "exponent")))
+				}
+				if neg {
+					want.Neg(want)
+				}
+
+				got := &conformanceStruct{Price: new(big.Rat), Coefficient: new(big.Float)}
+				require.NoError(t, pb.Unmarshal(wrap(2, sub), got), "prec %d", wirePrec)
+				assert.Equal(t, prec, got.Coefficient.Prec(), "wire prec %d", wirePrec)
+				assert.Zero(t, want.Cmp(got.Coefficient), "wire prec %d: got %s, want %s",
+					wirePrec, got.Coefficient.Text('g', 20), want.Text('g', 20))
+				assert.Equal(t, neg, got.Coefficient.Signbit(), "wire prec %d", wirePrec)
+			}
+		}
+	})
 }
 
 // fieldRecords splits a message into one entry per field, keyed by field
