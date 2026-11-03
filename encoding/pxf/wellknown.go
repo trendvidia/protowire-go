@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"github.com/trendvidia/protowire-go/internal/bigprec"
 )
 
 // Wrapper type full names mapped to inner value kind.
@@ -563,32 +565,11 @@ func bigFloatText(bf *big.Float, digits int) string {
 }
 
 // bigFloatDigits is the number of significant digits a BigFloat of prec
-// bits is written with (draft -01 § PXF Annotations, protowire#406): the
-// decimal digits of 2^prec, plus one, the fewest for which every prec-bit
-// value is recovered from its literal. One fewer, what this package
-// wrote before, lost 9,157 of 20,000 random 53-bit values (measured on
-// #406). ok reports whether the count is within limit. prec comes off
-// the wire or out of a document, so 2^prec is never computed (the draft
-// says so of a decoder): see pow2Digits.
+// bits is written with, and whether that is within limit (draft -01 § PXF
+// Annotations, protowire#406). encoding/pb bounds a wire prec with the same
+// count (#499), so it lives in internal/bigprec.
 func bigFloatDigits(prec uint32, limit int) (int, bool) {
-	n := pow2Digits(prec) + 1
-	return n, n <= limit
-}
-
-// log10Of2Hi and log10Of2Lo are floor(log10(2) × 2^128), high word first.
-const log10Of2Hi, log10Of2Lo = 0x4d104d427de7fbcc, 0x47c4acd605be48bc
-
-// pow2Digits is the number of decimal digits of 2^p, floor(p·log10(2))
-// + 1, without computing 2^p. The product is taken in 128-bit fixed
-// point: it falls short of p·log10(2) by less than 2^-95, and for every
-// uint32 p that product is further than that from an integer, so the
-// floor is exact. float64 is not enough: it is one digit high at p =
-// 146964308, the first of several below 2^32 (TestPow2Digits).
-func pow2Digits(p uint32) int {
-	hi, lo := bits.Mul64(uint64(p), log10Of2Hi)
-	carryIn, _ := bits.Mul64(uint64(p), log10Of2Lo)
-	_, carry := bits.Add64(lo, carryIn, 0)
-	return int(hi+carry) + 1
+	return bigprec.Digits(prec, limit)
 }
 
 // Big number string parsers (decode direction).

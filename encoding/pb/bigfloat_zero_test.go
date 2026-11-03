@@ -6,6 +6,7 @@ package pb
 import (
 	"bytes"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -101,24 +102,35 @@ func TestBigFloatZeroHasOneEncoding(t *testing.T) {
 }
 
 // A zero writes no exponent, so its precision does not bound one: at prec
-// 2^32-1, which Unmarshal reads, exponent -prec left int32 and Marshal
-// refused the zero (#196).
+// 2^32-1, exponent -prec left int32 and Marshal refused the zero (#196).
+// Its prec is still bounded, as any BigFloat's is (protowire#499): the
+// zero at 2^32-1 bits is written and refused on reading, and the zero at
+// the bound, 13603 bits, round-trips.
 func TestBigFloatZeroAtMaxPrec(t *testing.T) {
 	for _, neg := range []bool{false, true} {
-		z := new(big.Float).SetPrec(big.MaxPrec)
-		if neg {
-			z.Neg(z)
-		}
-		out, err := Marshal(&bigFloatHolder{F: z})
-		if err != nil {
-			t.Fatalf("-0 %v at prec %d: %v", neg, uint(big.MaxPrec), err)
-		}
-		var back bigFloatHolder
-		if err := Unmarshal(out, &back); err != nil {
-			t.Fatal(err)
-		}
-		if back.F.Sign() != 0 || back.F.Prec() != big.MaxPrec || back.F.Signbit() != neg {
-			t.Fatalf("% x reads as %v at prec %d, signbit %v; want a zero at prec %d, signbit %v", out, back.F, back.F.Prec(), back.F.Signbit(), uint(big.MaxPrec), neg)
+		for _, prec := range []uint{big.MaxPrec, 13603} {
+			z := new(big.Float).SetPrec(prec)
+			if neg {
+				z.Neg(z)
+			}
+			out, err := Marshal(&bigFloatHolder{F: z})
+			if err != nil {
+				t.Fatalf("-0 %v at prec %d: %v", neg, prec, err)
+			}
+			var back bigFloatHolder
+			err = Unmarshal(out, &back)
+			if prec == big.MaxPrec {
+				if err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits") {
+					t.Fatalf("zero at prec %d: Unmarshal err = %v, want the prec bound", prec, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if back.F.Sign() != 0 || back.F.Prec() != prec || back.F.Signbit() != neg {
+				t.Fatalf("% x reads as %v at prec %d, signbit %v; want a zero at prec %d, signbit %v", out, back.F, back.F.Prec(), back.F.Signbit(), prec, neg)
+			}
 		}
 	}
 }
