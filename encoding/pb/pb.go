@@ -301,11 +301,12 @@ func marshalField(b []byte, num protowire.Number, fv reflect.Value, zigzag bool,
 	// Scalar and message fields — skip zero values (proto3)
 	switch fv.Kind() {
 	case reflect.Bool:
-		if !fv.Bool() && !element {
+		v := fv.Bool()
+		if !v && !element {
 			return b, nil
 		}
 		b = protowire.AppendTag(b, num, protowire.VarintType)
-		b = protowire.AppendVarint(b, 1)
+		b = protowire.AppendVarint(b, protowire.EncodeBool(v))
 
 	case reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8:
 		v := fv.Int()
