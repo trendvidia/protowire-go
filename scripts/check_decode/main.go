@@ -10,7 +10,7 @@
 //
 // Contract:
 //
-//	check_decode --format <pxf|pb|pb-render|pb-text|sbe|envelope> \
+//	check_decode --format <pxf|pb|pb-render|pb-text|pxf-pb|sbe|envelope> \
 //	             --schema <fully.qualified.MessageType> \
 //	             --proto  <path-to-adversarial.proto> \
 //	             --input  <path>
@@ -116,6 +116,8 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 		return pbRender(data, schema, protoPath)
 	case "pb-text":
 		return pbText(data, schema, protoPath)
+	case "pxf-pb":
+		return pxfPB(data, schema, protoPath)
 	case "envelope":
 		return errors.New("envelope decode not yet implemented in this reference")
 	case "sbe":
@@ -196,6 +198,30 @@ func pbText(data []byte, schema, protoPath string) error {
 		return err
 	}
 	_, err = os.Stdout.Write(text)
+	return err
+}
+
+// pxfPB writes the PB bytes for a PXF document on stdout, for the byte gate
+// (protowire/scripts/cross_bytes_check.sh): what a port writes on the wire
+// for the text it read. Map entries are written in key order, so the bytes
+// do not depend on the order a map holds them in.
+func pxfPB(data []byte, schema, protoPath string) error {
+	if protoPath == "" {
+		return errors.New("--proto is required for format=pxf-pb")
+	}
+	desc, err := loadDescriptor(protoPath, schema)
+	if err != nil {
+		return err
+	}
+	msg, err := pxf.UnmarshalDescriptor(data, desc)
+	if err != nil {
+		return err
+	}
+	out, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(out)
 	return err
 }
 
