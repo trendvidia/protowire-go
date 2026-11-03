@@ -6,6 +6,7 @@ package sbe
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"unicode/utf8"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -35,52 +36,47 @@ func marshalMessage(msg protoreflect.Message, tmpl *messageTemplate) ([]byte, er
 
 	// Write root block fields.
 	block := buf[headerSize : headerSize+int(tmpl.blockLength)]
-	for _, ft := range tmpl.fields {
-		writeField(block, ft, msg)
+	for i := range tmpl.fields {
+		if err := writeField(block, &tmpl.fields[i], msg); err != nil {
+			return nil, err
+		}
 	}
 
 	// Write repeating groups.
 	pos := headerSize + int(tmpl.blockLength)
-	for _, gt := range tmpl.groups {
-		n := marshalGroup(buf[pos:], msg, gt)
+	for i := range tmpl.groups {
+		n, err := marshalGroup(buf[pos:], msg, &tmpl.groups[i])
+		if err != nil {
+			return nil, err
+		}
 		pos += n
 	}
 
 	return buf, nil
 }
 
-func writeField(block []byte, ft fieldTemplate, msg protoreflect.Message) {
+func writeField(block []byte, ft *fieldTemplate, msg protoreflect.Message) error {
 	if len(ft.composite) > 0 {
 		subMsg := msg.Get(ft.fd).Message()
 		sub := block[ft.offset : int(ft.offset)+int(ft.size)]
-		for _, sf := range ft.composite {
-			writeField(sub, sf, subMsg)
+		for i := range ft.composite {
+			if err := writeField(sub, &ft.composite[i], subMsg); err != nil {
+				return err
+			}
 		}
-		return
+		return nil
 	}
 
 	val := msg.Get(ft.fd)
 	off := int(ft.offset)
 
 	switch ft.encoding {
-	case encInt8:
-		block[off] = byte(int8(val.Int()))
-	case encInt16:
-		byteOrder.PutUint16(block[off:], uint16(int16(val.Int())))
-	case encInt32:
-		byteOrder.PutUint32(block[off:], uint32(int32(val.Int())))
-	case encInt64:
-		byteOrder.PutUint64(block[off:], uint64(val.Int()))
-	case encUint8:
-		block[off] = byte(uintVal(ft.fd, val))
-	case encUint16:
-		byteOrder.PutUint16(block[off:], uint16(uintVal(ft.fd, val)))
-	case encUint32:
-		byteOrder.PutUint32(block[off:], uint32(uintVal(ft.fd, val)))
-	case encUint64:
-		byteOrder.PutUint64(block[off:], uintVal(ft.fd, val))
 	case encFloat:
-		byteOrder.PutUint32(block[off:], math.Float32bits(float32(val.Float())))
+		f := val.Float()
+		if ft.writeCheck && !floatFits(f) {
+			return fmt.Errorf("sbe: field %s: value %g is outside the range of float, ±%g", ft.fd.FullName(), f, math.MaxFloat32)
+		}
+		byteOrder.PutUint32(block[off:], math.Float32bits(float32(f)))
 	case encDouble:
 		byteOrder.PutUint64(block[off:], math.Float64bits(val.Float()))
 	case encChar:
@@ -91,7 +87,49 @@ func writeField(block []byte, ft fieldTemplate, msg protoreflect.Message) {
 		default:
 			copy(block[off:end], cutString(val.String(), int(ft.size)))
 		}
+	default:
+		// An integer primitive. The value is read by the field's kind, and
+		// written as the low bytes of its two's complement once it is known to
+		// fit (issue #252).
+		var v uint64
+		unsigned := false
+		switch ft.kind {
+		case protoreflect.BoolKind:
+			if val.Bool() {
+				v = 1
+			}
+			unsigned = true
+		case protoreflect.EnumKind:
+			v = uint64(int64(val.Enum()))
+		case protoreflect.Uint32Kind, protoreflect.Fixed32Kind, protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+			v = val.Uint()
+			unsigned = true
+		default:
+			v = uint64(val.Int())
+		}
+		if ft.writeCheck && !inRange(v, unsigned, ft.encLo, ft.encHi) {
+			return fmt.Errorf("sbe: field %s: value %s is outside the range of %s, [%d, %d]", ft.fd.FullName(), intString(v, unsigned), ft.encoding, ft.encLo, ft.encHi)
+		}
+		switch ft.size {
+		case 1:
+			block[off] = byte(v)
+		case 2:
+			byteOrder.PutUint16(block[off:], uint16(v))
+		case 4:
+			byteOrder.PutUint32(block[off:], uint32(v))
+		default:
+			byteOrder.PutUint64(block[off:], v)
+		}
 	}
+	return nil
+}
+
+// intString formats an integer held as in inRange.
+func intString(v uint64, unsigned bool) string {
+	if unsigned {
+		return strconv.FormatUint(v, 10)
+	}
+	return strconv.FormatInt(int64(v), 10)
 }
 
 // cutString shortens s to at most n bytes without splitting a UTF-8
@@ -109,7 +147,7 @@ func cutString(s string, n int) string {
 	return s[:n]
 }
 
-func marshalGroup(buf []byte, msg protoreflect.Message, gt groupTemplate) int {
+func marshalGroup(buf []byte, msg protoreflect.Message, gt *groupTemplate) (int, error) {
 	list := msg.Get(gt.fd).List()
 	n := list.Len()
 
@@ -120,26 +158,12 @@ func marshalGroup(buf []byte, msg protoreflect.Message, gt groupTemplate) int {
 		entryMsg := list.Get(i).Message()
 		start := groupHeaderSize + i*int(gt.blockLength)
 		entry := buf[start : start+int(gt.blockLength)]
-		for _, ft := range gt.fields {
-			writeField(entry, ft, entryMsg)
+		for j := range gt.fields {
+			if err := writeField(entry, &gt.fields[j], entryMsg); err != nil {
+				return 0, err
+			}
 		}
 	}
 
-	return groupHeaderSize + n*int(gt.blockLength)
-}
-
-// uintVal reads an unsigned integer value from a proto field, handling
-// bool and enum kinds which use different Value accessors.
-func uintVal(fd protoreflect.FieldDescriptor, val protoreflect.Value) uint64 {
-	switch fd.Kind() {
-	case protoreflect.BoolKind:
-		if val.Bool() {
-			return 1
-		}
-		return 0
-	case protoreflect.EnumKind:
-		return uint64(val.Enum())
-	default:
-		return val.Uint()
-	}
+	return groupHeaderSize + n*int(gt.blockLength), nil
 }
