@@ -30,6 +30,77 @@ type fieldTemplate struct {
 	encoding      string          // SBE primitive type; empty for composites
 	composite     []fieldTemplate // non-nil for composite (nested message) fields
 	compositeView *viewSchema     // pre-computed lookup for View access into composites
+
+	// For an integer primitive: the primitive's range and the field's, and
+	// whether a value can fall outside the other (issue #252). Marshal refuses
+	// a value the primitive cannot hold, and Unmarshal one the field cannot
+	// hold, rather than keep its low bits. For a float primitive, the checks
+	// are a double that float cannot hold. Set by withRanges.
+	kind           protoreflect.Kind // fd.Kind(), read once at bind time
+	encLo, fieldLo int64
+	encHi, fieldHi uint64
+	encSigned      bool
+	writeCheck     bool
+	readCheck      bool
+}
+
+// withRanges fills ft's range fields from its field kind and encoding. A
+// fieldTemplate for a char or composite field is returned unchanged.
+func (ft fieldTemplate) withRanges() fieldTemplate {
+	ft.kind = ft.fd.Kind()
+	switch {
+	case ft.encoding == encFloat:
+		ft.writeCheck = ft.fd.Kind() == protoreflect.DoubleKind
+	case ft.encoding == encDouble:
+		ft.readCheck = ft.fd.Kind() == protoreflect.FloatKind
+	case isIntEncoding(ft.encoding):
+		ft.encSigned = ft.encoding[0] == 'i'
+		bits := 8 * uint(ft.size)
+		if ft.encSigned {
+			ft.encLo, ft.encHi = -1<<(bits-1), 1<<(bits-1)-1
+		} else {
+			ft.encLo, ft.encHi = 0, math.MaxUint64>>(64-bits)
+		}
+		ft.fieldLo, ft.fieldHi = kindRange(ft.kind)
+		ft.writeCheck = ft.fieldLo < ft.encLo || ft.fieldHi > ft.encHi
+		// A bool reads any nonzero primitive as true, as it always has.
+		ft.readCheck = ft.fd.Kind() != protoreflect.BoolKind &&
+			(ft.encLo < ft.fieldLo || ft.encHi > ft.fieldHi)
+	}
+	return ft
+}
+
+// kindRange is the range of values an integer, bool or enum field holds. An
+// enum is open in proto3, so any int32.
+func kindRange(k protoreflect.Kind) (lo int64, hi uint64) {
+	switch k {
+	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind, protoreflect.EnumKind:
+		return math.MinInt32, math.MaxInt32
+	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
+		return math.MinInt64, math.MaxInt64
+	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
+		return 0, math.MaxUint32
+	case protoreflect.BoolKind:
+		return 0, 1
+	default: // Uint64Kind, Fixed64Kind
+		return 0, math.MaxUint64
+	}
+}
+
+// inRange reports whether the integer v is within [lo, hi]. v holds a
+// uint64 when unsigned is true, and an int64's bits otherwise.
+func inRange(v uint64, unsigned bool, lo int64, hi uint64) bool {
+	if !unsigned && int64(v) < 0 {
+		return int64(v) >= lo
+	}
+	return v <= hi
+}
+
+// floatFits reports whether a double is within float's range. NaN and the
+// infinities are, as float has them; a finite value past ±MaxFloat32 is not,
+// even one that would round down to it.
+func floatFits(f float64) bool {
+	return math.IsInf(f, 0) || !(f > math.MaxFloat32 || f < -math.MaxFloat32)
 }
 
 // groupTemplate describes an SBE repeating group.
@@ -131,7 +202,7 @@ func buildTemplate(md protoreflect.MessageDescriptor, schemaID, version uint16) 
 			offset:   uint16(offset),
 			size:     size,
 			encoding: enc,
-		})
+		}.withRanges())
 		offset = end
 	}
 
@@ -185,7 +256,7 @@ func buildGroupTemplate(fd protoreflect.FieldDescriptor) (groupTemplate, error) 
 			offset:   uint16(offset),
 			size:     size,
 			encoding: enc,
-		})
+		}.withRanges())
 		offset = end
 	}
 	gt.blockLength = uint16(offset)
@@ -237,7 +308,7 @@ func buildCompositeFields(md protoreflect.MessageDescriptor) (uint16, []fieldTem
 			offset:   uint16(offset),
 			size:     size,
 			encoding: enc,
-		})
+		}.withRanges())
 		offset = end
 	}
 	return uint16(offset), fts, nil
@@ -247,6 +318,21 @@ func buildCompositeFields(md protoreflect.MessageDescriptor) (uint16, []fieldTem
 func fieldEncodingSize(fd protoreflect.FieldDescriptor) (string, uint16, error) {
 	// Explicit encoding override via (sbe.encoding).
 	if enc, ok := getFieldStringOption(fd, extEncoding); ok {
+		// The draft defines (sbe.encoding) as narrowing a numeric type, and
+		// says nothing of crossing between integers and floating point. Both
+		// directions used to bind and then panic in Marshal (issue #252).
+		switch fd.Kind() {
+		case protoreflect.StringKind, protoreflect.BytesKind:
+			return "", 0, fmt.Errorf("(sbe.encoding) = %q on a %s field; it narrows a numeric field, and a %s field takes (sbe.length)", enc, fd.Kind(), fd.Kind())
+		case protoreflect.FloatKind, protoreflect.DoubleKind:
+			if isIntEncoding(enc) {
+				return "", 0, fmt.Errorf("(sbe.encoding) = %q is an integer primitive and the field is %s", enc, fd.Kind())
+			}
+		default:
+			if enc == encFloat || enc == encDouble {
+				return "", 0, fmt.Errorf("(sbe.encoding) = %q is a floating-point primitive and the field is %s", enc, fd.Kind())
+			}
+		}
 		switch enc {
 		case encInt8, encUint8:
 			return enc, 1, nil
@@ -290,6 +376,14 @@ func fieldEncodingSize(fd protoreflect.FieldDescriptor) (string, uint16, error) 
 	default:
 		return "", 0, fmt.Errorf("unsupported proto kind %s", fd.Kind())
 	}
+}
+
+func isIntEncoding(enc string) bool {
+	switch enc {
+	case encInt8, encInt16, encInt32, encInt64, encUint8, encUint16, encUint32, encUint64:
+		return true
+	}
+	return false
 }
 
 // sortedFields returns message fields sorted by field number (SBE wire order).
