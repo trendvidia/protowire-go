@@ -74,8 +74,8 @@ func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTempla
 	}
 
 	block := data[headerSize:end]
-	for _, ft := range tmpl.fields {
-		if err := readField(block, ft, msg); err != nil {
+	for i := range tmpl.fields {
+		if err := readField(block, &tmpl.fields[i], msg); err != nil {
 			return err
 		}
 	}
@@ -93,12 +93,12 @@ func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTempla
 	return nil
 }
 
-func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) error {
+func readField(block []byte, ft *fieldTemplate, msg protoreflect.Message) error {
 	if len(ft.composite) > 0 {
 		subMsg := msg.Mutable(ft.fd).Message()
 		sub := block[ft.offset : int(ft.offset)+int(ft.size)]
-		for _, sf := range ft.composite {
-			if err := readField(sub, sf, subMsg); err != nil {
+		for i := range ft.composite {
+			if err := readField(sub, &ft.composite[i], subMsg); err != nil {
 				return err
 			}
 		}
@@ -108,26 +108,14 @@ func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) error {
 	off := int(ft.offset)
 
 	switch ft.encoding {
-	case encInt8:
-		setIntField(msg, ft.fd, int64(int8(block[off])))
-	case encInt16:
-		setIntField(msg, ft.fd, int64(int16(byteOrder.Uint16(block[off:]))))
-	case encInt32:
-		setIntField(msg, ft.fd, int64(int32(byteOrder.Uint32(block[off:]))))
-	case encInt64:
-		setIntField(msg, ft.fd, int64(byteOrder.Uint64(block[off:])))
-	case encUint8:
-		setUintField(msg, ft.fd, uint64(block[off]))
-	case encUint16:
-		setUintField(msg, ft.fd, uint64(byteOrder.Uint16(block[off:])))
-	case encUint32:
-		setUintField(msg, ft.fd, uint64(byteOrder.Uint32(block[off:])))
-	case encUint64:
-		setUintField(msg, ft.fd, byteOrder.Uint64(block[off:]))
 	case encFloat:
 		setFloatField(msg, ft.fd, float64(math.Float32frombits(byteOrder.Uint32(block[off:]))))
 	case encDouble:
-		setFloatField(msg, ft.fd, math.Float64frombits(byteOrder.Uint64(block[off:])))
+		f := math.Float64frombits(byteOrder.Uint64(block[off:]))
+		if ft.readCheck && !floatFits(f) {
+			return fmt.Errorf("sbe: field %s: wire value %g does not fit a float field, ±%g", ft.fd.FullName(), f, math.MaxFloat32)
+		}
+		setFloatField(msg, ft.fd, f)
 	case encChar:
 		end := off + int(ft.size)
 		raw := block[off:end]
@@ -149,6 +137,30 @@ func readField(block []byte, ft fieldTemplate, msg protoreflect.Message) error {
 			}
 			fastSet(msg, ft.fd, protoreflect.ValueOfString(string(raw[:n])))
 		}
+	default:
+		// An integer primitive, sign- or zero-extended per the primitive
+		// (draft -01 § SBE Annotations), then stored by the field's kind. A
+		// value the field cannot hold is refused rather than cut to its low
+		// bits (issue #252).
+		var v uint64
+		switch ft.size {
+		case 1:
+			v = uint64(block[off])
+		case 2:
+			v = uint64(byteOrder.Uint16(block[off:]))
+		case 4:
+			v = uint64(byteOrder.Uint32(block[off:]))
+		default:
+			v = byteOrder.Uint64(block[off:])
+		}
+		if ft.encSigned {
+			shift := 64 - 8*uint(ft.size)
+			v = uint64(int64(v<<shift) >> shift)
+		}
+		if ft.readCheck && !inRange(v, !ft.encSigned, ft.fieldLo, ft.fieldHi) {
+			return fmt.Errorf("sbe: field %s: wire value %s (%s) does not fit a %s field, [%d, %d]", ft.fd.FullName(), intString(v, !ft.encSigned), ft.encoding, ft.fd.Kind(), ft.fieldLo, ft.fieldHi)
+		}
+		setIntegerField(msg, ft.fd, ft.kind, v)
 	}
 	return nil
 }
@@ -188,8 +200,8 @@ func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate, max
 		entryMsg := entryVal.Message()
 		start := groupHeaderSize + i*blockLength
 		entry := data[start : start+blockLength]
-		for _, ft := range gt.fields {
-			if err := readField(entry, ft, entryMsg); err != nil {
+		for j := range gt.fields {
+			if err := readField(entry, &gt.fields[j], entryMsg); err != nil {
 				return 0, err
 			}
 		}
@@ -199,23 +211,19 @@ func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate, max
 	return totalSize, nil
 }
 
-// setIntField dispatches to the correct ValueOfIntN constructor.
-func setIntField(msg protoreflect.Message, fd protoreflect.FieldDescriptor, v int64) {
-	switch fd.Kind() {
-	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
-		fastSet(msg, fd, protoreflect.ValueOfInt32(int32(v)))
-	default:
-		fastSet(msg, fd, protoreflect.ValueOfInt64(v))
-	}
-}
-
-// setUintField dispatches to the correct ValueOfUintN / bool / enum constructor.
-func setUintField(msg protoreflect.Message, fd protoreflect.FieldDescriptor, v uint64) {
-	switch fd.Kind() {
+// setIntegerField stores an integer that fits fd as the Value fd's kind takes.
+// v holds an int64's bits or a uint64, whichever the primitive was; once it
+// fits, both read the same.
+func setIntegerField(msg protoreflect.Message, fd protoreflect.FieldDescriptor, kind protoreflect.Kind, v uint64) {
+	switch kind {
 	case protoreflect.BoolKind:
 		fastSet(msg, fd, protoreflect.ValueOfBool(v != 0))
 	case protoreflect.EnumKind:
-		fastSet(msg, fd, protoreflect.ValueOfEnum(protoreflect.EnumNumber(v)))
+		fastSet(msg, fd, protoreflect.ValueOfEnum(protoreflect.EnumNumber(int32(v))))
+	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
+		fastSet(msg, fd, protoreflect.ValueOfInt32(int32(v)))
+	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
+		fastSet(msg, fd, protoreflect.ValueOfInt64(int64(v)))
 	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
 		fastSet(msg, fd, protoreflect.ValueOfUint32(uint32(v)))
 	default:
