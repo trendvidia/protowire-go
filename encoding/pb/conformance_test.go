@@ -97,6 +97,7 @@ message All {
   }
   repeated bool flags = 23;
   repeated int64 negs = 24;
+  map<bool, bool> bm = 25;
 }
 `
 
@@ -130,6 +131,7 @@ type confAll struct {
 	D     *confInner           `protowire:"22"`
 	Flags []bool               `protowire:"23"`
 	Negs  []int64              `protowire:"24"`
+	BM    map[bool]bool        `protowire:"25"`
 }
 
 func conformanceDesc(t *testing.T) protoreflect.MessageDescriptor {
@@ -182,7 +184,7 @@ func recordsByField(t *testing.T, b []byte, mapFields ...protowire.Number) map[p
 	return out
 }
 
-var conformanceMapFields = []protowire.Number{18, 19}
+var conformanceMapFields = []protowire.Number{18, 19, 25}
 
 type conformanceCase struct {
 	name string
@@ -367,4 +369,27 @@ func TestConformance_MapEntriesCarryZeroValues(t *testing.T) {
 	require.NoError(t, pb.Unmarshal([]byte{0x92, 0x01, 0x06, 0x0a, 0x04, 'z', 'e', 'r', 'o', 0x9a, 0x01, 0x02, 0x12, 0x00}, &old))
 	assert.Equal(t, map[string]int64{"zero": 0}, old.M)
 	assert.Equal(t, map[int32]*confInner{0: {}}, old.MM)
+}
+
+// TestConformance_MapEntryFalseBool pins #238: a false bool key or value
+// inside a map entry is written as 0. The bool case appended a literal 1
+// after the zero-skip, which was safe only while the skip returned for
+// every false; #105 let false through for map entries, so a false value
+// read back as true.
+func TestConformance_MapEntryFalseBool(t *testing.T) {
+	md := conformanceDesc(t)
+	want := oracleMessage(t, md, `bm { key: false value: false } bm { key: true value: false }`)
+	orig := &confAll{BM: map[bool]bool{false: false, true: false}}
+	ours, err := pb.Marshal(orig)
+	require.NoError(t, err)
+
+	theirs := recordsByField(t, oracleMarshal(t, want), conformanceMapFields...)
+	mine := recordsByField(t, ours, conformanceMapFields...)
+	assert.Equal(t, theirs, mine)
+	assert.Contains(t, mine[25], string([]byte{0xca, 0x01, 0x04, 0x08, 0x00, 0x10, 0x00}), "false → false")
+	assert.Contains(t, mine[25], string([]byte{0xca, 0x01, 0x04, 0x08, 0x01, 0x10, 0x00}), "true → false")
+
+	var back confAll
+	require.NoError(t, pb.Unmarshal(ours, &back))
+	assert.Equal(t, orig.BM, back.BM)
 }
