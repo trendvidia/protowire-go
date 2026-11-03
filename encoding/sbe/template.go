@@ -13,6 +13,7 @@ import (
 
 // messageTemplate describes the SBE wire layout for a proto message.
 type messageTemplate struct {
+	name        protoreflect.FullName
 	templateID  uint16
 	schemaID    uint16
 	version     uint16
@@ -138,6 +139,7 @@ func buildTemplate(md protoreflect.MessageDescriptor, schemaID, version uint16) 
 	}
 
 	tmpl := &messageTemplate{
+		name:       md.FullName(),
 		templateID: uint16(tid),
 		schemaID:   schemaID,
 		version:    version,

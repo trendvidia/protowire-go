@@ -92,7 +92,8 @@ type GroupView struct {
 }
 
 // View creates a zero-allocation reader over SBE-encoded data.
-// The message template is identified from the header's template ID.
+// The message template is identified from the header's schema ID and
+// template ID: a template ID is unique only within a schema (issue #253).
 func (c *Codec) View(data []byte) (View, error) {
 	if len(data) > c.maxMessageSize {
 		return View{}, fmt.Errorf("sbe: input of %d bytes exceeds MaxMessageSize=%d", len(data), c.maxMessageSize)
@@ -102,9 +103,10 @@ func (c *Codec) View(data []byte) (View, error) {
 	}
 	blockLength := int(byteOrder.Uint16(data[0:]))
 	templateID := byteOrder.Uint16(data[2:])
-	tmpl, ok := c.byID[templateID]
+	schemaID := byteOrder.Uint16(data[4:])
+	tmpl, ok := c.byID[schemaTemplate{schemaID, templateID}]
 	if !ok {
-		return View{}, fmt.Errorf("sbe: unknown template ID %d", templateID)
+		return View{}, fmt.Errorf("sbe: unknown template ID %d in schema %d", templateID, schemaID)
 	}
 	if blockLength < int(tmpl.blockLength) {
 		return View{}, fmt.Errorf("sbe: wire blockLength %d < schema blockLength %d for template %d",

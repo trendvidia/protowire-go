@@ -92,14 +92,16 @@ var byteOrder = binary.LittleEndian
 // A Codec is safe for concurrent use after creation.
 type Codec struct {
 	byName    map[protoreflect.FullName]*messageTemplate
-	byID      map[uint16]*messageTemplate
+	byID      map[schemaTemplate]*messageTemplate // for View, from the header
 	validator check.Validator
 
 	maxMessageSize int
 	maxRepeated    int
 }
 
-// schemaTemplate is a template id within one schema.
+// schemaTemplate is a template id within one schema. Uniqueness is per
+// schema (draft -01 § SBE Annotations), so two schemas in one codec may each
+// use an id, and View tells them apart by the header's schemaId (issue #253).
 type schemaTemplate struct{ schemaID, templateID uint16 }
 
 // MaxMessageSize caps the total input to one decode call, per
@@ -144,7 +146,7 @@ func NewCodec(files ...protoreflect.FileDescriptor) (*Codec, error) {
 func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, error) {
 	c := &Codec{
 		byName:         make(map[protoreflect.FullName]*messageTemplate),
-		byID:           make(map[uint16]*messageTemplate),
+		byID:           make(map[schemaTemplate]*messageTemplate),
 		validator:      o.Validator,
 		maxMessageSize: MaxMessageSize,
 		maxRepeated:    MaxRepeatedCount,
@@ -155,8 +157,6 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 	if o.MaxRepeatedCount > 0 {
 		c.maxRepeated = o.MaxRepeatedCount
 	}
-	// seen names the message holding each template id in each schema.
-	seen := make(map[schemaTemplate]protoreflect.FullName)
 	for _, fd := range files {
 		schemaID, ok := getFileUint32Option(fd, extSchemaID)
 		if !ok {
@@ -175,7 +175,7 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 
 		msgs := fd.Messages()
 		for i := 0; i < msgs.Len(); i++ {
-			if err := c.registerMessage(msgs.Get(i), uint16(schemaID), uint16(version), seen); err != nil {
+			if err := c.registerMessage(msgs.Get(i), uint16(schemaID), uint16(version)); err != nil {
 				return nil, err
 			}
 		}
@@ -183,7 +183,7 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 	return c, nil
 }
 
-func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, version uint16, seen map[schemaTemplate]protoreflect.FullName) error {
+func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, version uint16) error {
 	// Only register messages that have a template_id (top-level SBE messages).
 	if _, ok := getMessageUint32Option(md, extTemplateID); !ok {
 		if err := staleMessageError(md); err != nil {
@@ -200,23 +200,18 @@ func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, ver
 		// other (issue #253). The same message seen again, as when a file is
 		// passed twice, is not a duplicate.
 		key := schemaTemplate{schemaID, tmpl.templateID}
-		if prev, ok := seen[key]; ok && prev != md.FullName() {
-			return fmt.Errorf("sbe: messages %s and %s share (sbe.template_id) = %d in schema %d; it must be unique within a schema", prev, md.FullName(), tmpl.templateID, schemaID)
+		if prev, ok := c.byID[key]; ok && prev.name != md.FullName() {
+			return fmt.Errorf("sbe: messages %s and %s share (sbe.template_id) = %d in schema %d; it must be unique within a schema", prev.name, md.FullName(), tmpl.templateID, schemaID)
 		}
-		seen[key] = md.FullName()
 		tmpl.view = buildViewSchema(tmpl)
 		c.byName[md.FullName()] = tmpl
-		// byID is keyed by template id alone, so across two schemas the last
-		// message registered wins. Whether that is refused or byID is keyed
-		// by schema too is open in issue #253; TestTemplateIDAcrossSchemas
-		// pins the current behaviour.
-		c.byID[tmpl.templateID] = tmpl
+		c.byID[key] = tmpl
 	}
 
 	// Recursively register nested messages.
 	nested := md.Messages()
 	for i := 0; i < nested.Len(); i++ {
-		if err := c.registerMessage(nested.Get(i), schemaID, version, seen); err != nil {
+		if err := c.registerMessage(nested.Get(i), schemaID, version); err != nil {
 			return err
 		}
 	}
