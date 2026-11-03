@@ -6,6 +6,7 @@ package pxf
 import (
 	"encoding/base64"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -1749,6 +1750,23 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 	return nil
 }
 
+// canonicalNaN64 is the canonical quiet NaN, the one encoding the draft
+// lets a decoder store for the literal "nan" (draft -01 § Numeric Literals;
+// protowire-java#161). strconv.ParseFloat returns math.NaN(), whose bits are
+// 0x7FF8000000000001; every other port stores 0x7FF8000000000000.
+const canonicalNaN64 = 0x7FF8000000000000
+
+// parseFloatLiteral is strconv.ParseFloat with a NaN stored canonically. A
+// float field converts the result with float32(), which turns the canonical
+// double NaN into the canonical float NaN, 0x7FC00000.
+func parseFloatLiteral(s string, bitSize int) (float64, error) {
+	f, err := strconv.ParseFloat(s, bitSize)
+	if f != f {
+		f = math.Float64frombits(canonicalNaN64)
+	}
+	return f, err
+}
+
 // isNonFiniteIdent reports whether tok is one of the spec's unsigned
 // non-finite float identifiers (§3.8: "inf", "nan"). The signed forms
 // "+inf"/"-inf" lex as FLOAT tokens, so they need no special case here.
@@ -1862,7 +1880,7 @@ func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) 
 		if d.current.Kind != FLOAT && d.current.Kind != INT && !isNonFiniteIdent(d.current) {
 			return protoreflect.Value{}, errorf(pos, "expected number for field %q", named.Name())
 		}
-		f, err := strconv.ParseFloat(d.current.Value, 32)
+		f, err := parseFloatLiteral(d.current.Value, 32)
 		if err != nil {
 			return protoreflect.Value{}, errorf(pos, "invalid float: %s", d.current.Value)
 		}
@@ -1873,7 +1891,7 @@ func (d *directDecoder) consumeScalarAs(fd, named protoreflect.FieldDescriptor) 
 		if d.current.Kind != FLOAT && d.current.Kind != INT && !isNonFiniteIdent(d.current) {
 			return protoreflect.Value{}, errorf(pos, "expected number for field %q", named.Name())
 		}
-		f, err := strconv.ParseFloat(d.current.Value, 64)
+		f, err := parseFloatLiteral(d.current.Value, 64)
 		if err != nil {
 			return protoreflect.Value{}, errorf(pos, "invalid double: %s", d.current.Value)
 		}
@@ -2349,13 +2367,13 @@ func applyDefaultImpl(msg protoreflect.Message, fd protoreflect.FieldDescriptor,
 		}
 		msg.Set(fd, protoreflect.ValueOfUint64(n))
 	case protoreflect.FloatKind:
-		f, err := strconv.ParseFloat(def, 32)
+		f, err := parseFloatLiteral(def, 32)
 		if err != nil {
 			return fmt.Errorf("invalid default float %q for field %q: %w", def, fd.Name(), err)
 		}
 		msg.Set(fd, protoreflect.ValueOfFloat32(float32(f)))
 	case protoreflect.DoubleKind:
-		f, err := strconv.ParseFloat(def, 64)
+		f, err := parseFloatLiteral(def, 64)
 		if err != nil {
 			return fmt.Errorf("invalid default double %q for field %q: %w", def, fd.Name(), err)
 		}
@@ -2526,13 +2544,13 @@ func parseScalarDefault(kind protoreflect.Kind, def string, fd protoreflect.Fiel
 		}
 		return protoreflect.ValueOfUint64(n), nil
 	case protoreflect.FloatKind:
-		f, err := strconv.ParseFloat(def, 32)
+		f, err := parseFloatLiteral(def, 32)
 		if err != nil {
 			return protoreflect.Value{}, fmt.Errorf("invalid default float %q for field %q: %w", def, fd.Name(), err)
 		}
 		return protoreflect.ValueOfFloat32(float32(f)), nil
 	case protoreflect.DoubleKind:
-		f, err := strconv.ParseFloat(def, 64)
+		f, err := parseFloatLiteral(def, 64)
 		if err != nil {
 			return protoreflect.Value{}, fmt.Errorf("invalid default double %q for field %q: %w", def, fd.Name(), err)
 		}
