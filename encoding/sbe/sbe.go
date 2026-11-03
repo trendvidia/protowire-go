@@ -99,6 +99,9 @@ type Codec struct {
 	maxRepeated    int
 }
 
+// schemaTemplate is a template id within one schema.
+type schemaTemplate struct{ schemaID, templateID uint16 }
+
 // MaxMessageSize caps the total input to one decode call, per
 // protowire/docs/HARDENING.md § Mandatory limits, checked before the header
 // is read. The stream decoder's frame cap (DefaultMaxFrameSize, 16 MiB) is
@@ -152,6 +155,8 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 	if o.MaxRepeatedCount > 0 {
 		c.maxRepeated = o.MaxRepeatedCount
 	}
+	// seen names the message holding each template id in each schema.
+	seen := make(map[schemaTemplate]protoreflect.FullName)
 	for _, fd := range files {
 		schemaID, ok := getFileUint32Option(fd, extSchemaID)
 		if !ok {
@@ -170,7 +175,7 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 
 		msgs := fd.Messages()
 		for i := 0; i < msgs.Len(); i++ {
-			if err := c.registerMessage(msgs.Get(i), uint16(schemaID), uint16(version)); err != nil {
+			if err := c.registerMessage(msgs.Get(i), uint16(schemaID), uint16(version), seen); err != nil {
 				return nil, err
 			}
 		}
@@ -178,7 +183,7 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 	return c, nil
 }
 
-func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, version uint16) error {
+func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, version uint16, seen map[schemaTemplate]protoreflect.FullName) error {
 	// Only register messages that have a template_id (top-level SBE messages).
 	if _, ok := getMessageUint32Option(md, extTemplateID); !ok {
 		if err := staleMessageError(md); err != nil {
@@ -189,15 +194,29 @@ func (c *Codec) registerMessage(md protoreflect.MessageDescriptor, schemaID, ver
 		if err != nil {
 			return err
 		}
+		// draft -01 § SBE Annotations: "sbe.template_id MUST be unique among
+		// messages within a schema". A second message with the same id would
+		// replace the first in byID, and View would then read one as the
+		// other (issue #253). The same message seen again, as when a file is
+		// passed twice, is not a duplicate.
+		key := schemaTemplate{schemaID, tmpl.templateID}
+		if prev, ok := seen[key]; ok && prev != md.FullName() {
+			return fmt.Errorf("sbe: messages %s and %s share (sbe.template_id) = %d in schema %d; it must be unique within a schema", prev, md.FullName(), tmpl.templateID, schemaID)
+		}
+		seen[key] = md.FullName()
 		tmpl.view = buildViewSchema(tmpl)
 		c.byName[md.FullName()] = tmpl
+		// byID is keyed by template id alone, so across two schemas the last
+		// message registered wins. Whether that is refused or byID is keyed
+		// by schema too is open in issue #253; TestTemplateIDAcrossSchemas
+		// pins the current behaviour.
 		c.byID[tmpl.templateID] = tmpl
 	}
 
 	// Recursively register nested messages.
 	nested := md.Messages()
 	for i := 0; i < nested.Len(); i++ {
-		if err := c.registerMessage(nested.Get(i), schemaID, version); err != nil {
+		if err := c.registerMessage(nested.Get(i), schemaID, version, seen); err != nil {
 			return err
 		}
 	}
