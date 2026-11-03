@@ -104,8 +104,8 @@ func TestBigFloatZeroHasOneEncoding(t *testing.T) {
 // A zero writes no exponent, so its precision does not bound one: at prec
 // 2^32-1, exponent -prec left int32 and Marshal refused the zero (#196).
 // Its prec is still bounded, as any BigFloat's is (protowire#499): the
-// zero at 2^32-1 bits is written and refused on reading, and the zero at
-// the bound, 13603 bits, round-trips.
+// zero at 2^32-1 bits is refused on writing and on reading, and the zero
+// at the bound, 13603 bits, round-trips.
 func TestBigFloatZeroAtMaxPrec(t *testing.T) {
 	for _, neg := range []bool{false, true} {
 		for _, prec := range []uint{big.MaxPrec, 13603} {
@@ -114,18 +114,26 @@ func TestBigFloatZeroAtMaxPrec(t *testing.T) {
 				z.Neg(z)
 			}
 			out, err := Marshal(&bigFloatHolder{F: z})
-			if err != nil {
-				t.Fatalf("-0 %v at prec %d: %v", neg, prec, err)
-			}
-			var back bigFloatHolder
-			err = Unmarshal(out, &back)
 			if prec == big.MaxPrec {
 				if err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits") {
+					t.Fatalf("zero at prec %d: Marshal err = %v, want the prec bound", prec, err)
+				}
+				// The bytes Marshal used to write: prec 2^32-1, nothing else.
+				old := []byte{0x0a, 0x06, 0x18, 0xff, 0xff, 0xff, 0xff, 0x0f}
+				if neg {
+					old = []byte{0x0a, 0x08, 0x18, 0xff, 0xff, 0xff, 0xff, 0x0f, 0x20, 0x01}
+				}
+				var back bigFloatHolder
+				if err := Unmarshal(old, &back); err == nil || !strings.Contains(err.Error(), "MaxNumericLiteralDigits") {
 					t.Fatalf("zero at prec %d: Unmarshal err = %v, want the prec bound", prec, err)
 				}
 				continue
 			}
 			if err != nil {
+				t.Fatalf("-0 %v at prec %d: %v", neg, prec, err)
+			}
+			var back bigFloatHolder
+			if err := Unmarshal(out, &back); err != nil {
 				t.Fatal(err)
 			}
 			if back.F.Sign() != 0 || back.F.Prec() != prec || back.F.Signbit() != neg {

@@ -293,7 +293,7 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 		}
 	})
 	t.Run("BigFloat precision too wide to scale", func(t *testing.T) {
-		const want = "exceeds the widest mantissa"
+		const want = "MaxNumericLiteralDigits=4096"
 		// #229's eleven bytes: Unmarshal stored the precision, and Marshal
 		// used to dereference nil. Unmarshal now refuses the precision
 		// itself (protowire#499). A varint past uint32 keeps its low 32
@@ -312,16 +312,29 @@ func TestMarshalRefusesWhatUnmarshalRejects(t *testing.T) {
 				t.Fatalf("prec %d: Unmarshal err = %v, want the prec bound", prec, err)
 			}
 		}
-		// The same value built in memory, on both signs and through a list.
-		neg := new(big.Float).SetPrec(1 << 31).SetInt64(-3)
-		if _, err := Marshal(&bigFloatHolder{F: neg}); err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("negative: err = %v, want %q", err, want)
-		}
+		// The same value built in memory, on both signs and through a list,
+		// and the one past the bound: Marshal refuses what Unmarshal would.
 		type list struct {
 			F []*big.Float `protowire:"1"`
 		}
-		if _, err := Marshal(&list{F: []*big.Float{neg}}); err == nil || !strings.Contains(err.Error(), want) {
-			t.Fatalf("list element: err = %v, want %q", err, want)
+		for _, prec := range []uint{1 << 31, 13604} {
+			neg := new(big.Float).SetPrec(prec).SetInt64(-3)
+			if _, err := Marshal(&bigFloatHolder{F: neg}); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("prec %d negative: err = %v, want %q", prec, err, want)
+			}
+			if _, err := Marshal(&list{F: []*big.Float{neg}}); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("prec %d list element: err = %v, want %q", prec, err, want)
+			}
+		}
+		// At the bound the value is written and reads back.
+		at := new(big.Float).SetPrec(13603).SetInt64(-3)
+		out, err := Marshal(&bigFloatHolder{F: at})
+		if err != nil {
+			t.Fatalf("prec 13603: %v", err)
+		}
+		var back bigFloatHolder
+		if err := Unmarshal(out, &back); err != nil || back.F.Cmp(at) != 0 || back.F.Prec() != 13603 {
+			t.Fatalf("prec 13603 round trip: %v at prec %d, %v", back.F, back.F.Prec(), err)
 		}
 	})
 	t.Run("BigFloat exponent below int32 after adjustment", func(t *testing.T) {
