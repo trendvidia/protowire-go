@@ -15,6 +15,10 @@ format changes.
 [#234]: https://github.com/trendvidia/protowire-go/issues/234
 [#238]: https://github.com/trendvidia/protowire-go/issues/238
 
+### Added
+
+- **`check_decode --format pxf-pb`** writes the PB bytes for a PXF document on stdout, for the spec's write gate (trendvidia/protowire#509). It decodes as `dump_envelope` does, with the full decode, and writes deterministically, so map entries are in key order. Its output is the golden every port is compared with. The library is unchanged.
+
 ### Changed
 
 - **A NaN is written as the canonical quiet NaN** (trendvidia/protowire-java#161; draft `-01` § Numeric Literals). PXF `nan` used to be stored as `math.NaN()`, whose bits are `0x7FF8000000000001`; it is now stored as `0x7FF8000000000000`, as every other port measured stores it. That covers a double field, a list element, a `DoubleValue` and a `(pxf.default)`, so the PB and SBE bytes for a double `nan` change. `pb.Marshal` also writes any NaN in a struct field canonically, payload or not, for float as well as double. A message's fields are still written as they are, so a NaN read from PB keeps its payload through `proto.Marshal` and the SBE codec. Float `nan` bytes do not change.

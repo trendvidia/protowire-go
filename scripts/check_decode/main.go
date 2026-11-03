@@ -10,7 +10,7 @@
 //
 // Contract:
 //
-//	check_decode --format <pxf|pb|pb-render|pb-text|sbe|envelope> \
+//	check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope> \
 //	             --schema <fully.qualified.MessageType> \
 //	             --proto  <path-to-adversarial.proto> \
 //	             --input  <path>
@@ -18,6 +18,10 @@
 //	Exit 0 → input was accepted
 //	Exit 1 → input was rejected (clean error)
 //	Other  → bug in the decoder (panic / abort / OOM / hang / ...)
+//
+// pb-text and pxf-pb also write their output on stdout, for the text gate
+// and the write gate (protowire/scripts/cross_text_check.sh and
+// cross_write_check.sh).
 package main
 
 import (
@@ -83,7 +87,7 @@ type BigNumHolder struct {
 
 func main() {
 	var format, schema, proto, input string
-	flag.StringVar(&format, "format", "", "pxf|pb|sbe|envelope")
+	flag.StringVar(&format, "format", "", "pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope")
 	flag.StringVar(&schema, "schema", "", "fully.qualified.MessageType")
 	flag.StringVar(&proto, "proto", "", "path to adversarial.proto")
 	flag.StringVar(&input, "input", "", "path to corpus file")
@@ -110,6 +114,8 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 	switch format {
 	case "pxf":
 		return pxfDecode(data, schema, protoPath, lim)
+	case "pxf-pb":
+		return pxfPb(data, schema, protoPath, lim)
 	case "pb":
 		return pbDecode(data, schema, lim)
 	case "pb-render":
@@ -141,6 +147,38 @@ func pxfDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 		MaxRepeatedCount:        lim["MaxRepeatedCount"],
 		MaxBigFloatExponent:     lim["MaxBigFloatExponent"],
 	}.UnmarshalDescriptor(data, desc)
+	return err
+}
+
+// pxfPb writes the PB bytes for a PXF document on stdout, for the write gate
+// (protowire/scripts/cross_write_check.sh). It decodes as dump_envelope does,
+// with the full decode that validates (pxf.required) and applies
+// (pxf.default), and writes deterministically, so map entries are sorted by
+// key. Text and security gates never compare these bytes (protowire#509).
+func pxfPb(data []byte, schema, protoPath string, lim limitFlags) error {
+	if protoPath == "" {
+		return errors.New("--proto is required for format=pxf-pb")
+	}
+	desc, err := loadDescriptor(protoPath, schema)
+	if err != nil {
+		return err
+	}
+	msg, _, err := pxf.UnmarshalOptions{
+		MaxMessageSize:          lim["MaxMessageSize"],
+		MaxNestingDepth:         lim["MaxNestingDepth"],
+		MaxNumericLiteralDigits: lim["MaxNumericLiteralDigits"],
+		MaxBytesLiteralLength:   lim["MaxBytesLiteralLength"],
+		MaxRepeatedCount:        lim["MaxRepeatedCount"],
+		MaxBigFloatExponent:     lim["MaxBigFloatExponent"],
+	}.UnmarshalFullDescriptor(data, desc)
+	if err != nil {
+		return err
+	}
+	out, err := proto.MarshalOptions{Deterministic: true}.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(out)
 	return err
 }
 
