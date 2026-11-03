@@ -5,6 +5,7 @@ package sbe
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -38,10 +39,31 @@ type groupTemplate struct {
 	fields      []fieldTemplate
 }
 
+// maxUint16 is the largest value of every SBE header field: blockLength,
+// templateId, schemaId and version in the message header, blockLength and
+// numInGroup in a group header. A schema or a message needing a larger value
+// cannot be written: narrowing it would write a header that disagrees with the
+// bytes after it (issue #250).
+const maxUint16 = math.MaxUint16
+
+// endOfField returns the offset after a field of size bytes placed at offset,
+// refusing a field that ends past what a uint16 blockLength can state. Every
+// offset in the block is then a uint16 as well.
+func endOfField(offset int, size uint16) (int, error) {
+	end := offset + int(size)
+	if end > maxUint16 {
+		return 0, fmt.Errorf("ends at byte %d of its block, past %d, the largest blockLength SBE can state", end, maxUint16)
+	}
+	return end, nil
+}
+
 func buildTemplate(md protoreflect.MessageDescriptor, schemaID, version uint16) (*messageTemplate, error) {
 	tid, ok := getMessageUint32Option(md, extTemplateID)
 	if !ok {
 		return nil, fmt.Errorf("sbe: message %s missing (sbe.template_id)", md.FullName())
+	}
+	if tid > maxUint16 {
+		return nil, fmt.Errorf("sbe: message %s: (sbe.template_id) = %d is past %d, the largest templateId SBE can state", md.FullName(), tid, maxUint16)
 	}
 
 	tmpl := &messageTemplate{
@@ -52,7 +74,7 @@ func buildTemplate(md protoreflect.MessageDescriptor, schemaID, version uint16) 
 
 	sorted := sortedFields(md)
 
-	var offset uint16
+	var offset int
 	for _, fd := range sorted {
 		if fd.IsMap() {
 			return nil, fmt.Errorf("sbe: map field %s.%s not supported", md.FullName(), fd.Name())
@@ -82,13 +104,17 @@ func buildTemplate(md protoreflect.MessageDescriptor, schemaID, version uint16) 
 			if err != nil {
 				return nil, fmt.Errorf("sbe: composite %s.%s: %w", md.FullName(), fd.Name(), err)
 			}
+			end, err := endOfField(offset, size)
+			if err != nil {
+				return nil, fmt.Errorf("sbe: composite %s.%s: %w", md.FullName(), fd.Name(), err)
+			}
 			tmpl.fields = append(tmpl.fields, fieldTemplate{
 				fd:        fd,
-				offset:    offset,
+				offset:    uint16(offset),
 				size:      size,
 				composite: subFields,
 			})
-			offset += size
+			offset = end
 			continue
 		}
 
@@ -96,16 +122,20 @@ func buildTemplate(md protoreflect.MessageDescriptor, schemaID, version uint16) 
 		if err != nil {
 			return nil, fmt.Errorf("sbe: field %s.%s: %w", md.FullName(), fd.Name(), err)
 		}
+		end, err := endOfField(offset, size)
+		if err != nil {
+			return nil, fmt.Errorf("sbe: field %s.%s: %w", md.FullName(), fd.Name(), err)
+		}
 		tmpl.fields = append(tmpl.fields, fieldTemplate{
 			fd:       fd,
-			offset:   offset,
+			offset:   uint16(offset),
 			size:     size,
 			encoding: enc,
 		})
-		offset += size
+		offset = end
 	}
 
-	tmpl.blockLength = offset
+	tmpl.blockLength = uint16(offset)
 	return tmpl, nil
 }
 
@@ -114,7 +144,7 @@ func buildGroupTemplate(fd protoreflect.FieldDescriptor) (groupTemplate, error) 
 	sorted := sortedFields(md)
 
 	gt := groupTemplate{fd: fd}
-	var offset uint16
+	var offset int
 	for _, f := range sorted {
 		if f.IsMap() {
 			return gt, fmt.Errorf("sbe: map field in group %s not supported", md.FullName())
@@ -128,13 +158,17 @@ func buildGroupTemplate(fd protoreflect.FieldDescriptor) (groupTemplate, error) 
 			if err != nil {
 				return gt, fmt.Errorf("sbe: composite in group %s.%s: %w", md.FullName(), f.Name(), err)
 			}
+			end, err := endOfField(offset, size)
+			if err != nil {
+				return gt, fmt.Errorf("sbe: composite in group %s.%s: %w", md.FullName(), f.Name(), err)
+			}
 			gt.fields = append(gt.fields, fieldTemplate{
 				fd:        f,
-				offset:    offset,
+				offset:    uint16(offset),
 				size:      size,
 				composite: subFields,
 			})
-			offset += size
+			offset = end
 			continue
 		}
 
@@ -142,15 +176,19 @@ func buildGroupTemplate(fd protoreflect.FieldDescriptor) (groupTemplate, error) 
 		if err != nil {
 			return gt, fmt.Errorf("sbe: group field %s.%s: %w", md.FullName(), f.Name(), err)
 		}
+		end, err := endOfField(offset, size)
+		if err != nil {
+			return gt, fmt.Errorf("sbe: group field %s.%s: %w", md.FullName(), f.Name(), err)
+		}
 		gt.fields = append(gt.fields, fieldTemplate{
 			fd:       f,
-			offset:   offset,
+			offset:   uint16(offset),
 			size:     size,
 			encoding: enc,
 		})
-		offset += size
+		offset = end
 	}
-	gt.blockLength = offset
+	gt.blockLength = uint16(offset)
 	return gt, nil
 }
 
@@ -158,7 +196,7 @@ func buildCompositeFields(md protoreflect.MessageDescriptor) (uint16, []fieldTem
 	sorted := sortedFields(md)
 
 	var fts []fieldTemplate
-	var offset uint16
+	var offset int
 	for _, fd := range sorted {
 		if fd.IsList() || fd.IsMap() {
 			return 0, nil, fmt.Errorf("composite %s contains list/map field %s", md.FullName(), fd.Name())
@@ -172,13 +210,17 @@ func buildCompositeFields(md protoreflect.MessageDescriptor) (uint16, []fieldTem
 			if err != nil {
 				return 0, nil, err
 			}
+			end, err := endOfField(offset, size)
+			if err != nil {
+				return 0, nil, fmt.Errorf("composite field %s.%s: %w", md.FullName(), fd.Name(), err)
+			}
 			fts = append(fts, fieldTemplate{
 				fd:        fd,
-				offset:    offset,
+				offset:    uint16(offset),
 				size:      size,
 				composite: subFields,
 			})
-			offset += size
+			offset = end
 			continue
 		}
 
@@ -186,15 +228,19 @@ func buildCompositeFields(md protoreflect.MessageDescriptor) (uint16, []fieldTem
 		if err != nil {
 			return 0, nil, fmt.Errorf("composite field %s.%s: %w", md.FullName(), fd.Name(), err)
 		}
+		end, err := endOfField(offset, size)
+		if err != nil {
+			return 0, nil, fmt.Errorf("composite field %s.%s: %w", md.FullName(), fd.Name(), err)
+		}
 		fts = append(fts, fieldTemplate{
 			fd:       fd,
-			offset:   offset,
+			offset:   uint16(offset),
 			size:     size,
 			encoding: enc,
 		})
-		offset += size
+		offset = end
 	}
-	return offset, fts, nil
+	return uint16(offset), fts, nil
 }
 
 // fieldEncodingSize returns the SBE encoding name and byte size for a proto field.
@@ -232,16 +278,13 @@ func fieldEncodingSize(fd protoreflect.FieldDescriptor) (string, uint16, error) 
 		return encDouble, 8, nil
 	case protoreflect.EnumKind:
 		return encUint8, 1, nil
-	case protoreflect.StringKind:
+	case protoreflect.StringKind, protoreflect.BytesKind:
 		length, ok := getFieldUint32Option(fd, extLength)
 		if !ok {
-			return "", 0, fmt.Errorf("string field requires (sbe.length) annotation")
+			return "", 0, fmt.Errorf("%s field requires (sbe.length) annotation", fd.Kind())
 		}
-		return encChar, uint16(length), nil
-	case protoreflect.BytesKind:
-		length, ok := getFieldUint32Option(fd, extLength)
-		if !ok {
-			return "", 0, fmt.Errorf("bytes field requires (sbe.length) annotation")
+		if length > maxUint16 {
+			return "", 0, fmt.Errorf("(sbe.length) = %d is past %d, the largest blockLength SBE can state", length, maxUint16)
 		}
 		return encChar, uint16(length), nil
 	default:

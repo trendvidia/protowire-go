@@ -161,6 +161,12 @@ func (o CodecOptions) NewCodec(files ...protoreflect.FileDescriptor) (*Codec, er
 			return nil, fmt.Errorf("sbe: file %s missing (sbe.schema_id) option", fd.Path())
 		}
 		version, _ := getFileUint32Option(fd, extVersion)
+		if schemaID > maxUint16 {
+			return nil, fmt.Errorf("sbe: file %s: (sbe.schema_id) = %d is past %d, the largest schemaId SBE can state", fd.Path(), schemaID, maxUint16)
+		}
+		if version > maxUint16 {
+			return nil, fmt.Errorf("sbe: file %s: (sbe.version) = %d is past %d, the largest version SBE can state", fd.Path(), version, maxUint16)
+		}
 
 		msgs := fd.Messages()
 		for i := 0; i < msgs.Len(); i++ {
