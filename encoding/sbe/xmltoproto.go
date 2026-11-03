@@ -64,12 +64,16 @@ func generateProto(schema *XMLSchema) ([]byte, error) {
 		if c.Name == "messageHeader" || c.Name == "groupSizeEncoding" {
 			continue
 		}
-		writeProtoComposite(&b, c)
+		if err := writeProtoComposite(&b, c); err != nil {
+			return nil, err
+		}
 	}
 
 	// Messages.
 	for i := range schema.Messages {
-		writeProtoMessage(&b, &schema.Messages[i], typeMap, compositeMap, enumMap, "")
+		if err := writeProtoMessage(&b, &schema.Messages[i], typeMap, compositeMap, enumMap, ""); err != nil {
+			return nil, err
+		}
 	}
 
 	return []byte(b.String()), nil
@@ -85,11 +89,14 @@ func writeProtoEnum(b *strings.Builder, e *XMLEnum, indent string) {
 	fmt.Fprintf(b, "%s}\n\n", indent)
 }
 
-func writeProtoComposite(b *strings.Builder, c *XMLComposite) {
+func writeProtoComposite(b *strings.Builder, c *XMLComposite) error {
 	fmt.Fprintf(b, "message %s {\n", c.Name)
 	fieldNum := 1
 	for _, t := range c.Types {
-		protoType, opts, note := resolveTypeToProto(&t)
+		protoType, opts, note, err := resolveTypeToProto(&t)
+		if err != nil {
+			return fmt.Errorf("sbe: composite %q: %w", c.Name, err)
+		}
 		name := camelToSnake(t.Name)
 		writeNote(b, "  ", note)
 		if opts != "" {
@@ -105,69 +112,84 @@ func writeProtoComposite(b *strings.Builder, c *XMLComposite) {
 		fieldNum++
 	}
 	fmt.Fprintf(b, "}\n\n")
+	return nil
 }
 
-func writeProtoMessage(b *strings.Builder, msg *XMLMessage, typeMap map[string]*XMLType, compositeMap map[string]*XMLComposite, enumMap map[string]*XMLEnum, indent string) {
+func writeProtoMessage(b *strings.Builder, msg *XMLMessage, typeMap map[string]*XMLType, compositeMap map[string]*XMLComposite, enumMap map[string]*XMLEnum, indent string) error {
 	fmt.Fprintf(b, "%smessage %s {\n", indent, msg.Name)
 	fmt.Fprintf(b, "%s  option (sbe.template_id) = %d;\n", indent, msg.ID)
 
 	for i := range msg.Fields {
-		writeProtoField(b, &msg.Fields[i], typeMap, compositeMap, enumMap, indent+"  ")
+		if err := writeProtoField(b, &msg.Fields[i], typeMap, compositeMap, enumMap, indent+"  "); err != nil {
+			return fmt.Errorf("sbe: message %q: %w", msg.Name, err)
+		}
 	}
 	for i := range msg.Groups {
-		writeProtoGroup(b, &msg.Groups[i], typeMap, compositeMap, enumMap, indent+"  ")
+		if err := writeProtoGroup(b, &msg.Groups[i], typeMap, compositeMap, enumMap, indent+"  "); err != nil {
+			return fmt.Errorf("sbe: message %q: %w", msg.Name, err)
+		}
 	}
 
 	fmt.Fprintf(b, "%s}\n\n", indent)
+	return nil
 }
 
-func writeProtoField(b *strings.Builder, f *XMLField, typeMap map[string]*XMLType, compositeMap map[string]*XMLComposite, enumMap map[string]*XMLEnum, indent string) {
+func writeProtoField(b *strings.Builder, f *XMLField, typeMap map[string]*XMLType, compositeMap map[string]*XMLComposite, enumMap map[string]*XMLEnum, indent string) error {
 	name := camelToSnake(f.Name)
 
 	// Enum reference.
 	if _, ok := enumMap[f.Type]; ok {
 		fmt.Fprintf(b, "%s%s %s = %d;\n", indent, f.Type, name, f.ID)
-		return
+		return nil
 	}
 
 	// Composite reference.
 	if _, ok := compositeMap[f.Type]; ok {
 		fmt.Fprintf(b, "%s%s %s = %d;\n", indent, f.Type, name, f.ID)
-		return
+		return nil
 	}
 
 	// Resolve from type map (built-in or user-defined).
 	if t, ok := typeMap[f.Type]; ok {
-		protoType, opts, note := resolveTypeToProto(t)
+		protoType, opts, note, err := resolveTypeToProto(t)
+		if err != nil {
+			return fmt.Errorf("field %q: %w", f.Name, err)
+		}
 		writeNote(b, indent, note)
 		if opts != "" {
 			fmt.Fprintf(b, "%s%s %s = %d [%s];\n", indent, protoType, name, f.ID, opts)
 		} else {
 			fmt.Fprintf(b, "%s%s %s = %d;\n", indent, protoType, name, f.ID)
 		}
-		return
+		return nil
 	}
 
 	// Unknown type — pass through as-is.
 	fmt.Fprintf(b, "%s%s %s = %d;\n", indent, f.Type, name, f.ID)
+	return nil
 }
 
-func writeProtoGroup(b *strings.Builder, g *XMLGroup, typeMap map[string]*XMLType, compositeMap map[string]*XMLComposite, enumMap map[string]*XMLEnum, indent string) {
+func writeProtoGroup(b *strings.Builder, g *XMLGroup, typeMap map[string]*XMLType, compositeMap map[string]*XMLComposite, enumMap map[string]*XMLEnum, indent string) error {
 	msgName := singularPascal(g.Name)
 
 	fmt.Fprintf(b, "%smessage %s {\n", indent, msgName)
 	for i := range g.Fields {
-		writeProtoField(b, &g.Fields[i], typeMap, compositeMap, enumMap, indent+"  ")
+		if err := writeProtoField(b, &g.Fields[i], typeMap, compositeMap, enumMap, indent+"  "); err != nil {
+			return fmt.Errorf("group %q: %w", g.Name, err)
+		}
 	}
 	fmt.Fprintf(b, "%s}\n", indent)
 
 	fieldName := camelToSnake(g.Name)
 	fmt.Fprintf(b, "%srepeated %s %s = %d;\n", indent, msgName, fieldName, g.ID)
+	return nil
 }
 
 // resolveTypeToProto maps an SBE type to a proto type and optional field
 // options. note, when not empty, is a comment for the line above the field.
-func resolveTypeToProto(t *XMLType) (protoType, opts, note string) {
+// It refuses an array that no proto field can hold, rather than importing it
+// as one element and misplacing every later field in the block.
+func resolveTypeToProto(t *XMLType) (protoType, opts, note string, err error) {
 	if t.PrimitiveType == "char" {
 		length := t.Length
 		if length == 0 {
@@ -178,12 +200,21 @@ func resolveTypeToProto(t *XMLType) (protoType, opts, note string) {
 			// A proto string holds UTF-8 only, and a decoder refuses a
 			// string that is not, so text in another encoding is carried as
 			// bytes rather than failing at run time (protowire#494).
-			return "bytes", opts, fmt.Sprintf("SBE characterEncoding %q is not UTF-8 compatible, so this field is bytes.", t.CharacterEncoding)
+			return "bytes", opts, fmt.Sprintf("SBE characterEncoding %q is not UTF-8 compatible, so this field is bytes.", t.CharacterEncoding), nil
 		}
-		return "string", opts, ""
+		return "string", opts, "", nil
+	}
+	if t.Length > 1 {
+		switch t.PrimitiveType {
+		case "uint8", "int8":
+			// A fixed-length array of octets is raw bytes, the same N bytes
+			// on the wire as a bytes field with (sbe.length) = N.
+			return "bytes", fmt.Sprintf("(sbe.length) = %d", t.Length), "", nil
+		}
+		return "", "", "", fmt.Errorf("type %q is an array of %d %s, which no proto field represents", t.Name, t.Length, t.PrimitiveType)
 	}
 	protoType, opts = resolvePrimitiveToProto(t.PrimitiveType)
-	return protoType, opts, ""
+	return protoType, opts, "", nil
 }
 
 // writeNote writes note as a comment line, if there is one.
