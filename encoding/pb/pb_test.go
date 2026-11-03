@@ -5,6 +5,7 @@ package pb
 
 import (
 	"bytes"
+	"encoding/hex"
 	"math"
 	"math/big"
 	"reflect"
@@ -656,5 +657,30 @@ func TestSingularZeroSkipUnchanged(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Errorf("expected empty bytes for zero struct, got %x", data)
+	}
+}
+
+// A struct field is a language value, so Marshal writes a NaN as the
+// canonical quiet NaN whatever payload it holds (draft -01 § Numeric
+// Literals; protowire-java#161). Go's math.NaN() is 0x7FF8000000000001.
+type nanHolder struct {
+	D  float64   `protowire:"1"`
+	F  float32   `protowire:"2"`
+	Ds []float64 `protowire:"3"`
+	Fs []float32 `protowire:"4"`
+}
+
+func TestMarshalWritesNaNCanonically(t *testing.T) {
+	payload64 := math.Float64frombits(0x7FF8000000000001)
+	payload32 := math.Float32frombits(0x7FC00001)
+	b, err := Marshal(&nanHolder{D: payload64, F: payload32, Ds: []float64{math.NaN(), 1}, Fs: []float32{payload32}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "09000000000000f87f" + "150000c07f" +
+		"1a10" + "000000000000f87f" + "000000000000f03f" +
+		"2204" + "0000c07f"
+	if got := hex.EncodeToString(b); got != want {
+		t.Fatalf("got  %s\nwant %s", got, want)
 	}
 }
