@@ -6,6 +6,7 @@ package sbe
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // XMLToProto converts an SBE XML schema to a .proto file with SBE annotations.
@@ -88,8 +89,9 @@ func writeProtoComposite(b *strings.Builder, c *XMLComposite) {
 	fmt.Fprintf(b, "message %s {\n", c.Name)
 	fieldNum := 1
 	for _, t := range c.Types {
-		protoType, opts := resolveTypeToProto(t.PrimitiveType, t.Length)
+		protoType, opts, note := resolveTypeToProto(&t)
 		name := camelToSnake(t.Name)
+		writeNote(b, "  ", note)
 		if opts != "" {
 			fmt.Fprintf(b, "  %s %s = %d [%s];\n", protoType, name, fieldNum, opts)
 		} else {
@@ -136,7 +138,8 @@ func writeProtoField(b *strings.Builder, f *XMLField, typeMap map[string]*XMLTyp
 
 	// Resolve from type map (built-in or user-defined).
 	if t, ok := typeMap[f.Type]; ok {
-		protoType, opts := resolveTypeToProto(t.PrimitiveType, t.Length)
+		protoType, opts, note := resolveTypeToProto(t)
+		writeNote(b, indent, note)
 		if opts != "" {
 			fmt.Fprintf(b, "%s%s %s = %d [%s];\n", indent, protoType, name, f.ID, opts)
 		} else {
@@ -162,8 +165,60 @@ func writeProtoGroup(b *strings.Builder, g *XMLGroup, typeMap map[string]*XMLTyp
 	fmt.Fprintf(b, "%srepeated %s %s = %d;\n", indent, msgName, fieldName, g.ID)
 }
 
-// resolveTypeToProto maps an SBE primitive type to proto type and optional field options.
-func resolveTypeToProto(primitiveType string, length uint32) (string, string) {
+// resolveTypeToProto maps an SBE type to a proto type and optional field
+// options. note, when not empty, is a comment for the line above the field.
+func resolveTypeToProto(t *XMLType) (protoType, opts, note string) {
+	if t.PrimitiveType == "char" {
+		length := t.Length
+		if length == 0 {
+			length = 1
+		}
+		opts = fmt.Sprintf("(sbe.length) = %d", length)
+		if !isUTF8Compatible(t.CharacterEncoding) {
+			// A proto string holds UTF-8 only, and a decoder refuses a
+			// string that is not, so text in another encoding is carried as
+			// bytes rather than failing at run time (protowire#494).
+			return "bytes", opts, fmt.Sprintf("SBE characterEncoding %q is not UTF-8 compatible, so this field is bytes.", t.CharacterEncoding)
+		}
+		return "string", opts, ""
+	}
+	protoType, opts = resolvePrimitiveToProto(t.PrimitiveType)
+	return protoType, opts, ""
+}
+
+// writeNote writes note as a comment line, if there is one.
+func writeNote(b *strings.Builder, indent, note string) {
+	if note != "" {
+		fmt.Fprintf(b, "%s// %s\n", indent, note)
+	}
+}
+
+// isUTF8Compatible reports whether every string in a char array of the
+// named encoding is valid UTF-8: none named (FIX SBE's default is US-ASCII),
+// a US-ASCII name, or a UTF-8 name. Names are IANA charset names and their
+// registered aliases, compared ignoring case and punctuation.
+func isUTF8Compatible(encoding string) bool {
+	name := strings.Map(func(r rune) rune {
+		switch r {
+		case '-', '_', '.', ':', ' ':
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, strings.TrimSpace(encoding))
+	switch name {
+	case "",
+		// US-ASCII and its IANA aliases.
+		"usascii", "ascii", "ansix341968", "ansix341986", "iso646us",
+		"isoir6", "iso646irv1991", "us", "ibm367", "cp367", "csascii",
+		// UTF-8.
+		"utf8", "csutf8":
+		return true
+	}
+	return false
+}
+
+// resolvePrimitiveToProto maps an SBE primitive type other than char.
+func resolvePrimitiveToProto(primitiveType string) (string, string) {
 	switch primitiveType {
 	case "int8":
 		return "int32", `(sbe.encoding) = "int8"`
@@ -185,11 +240,6 @@ func resolveTypeToProto(primitiveType string, length uint32) (string, string) {
 		return "float", ""
 	case "double":
 		return "double", ""
-	case "char":
-		if length > 0 {
-			return "string", fmt.Sprintf("(sbe.length) = %d", length)
-		}
-		return "string", "(sbe.length) = 1"
 	default:
 		return primitiveType, ""
 	}

@@ -396,3 +396,65 @@ func TestXMLWithoutNamespace(t *testing.T) {
 	require.Equal(t, "test.v1", schema.Package)
 	require.Len(t, schema.Messages, 4)
 }
+
+// A char type whose characterEncoding is not UTF-8 compatible is imported as
+// bytes, so its text is carried rather than refused at run time
+// (protowire#494). FIX SBE's default for char is US-ASCII, so a char with no
+// encoding, or an ASCII or UTF-8 one, stays a string.
+func TestXMLToProtoCharacterEncoding(t *testing.T) {
+	const schema = `<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="enc.v1" id="2" version="0" byteOrder="littleEndian">
+    <types>
+        <type name="Plain" primitiveType="char" length="4"/>
+        <type name="Ascii" primitiveType="char" length="4" characterEncoding="ASCII"/>
+        <type name="UsAscii" primitiveType="char" length="4" characterEncoding="US-ASCII"/>
+        <type name="Utf8" primitiveType="char" length="4" characterEncoding="utf_8"/>
+        <type name="Latin1" primitiveType="char" length="4" characterEncoding="ISO-8859-1"/>
+        <composite name="Pair">
+            <type name="code" primitiveType="char" length="2" characterEncoding="windows-1252"/>
+            <type name="tag" primitiveType="char" length="2"/>
+        </composite>
+    </types>
+    <sbe:message name="Text" id="1">
+        <field name="plain" id="1" type="Plain"/>
+        <field name="ascii" id="2" type="Ascii"/>
+        <field name="usAscii" id="3" type="UsAscii"/>
+        <field name="utf8" id="4" type="Utf8"/>
+        <field name="latin1" id="5" type="Latin1"/>
+        <field name="pair" id="6" type="Pair"/>
+    </sbe:message>
+</sbe:messageSchema>`
+
+	protoBytes, err := sbe.XMLToProto([]byte(schema))
+	require.NoError(t, err)
+	proto := string(protoBytes)
+
+	for _, line := range []string{
+		`string plain = 1 [(sbe.length) = 4];`,
+		`string ascii = 2 [(sbe.length) = 4];`,
+		`string us_ascii = 3 [(sbe.length) = 4];`,
+		`string utf8 = 4 [(sbe.length) = 4];`,
+		"  // SBE characterEncoding \"ISO-8859-1\" is not UTF-8 compatible, so this field is bytes.\n  bytes latin1 = 5 [(sbe.length) = 4];",
+		"  // SBE characterEncoding \"windows-1252\" is not UTF-8 compatible, so this field is bytes.\n  bytes code = 1 [(sbe.length) = 2];",
+		`string tag = 2 [(sbe.length) = 2];`,
+	} {
+		require.Contains(t, proto, line)
+	}
+
+	fd := compileProtoSource(t, proto)
+	codec, err := sbe.NewCodec(fd)
+	require.NoError(t, err)
+
+	// Latin-1 "café": E9 is not UTF-8, and the bytes field carries it.
+	desc := fd.Messages().ByName("Text")
+	msg := dynamicpb.NewMessage(desc)
+	latin1 := []byte{'c', 'a', 'f', 0xE9}
+	msg.Set(desc.Fields().ByName("latin1"), protoreflect.ValueOfBytes(latin1))
+	data, err := codec.Marshal(msg)
+	require.NoError(t, err)
+
+	got := dynamicpb.NewMessage(desc)
+	require.NoError(t, codec.Unmarshal(data, got))
+	require.Equal(t, latin1, got.Get(desc.Fields().ByName("latin1")).Bytes())
+}

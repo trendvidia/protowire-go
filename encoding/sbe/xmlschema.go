@@ -35,6 +35,9 @@ type XMLType struct {
 	PrimitiveType string `xml:"primitiveType,attr"`
 	Length        uint32 `xml:"length,attr,omitempty"`
 	Description   string `xml:"description,attr,omitempty"`
+	// CharacterEncoding is the IANA charset name a char type's bytes are in.
+	// FIX SBE makes US-ASCII the default for a char array.
+	CharacterEncoding string `xml:"characterEncoding,attr,omitempty"`
 }
 
 // XMLComposite represents an SBE composite type definition.
