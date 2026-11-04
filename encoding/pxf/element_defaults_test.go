@@ -191,7 +191,8 @@ func TestElementDefaults_RequiredChecked(t *testing.T) {
 		_, err := opts.UnmarshalFull([]byte(tc.doc), dynamicpb.NewMessage(desc))
 		require.ErrorContains(t, err, fmt.Sprintf("required field %q is absent", tc.path), tc.doc)
 	}
-	// null satisfies required, and its body is not entered.
+	// A null message has no body, so the required field inside it is
+	// not checked.
 	_, err := opts.UnmarshalFull([]byte(`items = [{ deep = null }]`), dynamicpb.NewMessage(desc))
 	require.NoError(t, err)
 }

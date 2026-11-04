@@ -58,11 +58,12 @@ import (
 //     applied if declared on the field; (pxf.required) errors if
 //     neither default nor value is present. A field that is not a
 //     column is absent in the same way.
-//   - *NullVal — field present-but-null: it stays unset, satisfies
-//     (pxf.required) and keeps (pxf.default) off, and its name is
-//     added to msg's _null FieldMask when the row type declares one.
-//     Only a message field may be null, wrappers included; null in a
-//     scalar, repeated or map column is the body's error (#150).
+//   - *NullVal — field present-but-null: it stays unset, keeps
+//     (pxf.default) off, and its name is added to msg's _null
+//     FieldMask when the row type declares one. Only a singular field
+//     with explicit presence may be null; null in a plain scalar,
+//     repeated or map column, or on a (pxf.required) field (#268), is
+//     the body's error.
 //   - any other Value — field set to that value.
 //
 // msg is not reset first, so "stays unset" and "absent" describe a
@@ -144,8 +145,8 @@ func (o UnmarshalOptions) bindRow(msg proto.Message, columns []string, row Datas
 	}
 	// The full pipeline's post-decode pass gives an empty cell (no
 	// entry) the field's (pxf.default) and rejects it for
-	// (pxf.required), and lets a null cell satisfy required and keep the
-	// default off (draft §3.4.4); it also records a null cell in the
+	// (pxf.required), and lets a null cell keep the default off (draft
+	// §3.4.4); it also records a null cell in the
 	// row type's _null mask. It costs a presence record per row, so only
 	// a row type that needs it pays for it.
 	_, err = o.UnmarshalFull(body, msg)

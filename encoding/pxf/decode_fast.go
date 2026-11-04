@@ -2095,13 +2095,18 @@ func (d *directDecoder) skipValue() error {
 // present-but-null (draft -01 § Booleans, Null, and Identifier Values).
 // That is a message field (wrappers included), a proto3 optional scalar,
 // a oneof member, or a proto2 optional field (#182,
-// trendvidia/protowire#339 option 3). A required field is not nullable:
-// unset, it would make the message invalid in binary
-// (trendvidia/protowire#379). Neither is a scalar without presence,
-// which has no unset state, nor a repeated or map field.
+// trendvidia/protowire#339 option 3). A proto2 required field is not
+// nullable: unset, it would make the message invalid in binary
+// (trendvidia/protowire#379). Nor is a field with (pxf.required) or
+// @required, whatever its presence: a required field holds a value, so
+// null is rejected as absence is (#268). Neither is a scalar without
+// presence, which has no unset state, nor a repeated or map field.
+//
+// IsRequired reads the field's options, so it is asked last: only a
+// null on a field that could otherwise hold one pays for it.
 func nullable(fd protoreflect.FieldDescriptor) bool {
 	return fd.HasPresence() && !fd.IsList() && !fd.IsMap() &&
-		fd.Cardinality() != protoreflect.Required
+		fd.Cardinality() != protoreflect.Required && !IsRequired(fd)
 }
 
 // nullNotAllowed is the error for a null bound to a field nullable
@@ -2117,6 +2122,8 @@ func nullNotAllowed(pos Position, fd protoreflect.FieldDescriptor) error {
 		return errorf(pos, "null is not allowed on required field %q: it must be set", fd.Name())
 	case fd.Cardinality() == protoreflect.Required:
 		return errorf(pos, "null is not allowed on scalar field %q: the field is required, so it must be set", fd.Name())
+	case IsRequired(fd):
+		return errorf(pos, "null is not allowed on required field %q: a required field holds a value", fd.Name())
 	}
 	return errorf(pos, "null is not allowed on scalar field %q: declare it optional, or as a wrapper type (google.protobuf.%sValue or similar), to make it nullable", fd.Name(), wrapperName(fd.Kind()))
 }

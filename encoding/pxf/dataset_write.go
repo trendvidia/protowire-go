@@ -68,9 +68,10 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 //     default does not replace. A message-typed field (a wrapper, a
 //     Timestamp, ...) is written `null`, which keeps the default off
 //     and leaves the field unset. A scalar with presence (`optional`,
-//     or a oneof member) stays empty and reads back as its default:
-//     the draft rejects `null` on a scalar field, so no cell holds it
-//     unset, and an absent field with a default means the default.
+//     or a oneof member) stays empty and reads back as its default,
+//     since an absent field with a default means the default (#146). A
+//     `null` cell would keep it unset, which the draft allows since
+//     trendvidia/protowire#339; whether the writer should is open (#267).
 //     A oneof member stays empty when another member of its oneof is
 //     set and among the columns, since that member keeps the default
 //     off. A set member that is not a column is not written, so the

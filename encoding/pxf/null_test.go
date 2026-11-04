@@ -5,6 +5,7 @@ package pxf_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -298,10 +299,10 @@ func TestRequiredFieldNull(t *testing.T) {
 	desc := fd.Messages().ByName("RequiredWrapper")
 	msg := dynamicpb.NewMessage(desc)
 
-	// null counts as present for required
+	// A required field holds a value: null is rejected as absence is (#268).
 	input := `name = null`
 	_, err := pxf.UnmarshalFull([]byte(input), msg)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, `1:8: null is not allowed on required field "name"`)
 }
 
 func TestRequiredFieldAbsent(t *testing.T) {
@@ -784,27 +785,104 @@ message Opt {
 }
 `
 
-// A null optional scalar counts as present for (pxf.required) and keeps
-// (pxf.default) off; absent, the same fields fail and take the default.
+// A null optional scalar keeps (pxf.default) off, and absent the field
+// takes the default. A (pxf.required) optional scalar rejects null as it
+// rejects absence (#268), and zero satisfies it.
 func TestNullOnPresenceScalarAnnotations(t *testing.T) {
 	desc := compileNullTestProto(t, "null_ann.proto", nullAnnotatedScalarSrc).Messages().ByName("Opt")
 	r, d := desc.Fields().ByName("r"), desc.Fields().ByName("d")
 
 	m := dynamicpb.NewMessage(desc)
-	res, err := pxf.UnmarshalFull([]byte("r = null\nd = null"), m)
+	res, err := pxf.UnmarshalFull([]byte("r = 0\nd = null"), m)
 	require.NoError(t, err)
-	assert.True(t, res.IsNull("r"))
 	assert.True(t, res.IsNull("d"))
-	assert.False(t, m.Has(r))
+	assert.True(t, m.Has(r), "zero is a value")
 	assert.False(t, m.Has(d), "null keeps the default off")
 
 	_, err = pxf.UnmarshalFull([]byte("d = null"), dynamicpb.NewMessage(desc))
 	require.ErrorContains(t, err, `required field "r" is absent`)
 
+	_, err = pxf.UnmarshalFull([]byte("r = null"), dynamicpb.NewMessage(desc))
+	require.ErrorContains(t, err, `1:5: null is not allowed on required field "r"`)
+
 	m = dynamicpb.NewMessage(desc)
-	_, err = pxf.UnmarshalFull([]byte("r = null"), m)
+	_, err = pxf.UnmarshalFull([]byte("r = 1"), m)
 	require.NoError(t, err)
 	assert.Equal(t, int32(5), int32(m.Get(d).Int()), "absent takes the default")
+}
+
+// A required field holds a value, so null on it is rejected as absence
+// is (#268), whichever spelling marks it required and whatever its type
+// or presence: in a body, a nested body, a @dataset cell and a dotted
+// cell, and by Unmarshal as well as UnmarshalFull. The spec corpus
+// asserts the message's prefix (trendvidia/protowire#569).
+func TestRequiredRejectsNull(t *testing.T) {
+	src := annotFile(`
+message Sub { int32 x = 1; }
+message Req {
+  optional int32 r = 1 [(pxf.required) = true];
+  optional int32 a = 2 @required;
+  google.protobuf.Int32Value w = 3 [(pxf.required) = true];
+  Sub s = 4 @required;
+  int32 plain = 5 [(pxf.required) = true];
+}
+message Outer { Req in = 1; }`)
+	req, outer := v12Msg(t, src, "Req"), v12Msg(t, src, "Outer")
+	fields := []string{"r", "a", "w", "s", "plain"}
+	// The same literal serves as a body value and as a cell.
+	values := map[string]string{"r": "0", "a": "0", "w": "0", "s": "{}", "plain": "0"}
+	body := func(null string) string {
+		var b strings.Builder
+		for _, f := range fields {
+			v := values[f]
+			if f == null {
+				v = "null"
+			}
+			b.WriteString(f + " = " + v + "\n")
+		}
+		return b.String()
+	}
+	row := func(null string) string {
+		var vs []string
+		for _, f := range fields {
+			v := values[f]
+			if f == null {
+				v = "null"
+			}
+			vs = append(vs, v)
+		}
+		return "(" + strings.Join(vs, ", ") + ")\n"
+	}
+	dotted := make([]string, len(fields))
+	for i, f := range fields {
+		dotted[i] = "in." + f
+	}
+
+	// Zero values satisfy every one of them.
+	require.NoError(t, pxf.Unmarshal([]byte(body("")), dynamicpb.NewMessage(req)))
+	_, err := pxf.UnmarshalFull([]byte(body("")), dynamicpb.NewMessage(req))
+	require.NoError(t, err)
+	_, err = pxf.UnmarshalFull([]byte("in {\n"+body("")+"}\n"), dynamicpb.NewMessage(outer))
+	require.NoError(t, err)
+	_, err = bindRows(t, req, "@dataset annot.v1.Req ("+strings.Join(fields, ", ")+")\n"+row(""))
+	require.NoError(t, err)
+	_, err = bindRows(t, outer, "@dataset annot.v1.Outer ("+strings.Join(dotted, ", ")+")\n"+row(""))
+	require.NoError(t, err)
+
+	for _, f := range fields {
+		want := `null is not allowed on required field "` + f + `"`
+		t.Run(f, func(t *testing.T) {
+			require.ErrorContains(t, pxf.Unmarshal([]byte(body(f)), dynamicpb.NewMessage(req)), want)
+			_, err := pxf.UnmarshalFull([]byte(body(f)), dynamicpb.NewMessage(req))
+			require.ErrorContains(t, err, want)
+			_, err = pxf.UnmarshalFull([]byte("in {\n"+body(f)+"}\n"), dynamicpb.NewMessage(outer))
+			require.ErrorContains(t, err, want)
+			_, err = bindRows(t, req, "@dataset annot.v1.Req ("+strings.Join(fields, ", ")+")\n"+row(f))
+			require.ErrorContains(t, err, "column "+f+": "+want)
+			_, err = bindRows(t, outer, "@dataset annot.v1.Outer ("+strings.Join(dotted, ", ")+")\n"+row(f))
+			require.ErrorContains(t, err, want)
+		})
+	}
 }
 
 // Marshal writes `field = null` only for a field that may hold it, an
