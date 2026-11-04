@@ -23,6 +23,7 @@ format changes.
 [#257]: https://github.com/trendvidia/protowire-go/issues/257
 [#252]: https://github.com/trendvidia/protowire-go/issues/252
 [#259]: https://github.com/trendvidia/protowire-go/issues/259
+[#262]: https://github.com/trendvidia/protowire-go/issues/262
 [#261]: https://github.com/trendvidia/protowire-go/issues/261
 [#260]: https://github.com/trendvidia/protowire-go/issues/260
 
@@ -48,6 +49,7 @@ format changes.
 
 ### Fixed
 
+- **`pxf.FormatDocument` keeps every directive** ([#262], decided by the owner; trendvidia/protowire#558). It wrote only `@type`, comments and entries. So a `@dataset` document formatted to nothing and lost every row, and `@entry`, `@proto` and named directives were dropped from any document. It now writes them in document order, each after its comments. `@type` comes first, since it binds no anonymous `@proto`. A dataset is written as its header, then one row per line, with an absent cell left empty and `null` written. A named directive's body and a `@proto` body are written as they were read. A document whose only directive is `@type` formats as before. The output is the one protowire-typescript's `format` writes.
 - **A BigFloat literal just below or above a rounding tie reads as the draft rounds it** ([#260], decided by the owner; draft `-01` § PXF Annotations). `pxf` read a literal with `big.Float.Parse`, which scales a decimal exponent at a working precision and then rounds again. So a value within a hair of a tie between two `prec`-bit values could round the wrong way. `4.2026289288901168828283472716521907532475991810580890501360340372609e-4932p2` is 2.5 − 1.7×10⁻⁶⁸ times 2^-16383. It read as mantissa 3, and it now reads as 2, as protowire-typescript reads it. The literal's exact value is now rounded once, ties to even, and the exponent bounds are checked again on the result. A test over 5,934 literals on either side of known ties pins it; main's code fails it at the first case. Reading a BigFloat literal costs more: a short one 239→751 ns, a 256-bit one 1.27→2.15 µs, and the largest the default limits admit 43→100 µs.
 - **`sbe.XMLToProto` keeps the length of a `uint8` or `int8` array** ([#249]). `<type primitiveType="uint8" length="16"/>` imported as one `uint32` with `(sbe.encoding) = "uint8"`, so a 16-byte field was read as 1 byte and every later field in the block was misplaced. It now imports as `bytes` with `(sbe.length) = 16`, the same 16 bytes on the wire.
 - **`sbe` cuts an overlong string on a character boundary** ([#243]; trendvidia/protowire#495, draft `-01` § SBE Annotations). A string longer than its `(sbe.length)` was cut at the byte limit, which can split a multi-byte character. `ABCDEFGé` at length 8 was written as `41 42 43 44 45 46 47 C3`, and every strict decoder, this one included, then refused the whole message. It is now cut at the last whole character and NUL-padded: `41 42 43 44 45 46 47 00`. A limit shorter than the first character leaves the field empty. A `bytes` field is still cut at the limit. Only bytes that no strict decoder accepted change.
