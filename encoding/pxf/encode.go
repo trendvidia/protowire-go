@@ -36,6 +36,15 @@ type MarshalOptions struct {
 }
 
 // Marshal formats msg as PXF text with default options.
+//
+// An unset field is left out, except where a reader that applies
+// (pxf.default) and checks (pxf.required) would not read the absent field
+// back as unset (#259). A proto3 scalar without presence is written as
+// its zero value, and a required list or map as `[]` or `{}`. An unset
+// message-typed field with a default is written `null`. An unset
+// `optional` or oneof scalar with a default is left out, and reads back
+// as its default, since the draft rejects null on a scalar. An unset
+// required field with presence is an error.
 func Marshal(msg proto.Message) ([]byte, error) {
 	return MarshalOptions{}.Marshal(msg)
 }
@@ -78,8 +87,7 @@ type encoder struct {
 	buf          *bytes.Buffer
 	indent       string
 	emitDefaults bool
-	maxDepth     int  // the deepest level a document may reach
-	cellBodies   bool // writing a @dataset value cell: unset annotated fields follow cellUnset
+	maxDepth     int // the deepest level a document may reach
 	resolver     TypeResolver
 	nullFields   *Result
 	nullMaskFd   protoreflect.FieldDescriptor // cached, top-level only
@@ -94,6 +102,44 @@ type nestingError struct{ limit int }
 
 func (err nestingError) Error() string {
 	return fmt.Sprintf("pxf: nesting depth exceeds MaxNestingDepth=%d", err.limit)
+}
+
+// requiredUnsetError is the error for an unset (pxf.required) field that
+// has presence: no text says it is unset, and leaving it out is a document
+// a reader rejects (#259).
+type requiredUnsetError struct{ field protoreflect.FullName }
+
+func (err requiredUnsetError) Error() string {
+	return fmt.Sprintf("pxf: %s is unset, and the field is (pxf.required)", err.field)
+}
+
+// unsetField decides how Marshal writes fd, which msg does not set and
+// whose annotations are o. A reader applies (pxf.default) to an absent
+// field and checks (pxf.required) (#161), so leaving out an annotated
+// field would not read back as the message (#259). So a field without
+// presence is written as its zero value (write), which the default does
+// not replace and which counts as supplied; a required list or map has no
+// presence, so it is a write too, of [emptyCollection]. A message-typed
+// field is written null, which keeps the default off and leaves it unset.
+// An `optional` or oneof scalar is not written, and reads back as its
+// default: the draft rejects null on a scalar, so no text holds it unset.
+// A oneof member is not written when a sibling is set, since the sibling
+// keeps the default off. An unset required field with presence cannot be
+// written. An unannotated field is not written.
+func unsetField(msg protoreflect.Message, fd protoreflect.FieldDescriptor, o cellOptions) (write, null bool, err error) {
+	switch {
+	case !o.hasDefault && !o.required:
+		return false, false, nil
+	case !fd.HasPresence():
+		return true, false, nil
+	case o.required:
+		return false, false, requiredUnsetError{fd.FullName()}
+	}
+	if od := fd.ContainingOneof(); od != nil && !od.IsSynthetic() && msg.WhichOneof(od) != nil {
+		return false, false, nil
+	}
+	isMsg := fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind
+	return false, isMsg, nil
 }
 
 // checkDepth refuses a block or list whose contents sit at level. The
@@ -165,6 +211,7 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 		return err
 	}
 
+	var opts []cellOptions // the fields' annotations, read at the first unset field
 	for i := range fields.Len() {
 		fd := fields.Get(i)
 		if skipKey != nil && fd == skipKey {
@@ -191,19 +238,19 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 			continue
 		}
 
-		if e.cellBodies && !msg.Has(fd) {
-			write, null, err := cellUnset(msg, fd, i, path)
+		if !msg.Has(fd) {
+			if opts == nil {
+				opts = datasetCellOptions(msg.Descriptor())
+			}
+			write, null, err := unsetField(msg, fd, opts[i])
 			switch {
-			case err != nil:
+			case err != nil && !e.emitDefaults:
 				return err
 			case null:
 				e.writeFieldPrefix(level, fd.Name())
 				e.buf.WriteString("null\n")
 				continue
-			case !write:
-				continue
-			}
-			if fd.IsList() || fd.IsMap() {
+			case write && (fd.IsList() || fd.IsMap()):
 				if err := e.checkDepth(level + 1); err != nil {
 					return err
 				}
@@ -211,10 +258,13 @@ func (e *encoder) encodeMessage(msg protoreflect.Message, level int) error {
 				e.buf.WriteString(emptyCollection(fd))
 				e.buf.WriteByte('\n')
 				continue
+			case !write && !e.emitDefaults:
+				continue
 			}
-			// The zero value, written out; falls through below.
-		} else if !e.emitDefaults && !msg.Has(fd) {
-			continue
+			// The zero value, written out; falls through below. With
+			// EmitDefaults, so is every other unset field, as before: an
+			// unset required field with presence then reads back set to
+			// zero, which a reader accepts.
 		}
 		val := msg.Get(fd)
 
@@ -758,6 +808,9 @@ func (e *encoder) tryEncodeAny(fd protoreflect.FieldDescriptor, anyMsg protorefl
 	e.buf = out
 	if errors.As(err, new(nestingError)) {
 		return false, nil // the value is too deep to unpack here; its bytes are not
+	}
+	if errors.As(err, new(requiredUnsetError)) {
+		return false, nil // a body would be rejected; the value's bytes are not
 	}
 	if err != nil {
 		return false, err

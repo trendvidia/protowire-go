@@ -62,6 +62,11 @@ message Required {
   int32 n = 1 [(pxf.required) = true];
   string s = 2;
 }
+
+message RequiredOptional {
+  optional int32 n = 1 [(pxf.required) = true];
+  string s = 2;
+}
 `
 
 func anyReadBackSetup(t *testing.T) (protoreflect.MessageDescriptor, pxf.TypeResolver) {
@@ -148,6 +153,9 @@ func TestAnyBody_WrittenOnlyWhenItReadsBack(t *testing.T) {
 		{"optional zero", "anyback.v1.Rich", varintField(6, 0), true},
 		{"default field set", "anyback.v1.Defaulted", lenField(1, []byte("x")), true},
 		{"required field set", "anyback.v1.Required", varintField(1, 3), true},
+		// An unset annotated field is written so that it reads back (#259).
+		{"default unset", "anyback.v1.Defaulted", varintField(2, 1), true},
+		{"required unset", "anyback.v1.Required", lenField(2, []byte("s")), true},
 
 		// The issue's cases.
 		{"unknown field", "anyback.v1.Leaf", cat(tagT, unknown), false},
@@ -170,9 +178,9 @@ func TestAnyBody_WrittenOnlyWhenItReadsBack(t *testing.T) {
 		// A literal cannot hold it.
 		{"timestamp past year 9999", "anyback.v1.Rich", lenField(1, varintField(1, 1<<40)), false},
 
-		// A reader's annotation rules would change or refuse the body.
-		{"default unset", "anyback.v1.Defaulted", varintField(2, 1), false},
-		{"required unset", "anyback.v1.Required", lenField(2, []byte("s")), false},
+		// A reader's annotation rules would refuse the body: no text says
+		// an `optional` field is unset, and Marshal refuses to leave it out.
+		{"required optional unset", "anyback.v1.RequiredOptional", lenField(2, []byte("s")), false},
 
 		// Never unpacked at all.
 		{"unresolved", "anyback.v1.Nope", tagT, false},
