@@ -43,8 +43,8 @@ type MarshalOptions struct {
 // its zero value, and a required list or map as `[]` or `{}`. An unset
 // message-typed field with a default is written `null`. An unset
 // `optional` or oneof scalar with a default is left out, and reads back
-// as its default; `null` would keep it unset, and whether Marshal should
-// write that is open (#267). An unset required field with presence is an
+// as its default, as an absent field with a default means (decided by the
+// owner in #267; draft -01 § Common Schema Layer names this exception). An unset required field with presence is an
 // error: a required field rejects `null` (#268), so no text leaves it
 // unset.
 func Marshal(msg proto.Message) ([]byte, error) {
@@ -125,8 +125,8 @@ func (err requiredUnsetError) Error() string {
 // field is written null, which keeps the default off and leaves it unset.
 // An `optional` or oneof scalar is not written, and reads back as its
 // default. The draft accepts null on it and leaves it unset
-// (trendvidia/protowire#339 option 3), so null could keep it unset too;
-// whether to write that is open (#267). A oneof member is not written
+// (trendvidia/protowire#339 option 3), but the owner chose to leave it
+// out, so that an absent field means its default here too (#267). A oneof member is not written
 // when a sibling is set, since the sibling keeps the default off. An
 // unset required field with presence cannot be written: a reader rejects
 // it absent and rejects it null (#268). An unannotated field is not

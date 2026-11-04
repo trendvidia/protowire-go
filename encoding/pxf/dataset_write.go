@@ -71,7 +71,7 @@ func AppendDatasetHeader(dst []byte, desc protoreflect.MessageDescriptor, column
 //     or a oneof member) stays empty and reads back as its default,
 //     since an absent field with a default means the default (#146). A
 //     `null` cell would keep it unset, which the draft allows since
-//     trendvidia/protowire#339; whether the writer should is open (#267).
+//     trendvidia/protowire#339; Marshal leaves it out too (#267).
 //     A oneof member stays empty when another member of its oneof is
 //     set and among the columns, since that member keeps the default
 //     off. A set member that is not a column is not written, so the
