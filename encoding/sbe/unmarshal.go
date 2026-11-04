@@ -54,9 +54,16 @@ func unmarshalMessage(data []byte, msg protoreflect.Message, tmpl *messageTempla
 
 	blockLength := byteOrder.Uint16(data[0:])
 	templateID := byteOrder.Uint16(data[2:])
+	schemaID := byteOrder.Uint16(data[4:])
 
 	if templateID != tmpl.templateID {
 		return fmt.Errorf("sbe: template ID mismatch: got %d, want %d", templateID, tmpl.templateID)
+	}
+	// A template id is unique only within a schema (issue #253), so the
+	// template id alone does not say the bytes are this message's: they
+	// may be another schema's message with the same id (issue #257).
+	if schemaID != tmpl.schemaID {
+		return fmt.Errorf("sbe: schema ID mismatch: got %d, want %d for template %d", schemaID, tmpl.schemaID, tmpl.templateID)
 	}
 
 	// Schema evolution allows the wire's blockLength to be >= the template's

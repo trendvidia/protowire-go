@@ -163,3 +163,42 @@ func TestTemplateIDAcrossSchemas(t *testing.T) {
 	_, err = codec.View(data9)
 	require.EqualError(t, err, "sbe: unknown template ID 9 in schema 2")
 }
+
+// TestUnmarshalChecksSchemaID: Unmarshal refuses bytes whose header names
+// another schema than the target message's, even when the template id
+// matches (issue #257, owner's option 1). A's block is no shorter than B's,
+// so before the check A's bytes decoded as B with no error, B.y holding the
+// low half of A.x.
+func TestUnmarshalChecksSchemaID(t *testing.T) {
+	fds := idFiles(t, []int{1, 2},
+		`message A { option (sbe.template_id) = 7; uint64 x = 1; }`,
+		`message B { option (sbe.template_id) = 7; uint32 y = 1; }`)
+	mdA, mdB := fds[0].Messages().ByName("A"), fds[1].Messages().ByName("B")
+	codec, err := sbe.NewCodec(fds...)
+	require.NoError(t, err)
+
+	a := dynamicpb.NewMessage(mdA)
+	a.Set(mdA.Fields().ByName("x"), protoreflect.ValueOfUint64(0xA_0000_000A))
+	dataA, err := codec.Marshal(a)
+	require.NoError(t, err)
+
+	const want = "sbe: schema ID mismatch: got 1, want 2 for template 7"
+	require.EqualError(t, codec.Unmarshal(dataA, dynamicpb.NewMessage(mdB)), want)
+	_, err = codec.UnmarshalDescriptor(dataA, mdB)
+	require.EqualError(t, err, want)
+
+	// Its own message still reads it, and so does B once the header names
+	// schema 2: the check is the header's schema id, not the layout.
+	got, err := codec.UnmarshalDescriptor(dataA, mdA)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0xA_0000_000A), got.Get(mdA.Fields().ByName("x")).Uint())
+	dataA[4] = 2
+	got, err = codec.UnmarshalDescriptor(dataA, mdB)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0xA), got.Get(mdB.Fields().ByName("y")).Uint())
+
+	// A header with schema id 0, as an emitter that does not set it writes,
+	// is refused for a schema that declares another id.
+	dataA[4] = 0
+	require.EqualError(t, codec.Unmarshal(dataA, dynamicpb.NewMessage(mdA)), "sbe: schema ID mismatch: got 0, want 1 for template 7")
+}

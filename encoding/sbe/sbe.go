@@ -228,7 +228,11 @@ func (c *Codec) Marshal(msg proto.Message) ([]byte, error) {
 	return marshalMessage(msg.ProtoReflect(), tmpl)
 }
 
-// Unmarshal decodes SBE binary into msg.
+// Unmarshal decodes SBE binary into msg. The header's templateId and
+// schemaId must be msg's (sbe.template_id) and its file's (sbe.schema_id):
+// a template id is unique only within a schema, so bytes with another
+// schema id are another message's, and are refused (issue #257). The
+// version is not checked. UnmarshalDescriptor checks the same.
 func (c *Codec) Unmarshal(data []byte, msg proto.Message) error {
 	if len(data) > c.maxMessageSize {
 		return fmt.Errorf("sbe: input of %d bytes exceeds MaxMessageSize=%d", len(data), c.maxMessageSize)
