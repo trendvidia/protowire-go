@@ -530,6 +530,14 @@ func formatBigFloat(msg protoreflect.Message) (string, error) {
 	}
 	bf := readBigFloat(msg)
 	prec := bf.Prec()
+	// The bound applies to the value after rounding to prec (protowire#410),
+	// and rounding can carry a mantissa to the next power of two: 2^54-1
+	// at prec 3 is 2^54. Such a value reads off the wire at the bound, and
+	// its literal is past it, which every reader refuses, so the producer
+	// fails (draft -01 § Mandatory Limits, #261).
+	if e := int64(bf.MantExp(nil)); bf.Sign() != 0 && bigFloatExponentExceeds(e, MaxBigFloatExponent) {
+		return "", fmt.Errorf("pxf.BigFloat binary exponent %d after rounding to prec %d exceeds MaxBigFloatExponent=%d", e, prec, MaxBigFloatExponent)
+	}
 	// prec is four bytes the message's producer chose, and Text works
 	// for every digit it is asked for, so the digit count is bounded
 	// before rendering: past MaxNumericLiteralDigits the literal could
@@ -739,6 +747,27 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 	if e := bf.MantExp(nil); bf.Sign() != 0 && bigFloatExponentExceeds(int64(e), maxExp) {
 		return nil, fmt.Errorf("big float literal %s has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", clipLiteral(s), e, maxExp)
 	}
+	// big.Float.Parse scales a decimal exponent by powers of ten at a
+	// working precision and then rounds again, so a value within a hair of
+	// a tie can round the wrong way (#260). The draft rounds the literal's
+	// exact value once, ties to even. The checks above bound the decimal
+	// exponent and the digits, so the exact rational is of bounded size.
+	// Rounding it can carry the exponent past the bound, so it is asked
+	// again.
+	if bf.Sign() != 0 {
+		exact, ok := roundDecimalLiteral(s, readPrec)
+		if !ok {
+			return nil, fmt.Errorf("invalid big float: %s", s)
+		}
+		bf = exact
+		e := bf.MantExp(nil)
+		if bigFloatExponentExceeds(int64(e), maxExp) {
+			return nil, fmt.Errorf("big float literal %s has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", clipLiteral(s), e, maxExp)
+		}
+		if int64(e)-int64(readPrec) < math.MinInt32 {
+			return nil, fmt.Errorf("big float literal %s is below the wire's exponent range", clipLiteral(s))
+		}
+	}
 	// A zero written without a suffix has no precision to keep: prec 0,
 	// its sign kept (protowire#410).
 	if bf.Sign() == 0 && !suffixed {
@@ -749,6 +778,51 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 		bf = z
 	}
 	return bf, nil
+}
+
+// roundDecimalLiteral rounds s, a decimal literal big.Float.Parse has
+// accepted, to prec bits from its exact value, ties to even (#260). The
+// literal is an integer of its digits, d, scaled by 10^k. For k >= 0 the
+// value d * 10^k is an integer and SetInt rounds it once. For k < 0 it is
+// the quotient of two integers, each held exactly, and Quo rounds that
+// quotient once: big.Float arithmetic is correctly rounded. ok is false
+// for a form this does not read, which Parse would not have accepted.
+func roundDecimalLiteral(s string, prec uint) (*big.Float, bool) {
+	neg := false
+	switch {
+	case strings.HasPrefix(s, "-"):
+		neg, s = true, s[1:]
+	case strings.HasPrefix(s, "+"):
+		s = s[1:]
+	}
+	k := 0
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		n, err := strconv.Atoi(s[i+1:])
+		if err != nil {
+			return nil, false
+		}
+		k, s = n, s[:i]
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 {
+		k -= len(s) - i - 1
+		s = s[:i] + s[i+1:]
+	}
+	d, ok := new(big.Int).SetString(s, 10)
+	if !ok || d.Sign() < 0 {
+		return nil, false
+	}
+	z := new(big.Float).SetPrec(prec).SetMode(big.ToNearestEven)
+	if k >= 0 {
+		z.SetInt(d.Mul(d, new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(k)), nil)))
+	} else {
+		num := new(big.Float).SetInt(d) // exact: SetInt takes the bits it needs
+		den := new(big.Float).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-k)), nil))
+		z.Quo(num, den)
+	}
+	if neg {
+		z.Neg(z)
+	}
+	return z, true
 }
 
 // hasNonZeroMantissaDigit reports whether the literal's mantissa — the

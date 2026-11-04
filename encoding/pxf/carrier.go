@@ -356,6 +356,11 @@ func bigFloatLiteral(b []byte) (string, string) {
 	if f.IsInf() {
 		return "", fmt.Sprintf("@default's big_float_value (exponent %d, %d-bit mantissa) is above big.Float's range", exponent, m.MantExp(nil))
 	}
+	// The bound applies after rounding to prec (protowire#410), which can
+	// carry the mantissa one bit past the exponent checked above (#261).
+	if e := f.MantExp(nil); f.Sign() != 0 && bigFloatExponentExceeds(int64(e), MaxBigFloatExponent) {
+		return "", fmt.Sprintf("@default's big_float_value has binary exponent %d after rounding to prec %d, and MaxBigFloatExponent=%d bounds its magnitude", e, prec, MaxBigFloatExponent)
+	}
 	if negative {
 		f.Neg(f)
 	}

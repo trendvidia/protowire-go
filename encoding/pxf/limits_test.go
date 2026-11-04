@@ -237,6 +237,14 @@ func TestMarshalBigFloatExponentBoundEdges(t *testing.T) {
 		{"zero bytes", []byte{0, 0}, math.MaxInt32, 64, ""},
 		{"leading zeros, at the bound", []byte{0, 0, 3}, pxf.MaxBigFloatExponent - 2, 64, ""},
 		{"leading zeros, past the bound", []byte{0, 0, 3}, pxf.MaxBigFloatExponent - 1, 64, "binary exponent 16385 exceeds MaxBigFloatExponent=16384"},
+		// The bound is on the value after rounding to prec (#261): 2^54-1 at
+		// exponent 16330 is at the bound on the wire, and at prec 3 it
+		// rounds to 2^54, binary exponent 16385, whose literal no reader
+		// takes.
+		{"rounds past the bound", []byte{0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, 16330, 3, "binary exponent 16385 after rounding to prec 3 exceeds MaxBigFloatExponent=16384"},
+		// The same mantissa rounding down stays at the bound: 0b101 followed
+		// by 51 zeros at prec 3 is exact.
+		{"rounds within the bound", []byte{0x28, 0, 0, 0, 0, 0, 0}, 16330, 3, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out []byte
