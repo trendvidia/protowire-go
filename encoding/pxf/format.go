@@ -5,27 +5,165 @@ package pxf
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // FormatDocument pretty-prints an AST Document, preserving comments.
 // Unlike Marshal (which works from a proto.Message and loses comments),
 // this formats directly from the parsed AST.
+//
+// It keeps every directive, with its dataset rows, in document order
+// (trendvidia/protowire#558, #262). @type is written first: it binds no
+// anonymous @proto, so moving it changes nothing. The other directives
+// follow in source order, each after its comments: a named directive's
+// body and a @proto body as written, and a dataset as its header and then
+// one row per line, an absent cell left empty. A document whose only
+// directive is @type formats as it always has. The output is the one
+// protowire-typescript's format writes.
 func FormatDocument(doc *Document) []byte {
 	var buf bytes.Buffer
 	f := &formatter{buf: &buf, indent: "  "}
 
+	others := topDirectives(doc)
+	if len(others) == 0 {
+		if doc.TypeURL != "" {
+			buf.WriteString("@type ")
+			buf.WriteString(doc.TypeURL)
+			buf.WriteString("\n\n")
+		}
+		f.writeComments(doc.LeadingComments, 0)
+		f.formatEntries(doc.Entries, 0)
+		return buf.Bytes()
+	}
+
 	if doc.TypeURL != "" {
 		buf.WriteString("@type ")
 		buf.WriteString(doc.TypeURL)
-		buf.WriteString("\n\n")
+		buf.WriteByte('\n')
 	}
-
 	f.writeComments(doc.LeadingComments, 0)
-	f.formatEntries(doc.Entries, 0)
-
+	for _, d := range others {
+		switch d := d.(type) {
+		case *Directive:
+			f.writeComments(d.LeadingComments, 0)
+			f.formatNamedDirective(d)
+		case *DatasetDirective:
+			f.writeComments(d.LeadingComments, 0)
+			f.formatDataset(d)
+		case *ProtoDirective:
+			f.writeComments(d.LeadingComments, 0)
+			f.formatProto(d)
+		}
+	}
+	if len(doc.Entries) > 0 {
+		buf.WriteByte('\n')
+		f.formatEntries(doc.Entries, 0)
+	}
 	return buf.Bytes()
+}
+
+// topDirectives returns doc's directives other than @type, which the
+// Document keeps in three lists, merged back into source order: an
+// anonymous @proto binds the typed directive after it, so the order is
+// part of the meaning. Each element is a *Directive, *DatasetDirective or
+// *ProtoDirective.
+func topDirectives(doc *Document) []any {
+	n := len(doc.Directives) + len(doc.Datasets) + len(doc.Protos)
+	if n == 0 {
+		return nil
+	}
+	type at struct {
+		offset int
+		d      any
+	}
+	all := make([]at, 0, n)
+	for i := range doc.Directives {
+		all = append(all, at{doc.Directives[i].Pos.Offset, &doc.Directives[i]})
+	}
+	for i := range doc.Datasets {
+		all = append(all, at{doc.Datasets[i].Pos.Offset, &doc.Datasets[i]})
+	}
+	for i := range doc.Protos {
+		all = append(all, at{doc.Protos[i].Pos.Offset, &doc.Protos[i]})
+	}
+	slices.SortStableFunc(all, func(a, b at) int { return cmp.Compare(a.offset, b.offset) })
+	out := make([]any, n)
+	for i, a := range all {
+		out[i] = a.d
+	}
+	return out
+}
+
+// formatNamedDirective writes `@<name> prefix* [{body}]`, the body as it
+// was written: it is raw text, which the directive's consumer decodes.
+func (f *formatter) formatNamedDirective(d *Directive) {
+	f.buf.WriteByte('@')
+	f.buf.WriteString(d.Name)
+	for _, p := range d.Prefixes {
+		f.buf.WriteByte(' ')
+		f.buf.WriteString(p)
+	}
+	if d.Body != nil {
+		f.buf.WriteString(" {")
+		f.buf.Write(d.Body)
+		f.buf.WriteByte('}')
+	}
+	f.buf.WriteByte('\n')
+}
+
+// formatDataset writes the header, then one row per line. A nil cell is
+// an absent field and is left empty; null is written.
+func (f *formatter) formatDataset(d *DatasetDirective) {
+	f.buf.WriteString("@dataset")
+	if d.Type != "" {
+		f.buf.WriteByte(' ')
+		f.buf.WriteString(d.Type)
+	}
+	f.buf.WriteString(" (")
+	f.buf.WriteString(strings.Join(d.Columns, ", "))
+	f.buf.WriteString(")\n")
+	for _, row := range d.Rows {
+		f.buf.WriteByte('(')
+		for i, cell := range row.Cells {
+			if i > 0 {
+				f.buf.WriteString(", ")
+			}
+			if cell != nil {
+				f.formatValue(cell, 0)
+			}
+		}
+		f.buf.WriteString(")\n")
+	}
+}
+
+// formatProto writes a @proto directive in the shape it was read in.
+func (f *formatter) formatProto(d *ProtoDirective) {
+	f.buf.WriteString("@proto")
+	switch d.Shape {
+	case ProtoAnonymous:
+		f.buf.WriteString(" {")
+		f.buf.Write(d.Body)
+		f.buf.WriteByte('}')
+	case ProtoNamed:
+		f.buf.WriteByte(' ')
+		f.buf.WriteString(d.TypeName)
+		f.buf.WriteString(" {")
+		f.buf.Write(d.Body)
+		f.buf.WriteByte('}')
+	case ProtoSource:
+		f.buf.WriteString(` """`)
+		f.buf.Write(d.Body)
+		f.buf.WriteString(`"""`)
+	case ProtoDescriptor:
+		f.buf.WriteString(` b"`)
+		f.buf.WriteString(base64.StdEncoding.EncodeToString(d.Body))
+		f.buf.WriteByte('"')
+	}
+	f.buf.WriteByte('\n')
 }
 
 // FormatValue renders v as its PXF source literal — the exact text the

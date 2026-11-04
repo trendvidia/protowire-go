@@ -23,6 +23,7 @@ format changes.
 [#257]: https://github.com/trendvidia/protowire-go/issues/257
 [#252]: https://github.com/trendvidia/protowire-go/issues/252
 [#259]: https://github.com/trendvidia/protowire-go/issues/259
+[#262]: https://github.com/trendvidia/protowire-go/issues/262
 
 ### Added
 
@@ -45,6 +46,7 @@ format changes.
 
 ### Fixed
 
+- **`pxf.FormatDocument` keeps every directive** ([#262], decided by the owner; trendvidia/protowire#558). It wrote only `@type`, comments and entries. So a `@dataset` document formatted to nothing and lost every row, and `@entry`, `@proto` and named directives were dropped from any document. It now writes them in document order, each after its comments. `@type` comes first, since it binds no anonymous `@proto`. A dataset is written as its header, then one row per line, with an absent cell left empty and `null` written. A named directive's body and a `@proto` body are written as they were read. A document whose only directive is `@type` formats as before. The output is the one protowire-typescript's `format` writes.
 - **`sbe.XMLToProto` keeps the length of a `uint8` or `int8` array** ([#249]). `<type primitiveType="uint8" length="16"/>` imported as one `uint32` with `(sbe.encoding) = "uint8"`, so a 16-byte field was read as 1 byte and every later field in the block was misplaced. It now imports as `bytes` with `(sbe.length) = 16`, the same 16 bytes on the wire.
 - **`sbe` cuts an overlong string on a character boundary** ([#243]; trendvidia/protowire#495, draft `-01` § SBE Annotations). A string longer than its `(sbe.length)` was cut at the byte limit, which can split a multi-byte character. `ABCDEFGé` at length 8 was written as `41 42 43 44 45 46 47 C3`, and every strict decoder, this one included, then refused the whole message. It is now cut at the last whole character and NUL-padded: `41 42 43 44 45 46 47 00`. A limit shorter than the first character leaves the field empty. A `bytes` field is still cut at the limit. Only bytes that no strict decoder accepted change.
 - **`pxf.Marshal` no longer writes an Any body that changes the message or cannot be read** ([#232]). With a `TypeResolver`, an Any now gets `@type` and a body only if reading that body gives back its `value`, byte for byte. Otherwise it stays as `type_url` and `value`. That covers unknown fields at any level of the value, field or map order a decoder would not reproduce, a Timestamp no literal can hold, an `optional` or oneof scalar with `@default` or `@required` left unset (other annotated fields are written so that they read back, [#259]), and a chain of Anys deeper than `MaxNestingDepth`. The check uses the default limits, so a reader that lowers `MaxNestingDepth` can still refuse a deep body. Each body is now decoded once while marshalling, which took a one-field-pair Any from about 0.86µs to 2.1µs. Marshal also no longer panics on an Any value holding a map entry with a good key followed by a key of the wrong wire type, a `proto.Unmarshal` panic on `dynamicpb` messages. That value stays as `type_url` and `value`.
