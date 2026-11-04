@@ -114,7 +114,7 @@ sub {
 `, out)
 
 	// The oneof member with a default is the one field that reads back
-	// as its default: Marshal leaves it out rather than write null (#267).
+	// as its default: Marshal leaves it out rather than write null (#267, owner's choice).
 	a := desc.Fields().ByName("a")
 	assert.Equal(t, int64(8), back.Get(a).Int())
 	back.Clear(a)
@@ -133,10 +133,10 @@ func TestMarshal_OneofSiblingKeepsDefaultOff(t *testing.T) {
 	assert.True(t, proto.Equal(m, back), "%s read back as %v", out, back)
 }
 
-// Pinned divergence: an unset `optional` scalar with a default is left
-// out and reads back as its default. `o = null` would read back unset
-// (trendvidia/protowire#339 option 3); whether Marshal writes that is
-// the open question of #267.
+// An unset `optional` scalar with a default is left out and reads back
+// as its default: the owner chose this in #267, and draft -01 § Common
+// Schema Layer names it as an exception to the round trip. `o = null`
+// would read back unset (trendvidia/protowire#339 option 3).
 func TestMarshal_UnsetOptionalDefaultedReadsBackDefault(t *testing.T) {
 	desc := unsetAnnotatedDesc(t, "Opt")
 	out, back := fullReadBack(t, dynamicpb.NewMessage(desc))
