@@ -6,8 +6,9 @@ package pxf_test
 // Empty and null @dataset cells under (pxf.default) and (pxf.required)
 // (draft §3.4.4, "Three-state cells"; #145). An empty cell is an absent
 // field: the default applies, a required field rejects the row. A null
-// cell is present-but-null: it satisfies required and keeps the default
-// off. Scan and BindRow ignored both annotations before #145.
+// cell is present-but-null: it keeps the default off, and a required
+// field rejects it as it rejects an empty cell (#268). Scan and BindRow
+// ignored both annotations before #145.
 
 import (
 	"strings"
@@ -160,10 +161,13 @@ func TestBindRow_Required(t *testing.T) {
 	_, err = bindRows(t, desc, "@dataset bindann.v1.Req (id)\n(1)\n")
 	require.Error(t, err)
 
-	// null satisfies required; a value does too.
-	rows, err := bindRows(t, desc, "@dataset bindann.v1.Req (id, name)\n(1, null)\n(2, \"n\")\n")
+	// A required field holds a value: a null cell is rejected as an
+	// empty one is (#268). A value, the empty string included, satisfies it.
+	_, err = bindRows(t, desc, "@dataset bindann.v1.Req (id, name)\n(1, null)\n")
+	require.ErrorContains(t, err, `2:1: column name: null is not allowed on required field "name"`)
+	rows, err := bindRows(t, desc, "@dataset bindann.v1.Req (id, name)\n(2, \"n\")\n(3, \"\")\n")
 	require.NoError(t, err)
-	assert.False(t, rows[0].Has(desc.Fields().ByName("name")))
+	assert.True(t, rows[0].Has(desc.Fields().ByName("name")))
 	assert.True(t, rows[1].Has(desc.Fields().ByName("name")))
 }
 
