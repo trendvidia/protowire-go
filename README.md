@@ -441,6 +441,18 @@ When to opt in:
 
 The benchmark numbers in the next section are measured with the fork installed.
 
+## Binary size
+
+The packages depend only on `google.golang.org/protobuf` and the standard library, and Go links only the code a program reaches: a program that never imports `encoding/sbe` contains none of it, and one that calls only `pxf.Unmarshal` and `pxf.Marshal` does not contain the formatter or the `@dataset` reader. Calling those two adds about 0.6 MB to a stripped binary, including `math/big` for `pxf.Decimal` and `pxf.BigFloat`.
+
+To make a release binary smaller, strip it at link time:
+
+```bash
+go build -ldflags="-s -w" ./cmd/yourapp
+```
+
+`-s` drops the symbol table and `-w` the DWARF debug info. A small protobuf program measured 6.4 MB before and 4.2 MB after (go1.27, darwin/arm64), which is more than all of `protowire-go` adds. Panics still print function names and lines, and `pprof` profiles still resolve; what you lose is a debugger such as Delve and tools that read the symbol table, such as `go tool nm`.
+
 ## Benchmarks
 
 ### PXF text format
