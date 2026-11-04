@@ -11,6 +11,19 @@ format changes.
 
 ## [Unreleased]
 
+## [1.16.0] — 2026-11-04
+
+A minor release, because it narrows what decodes, encodes and binds. A
+required field now rejects `null` as it rejects absence. `encoding/sbe`
+refuses what an SBE header cannot describe or a primitive cannot hold, and
+checks a header's schema id as well as its template id. `pxf.Marshal` writes
+an unset annotated field so that it reads back, and refuses what it cannot
+write that way: an unset required field, a BigFloat past the exponent bound,
+a message nested too deep. `FormatDocument` keeps every directive, so a `@dataset`
+document no longer formats to nothing. Bytes change where earlier versions
+wrote them wrong: a PXF `nan` in a double is now the canonical quiet NaN,
+and `pb.Marshal` writes a `false` map key or value as `false`.
+
 [#230]: https://github.com/trendvidia/protowire-go/issues/230
 [#232]: https://github.com/trendvidia/protowire-go/issues/232
 [#234]: https://github.com/trendvidia/protowire-go/issues/234
