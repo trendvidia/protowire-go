@@ -43,8 +43,10 @@ type MarshalOptions struct {
 // its zero value, and a required list or map as `[]` or `{}`. An unset
 // message-typed field with a default is written `null`. An unset
 // `optional` or oneof scalar with a default is left out, and reads back
-// as its default, since the draft rejects null on a scalar. An unset
-// required field with presence is an error.
+// as its default; `null` would keep it unset, and whether Marshal should
+// write that is open (#267). An unset required field with presence is an
+// error: a required field rejects `null` (#268), so no text leaves it
+// unset.
 func Marshal(msg proto.Message) ([]byte, error) {
 	return MarshalOptions{}.Marshal(msg)
 }
@@ -105,8 +107,8 @@ func (err nestingError) Error() string {
 }
 
 // requiredUnsetError is the error for an unset (pxf.required) field that
-// has presence: no text says it is unset, and leaving it out is a document
-// a reader rejects (#259).
+// has presence: leaving it out is a document a reader rejects (#259), and
+// so is writing it `null` (#268), so no text says it is unset.
 type requiredUnsetError struct{ field protoreflect.FullName }
 
 func (err requiredUnsetError) Error() string {
@@ -122,10 +124,13 @@ func (err requiredUnsetError) Error() string {
 // presence, so it is a write too, of [emptyCollection]. A message-typed
 // field is written null, which keeps the default off and leaves it unset.
 // An `optional` or oneof scalar is not written, and reads back as its
-// default: the draft rejects null on a scalar, so no text holds it unset.
-// A oneof member is not written when a sibling is set, since the sibling
-// keeps the default off. An unset required field with presence cannot be
-// written. An unannotated field is not written.
+// default. The draft accepts null on it and leaves it unset
+// (trendvidia/protowire#339 option 3), so null could keep it unset too;
+// whether to write that is open (#267). A oneof member is not written
+// when a sibling is set, since the sibling keeps the default off. An
+// unset required field with presence cannot be written: a reader rejects
+// it absent and rejects it null (#268). An unannotated field is not
+// written.
 func unsetField(msg protoreflect.Message, fd protoreflect.FieldDescriptor, o cellOptions) (write, null bool, err error) {
 	switch {
 	case !o.hasDefault && !o.required:

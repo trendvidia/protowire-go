@@ -114,7 +114,7 @@ sub {
 `, out)
 
 	// The oneof member with a default is the one field that reads back
-	// as its default: no text holds an unset scalar with presence.
+	// as its default: Marshal leaves it out rather than write null (#267).
 	a := desc.Fields().ByName("a")
 	assert.Equal(t, int64(8), back.Get(a).Int())
 	back.Clear(a)
@@ -134,18 +134,57 @@ func TestMarshal_OneofSiblingKeepsDefaultOff(t *testing.T) {
 }
 
 // Pinned divergence: an unset `optional` scalar with a default is left
-// out and reads back as its default. The draft rejects null on a scalar
-// (protowire#339), so no text keeps it unset.
+// out and reads back as its default. `o = null` would read back unset
+// (trendvidia/protowire#339 option 3); whether Marshal writes that is
+// the open question of #267.
 func TestMarshal_UnsetOptionalDefaultedReadsBackDefault(t *testing.T) {
 	desc := unsetAnnotatedDesc(t, "Opt")
 	out, back := fullReadBack(t, dynamicpb.NewMessage(desc))
 	assert.Empty(t, out)
 	assert.Equal(t, int64(6), back.Get(desc.Fields().ByName("o")).Int())
+
+	back, _, err := pxf.UnmarshalFullDescriptor([]byte("o = null\n"), desc)
+	require.NoError(t, err)
+	assert.False(t, back.Has(desc.Fields().ByName("o")), "null is the text that keeps it unset")
 }
 
-// An unset required field with presence would be a document a reader
-// rejects, so Marshal refuses it. With EmitDefaults it is written as
-// zero, which a reader accepts, as before.
+// Pinned limit (#267): in a message with a _null mask, every null read is
+// recorded in the mask, so an unset defaulted field has no text that
+// reads back as "unset and not null". Written `null`, as Marshal writes a
+// message-typed one, it reads back with the mask naming it; left out, it
+// reads back as its default. Neither equals the message. No writer can
+// avoid this.
+func TestMarshal_UnsetDefaultedInNullMaskMessageHasNoText(t *testing.T) {
+	desc := compilePlacementSrc(t, `
+syntax = "proto3";
+package unsetmask.v1;
+import "google/protobuf/field_mask.proto";
+import "google/protobuf/wrappers.proto";
+import "pxf/annotations.proto";
+message N {
+  google.protobuf.Int32Value w = 1 [(pxf.default) = "7"];
+  int32 plain = 2;
+  google.protobuf.FieldMask _null = 3;
+}`, "unsetmask.v1", "N")
+	w, mask := desc.Fields().ByName("w"), desc.Fields().ByName("_null")
+	m := dynamicpb.NewMessage(desc)
+	m.Set(desc.Fields().ByName("plain"), protoreflect.ValueOfInt32(1))
+
+	out, back := fullReadBack(t, m)
+	assert.Equal(t, "w = null\nplain = 1\n", out)
+	assert.False(t, back.Has(w))
+	assert.Equal(t, []string{"w"}, readMaskPaths(back))
+	assert.False(t, proto.Equal(m, back), "the mask names w")
+
+	back, _, err := pxf.UnmarshalFullDescriptor([]byte("plain = 1\n"), desc)
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), back.Get(w).Message().Get(w.Message().Fields().ByName("value")).Int())
+	assert.False(t, back.Has(mask))
+}
+
+// An unset required field with presence has no text a reader accepts:
+// absent is rejected, and so is null (#268). So Marshal refuses it. With
+// EmitDefaults it is written as zero, which a reader accepts, as before.
 func TestMarshal_UnsetRequiredOptionalRefused(t *testing.T) {
 	desc := unsetAnnotatedDesc(t, "ReqOpt")
 	m := dynamicpb.NewMessage(desc)
