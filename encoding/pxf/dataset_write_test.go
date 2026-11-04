@@ -569,10 +569,11 @@ func TestDatasetWrite_RefusesInvalidSchema(t *testing.T) {
 }
 
 // A field with presence in the message's _null mask is null, as Marshal
-// writes it, so a default stays off and a required field is satisfied;
-// that includes an optional scalar (#182). A plain scalar in the mask is
-// written as if the mask did not name it, by the writer and by Marshal
-// alike: null on it is a decode error (#150, #151).
+// writes it, so a default stays off; that includes an optional scalar
+// (#182). A plain scalar in the mask is written as if the mask did not
+// name it, by the writer and by Marshal alike: null on it is a decode
+// error (#150, #151). So is null on a required field (#268), so the mask
+// does not make an unset one writable.
 func TestDatasetWrite_NullMask(t *testing.T) {
 	src := `syntax = "proto3";
 package dswnull.v1;
@@ -592,21 +593,36 @@ message N {
 	cols := []string{"w", "dw", "rw", "n", "o"}
 
 	m := dynamicpb.NewMessage(desc)
-	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = null\no = null\n"), m)
+	_, err := pxf.UnmarshalFull([]byte("w = null\ndw = null\nrw = 4\no = null\n"), m)
 	require.NoError(t, err)
 	require.NoError(t, pxf.Unmarshal([]byte(`w = "set anyway"`+"\nn = 3\n"), m))
 	// A scalar in the mask: no decode puts one there since #150, but a
 	// mask from another producer can carry one. Marshal and the writer
-	// both write its value (#151).
+	// both write its value (#151). A set required field in the mask is
+	// written as its value too.
 	mask := m.Mutable(desc.Fields().ByName("_null")).Message()
-	mask.Mutable(mask.Descriptor().Fields().ByName("paths")).List().Append(protoreflect.ValueOfString("n"))
+	paths := mask.Mutable(mask.Descriptor().Fields().ByName("paths")).List()
+	paths.Append(protoreflect.ValueOfString("n"))
+	paths.Append(protoreflect.ValueOfString("rw"))
 	marshalled, err := pxf.Marshal(m)
 	require.NoError(t, err)
-	assert.Equal(t, "w = null\ndw = null\nrw = null\nn = 3\no = null\n", string(marshalled))
+	assert.Equal(t, "w = null\ndw = null\nrw = 4\nn = 3\no = null\n", string(marshalled))
 
 	row, err := pxf.AppendDatasetRow(nil, m, cols)
 	require.NoError(t, err)
-	assert.Equal(t, "(null, null, null, 3, null)\n", string(row))
+	assert.Equal(t, "(null, null, 4, 3, null)\n", string(row))
+
+	// Unset, the mask does not save it: null is no text for a required
+	// field, so both refuse.
+	rw := m.Get(desc.Fields().ByName("rw"))
+	m.Clear(desc.Fields().ByName("rw"))
+	_, err = pxf.Marshal(m)
+	require.ErrorContains(t, err, `dswnull.v1.N.rw is unset, and the field is (pxf.required)`)
+	_, err = pxf.AppendDatasetRow(nil, m, cols)
+	require.ErrorContains(t, err, `column "rw": unset, and the field is (pxf.required)`)
+	m.Set(desc.Fields().ByName("rw"), rw)
+	row, err = pxf.AppendDatasetRow(nil, m, cols)
+	require.NoError(t, err)
 
 	// The null o reads back unset, not as its default, and in the mask.
 	h, err := pxf.AppendDatasetHeader(nil, desc, cols)
@@ -621,6 +637,7 @@ message N {
 	// Without the mask, the set wrapper is its value and the unset
 	// required one is refused.
 	m.Clear(desc.Fields().ByName("_null"))
+	m.Clear(desc.Fields().ByName("rw"))
 	_, err = pxf.AppendDatasetRow(nil, m, cols)
 	require.ErrorContains(t, err, `column "rw": unset, and the field is (pxf.required)`)
 }
