@@ -530,6 +530,14 @@ func formatBigFloat(msg protoreflect.Message) (string, error) {
 	}
 	bf := readBigFloat(msg)
 	prec := bf.Prec()
+	// The bound applies to the value after rounding to prec (protowire#410),
+	// and rounding can carry a mantissa to the next power of two: 2^54-1
+	// at prec 3 is 2^54. Such a value reads off the wire at the bound, and
+	// its literal is past it, which every reader refuses, so the producer
+	// fails (draft -01 § Mandatory Limits, #261).
+	if e := int64(bf.MantExp(nil)); bf.Sign() != 0 && bigFloatExponentExceeds(e, MaxBigFloatExponent) {
+		return "", fmt.Errorf("pxf.BigFloat binary exponent %d after rounding to prec %d exceeds MaxBigFloatExponent=%d", e, prec, MaxBigFloatExponent)
+	}
 	// prec is four bytes the message's producer chose, and Text works
 	// for every digit it is asked for, so the digit count is bounded
 	// before rendering: past MaxNumericLiteralDigits the literal could
