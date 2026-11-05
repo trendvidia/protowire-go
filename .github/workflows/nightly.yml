@@ -36,5 +36,7 @@ jobs:
       - name: go version
         run: go version
 
+      # encoding/pxf alone takes about ten minutes here (572s on
+      # 2026-11-01), past go test's 10m default (#276).
       - name: go test (race, count=10)
-        run: go test -race -count=10 ./...
+        run: go test -race -count=10 -timeout 30m ./...
