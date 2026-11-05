@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A PXF BigFloat literal with a precision suffix of hundreds of millions of bits no longer takes minutes** ([#274]; from trendvidia/protowire-cpp#151). It needs a `MaxNumericLiteralDigits` raised past the suffix's digits: `p2147483647` implies about 646 million. `1e-300p2147483647` took about 40 minutes, because `big.Float.Parse`'s cost grows with the square of its precision (91% of it in math/big's recursive division). The decoder used `Parse` only to place the literal against the range checks; the value already came from rounding the exact literal, which is linear. `Parse` now runs at no more than 16384 bits, and that literal is refused in under a millisecond, with the same error. At the default limits, a suffix is at most `p13603`, so nothing is read differently. Above 16384 bits, a few texts can change, but only for a value within 2^-16384 of a bound. Within that of big.Float's range edge, a literal gets the "above/below big.Float's range" error where it got a binary-exponent or wire-range error, and is refused either way. Within that of a power of two at `MaxBigFloatExponent`, a refusal can name an exponent one higher.
+
+[#274]: https://github.com/trendvidia/protowire-go/issues/274
+
 ## [1.16.0] — 2026-11-04
 
 A minor release, because it narrows what decodes, encodes and binds. A
