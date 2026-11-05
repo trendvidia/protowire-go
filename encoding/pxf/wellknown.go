@@ -673,6 +673,16 @@ func parseDecimal(s string, maxDigits int) (unscaled *big.Int, scale int32, nega
 // protowire#406): what a person writes by hand, read as it always was.
 const bigFloatDefaultPrec = 256
 
+// bigFloatCheckPrec is the most precision parseBigFloatPrec asks of
+// big.Float.Parse, which it uses only to place a literal against the range
+// checks; the value itself comes from roundDecimalLiteral. Parse's cost
+// grows with the square of its precision (math/big's recursive division),
+// so a suffix of hundreds of millions of bits, which a raised
+// MaxNumericLiteralDigits admits, took minutes (#274). 16384 bits is above
+// the 13603 the default MaxNumericLiteralDigits allows, so at the default
+// limits nothing is read differently.
+const bigFloatCheckPrec = 1 << 14
+
 // parseBigFloat reads a BigFloat literal, s, with or without its
 // precision suffix "p<bits>" (protowire#406), for a literal that arrives
 // as one string, a carrier's. A document's literal arrives lexed, number
@@ -711,7 +721,15 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 	if err := checkLiteralDigits(s, maxDigits); err != nil {
 		return nil, err
 	}
-	bf, _, err := new(big.Float).SetPrec(readPrec).SetMode(big.ToNearestEven).Parse(s, 10)
+	// Above bigFloatCheckPrec, Parse runs at that precision (#274). Rounding
+	// to fewer bits can only raise the binary exponent, and by at most one,
+	// so where it is capped a positive exponent is allowed one more before
+	// it is refused here; the check after the exact rounding decides.
+	checkPrec, capped := readPrec, readPrec > bigFloatCheckPrec
+	if capped {
+		checkPrec = bigFloatCheckPrec
+	}
+	bf, _, err := new(big.Float).SetPrec(checkPrec).SetMode(big.ToNearestEven).Parse(s, 10)
 	if err != nil {
 		return nil, fmt.Errorf("invalid big float: %s", s)
 	}
@@ -744,7 +762,7 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 	}
 	// The value's binary exponent is bounded as one read off the wire is
 	// (MaxBigFloatExponent, protowire#281). Zero has none.
-	if e := bf.MantExp(nil); bf.Sign() != 0 && bigFloatExponentExceeds(int64(e), maxExp) {
+	if e := bf.MantExp(nil); bf.Sign() != 0 && bigFloatExponentExceeds(cappedExponent(int64(e), capped), maxExp) {
 		return nil, fmt.Errorf("big float literal %s has binary exponent %d, and MaxBigFloatExponent=%d bounds its magnitude", clipLiteral(s), e, maxExp)
 	}
 	// big.Float.Parse scales a decimal exponent by powers of ten at a
@@ -768,8 +786,12 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 			return nil, fmt.Errorf("big float literal %s is below the wire's exponent range", clipLiteral(s))
 		}
 	}
-	// A zero written without a suffix has no precision to keep: prec 0,
+	// A zero written with a suffix keeps it, whatever precision Parse ran
+	// at. A zero written without one has no precision to keep: prec 0,
 	// its sign kept (protowire#410).
+	if bf.Sign() == 0 && suffixed {
+		bf.SetPrec(readPrec)
+	}
 	if bf.Sign() == 0 && !suffixed {
 		z := new(big.Float)
 		if bf.Signbit() {
@@ -778,6 +800,18 @@ func parseBigFloatPrec(s, prec string, maxDigits, maxExp int) (*big.Float, error
 		bf = z
 	}
 	return bf, nil
+}
+
+// cappedExponent is the binary exponent the first MaxBigFloatExponent check
+// takes, e, from a Parse that ran at bigFloatCheckPrec when capped. The
+// exact value's exponent is e or e-1, so a positive e is taken as e-1:
+// what is refused then is refused at any precision. A negative e can only
+// be nearer zero than the exact value's, which the check refuses anyway.
+func cappedExponent(e int64, capped bool) int64 {
+	if capped && e > 0 {
+		return e - 1
+	}
+	return e
 }
 
 // roundDecimalLiteral rounds s, a decimal literal big.Float.Parse has
