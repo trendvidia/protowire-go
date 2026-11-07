@@ -300,3 +300,34 @@ regions = [
 		}
 	})
 }
+
+// FuzzFormatDocumentFixedPoint holds FormatDocument to its round trip: the
+// output of a document Parse accepts parses again, and formatting it again
+// changes nothing. The seeds put comments where no entry follows them, at
+// the end of a document, a block or a dataset row (#279).
+func FuzzFormatDocumentFixedPoint(f *testing.F) {
+	for _, s := range []string{
+		"@type a.v1.M\nname = \"n\"\n# end\n",
+		"@type a.v1.M\n@flag\n# end\n",
+		"@dataset t.v1.T (id)\n# a\n(1, # b\n)\n# c\n",
+		"a {\n  b {\n    x = 1 # i\n    # e\n  }\n  # f\n}\n# g\n",
+		"m = {\n  k: 1\n  /* e */\n}\nl = [\n 1, # x\n # y\n 2\n]\n# z\n",
+		"@dataset T (a, b)\n(1, {\n x = 1\n # e\n})\n# t\n",
+	} {
+		f.Add([]byte(s))
+	}
+	f.Fuzz(func(t *testing.T, data []byte) {
+		doc, err := pxf.Parse(data)
+		if err != nil {
+			return
+		}
+		once := pxf.FormatDocument(doc)
+		again, err := pxf.Parse(once)
+		if err != nil {
+			t.Fatalf("formatted document does not parse: %v\nin   %q\nonce %q", err, data, once)
+		}
+		if twice := pxf.FormatDocument(again); string(once) != string(twice) {
+			t.Fatalf("formatting is not a fixed point\nin    %q\nonce  %q\ntwice %q", data, once, twice)
+		}
+	})
+}
