@@ -439,7 +439,8 @@ func canonAssignment(n *Assignment, fd protoreflect.FieldDescriptor) Entry {
 		case *BlockVal:
 			if keyFd != nil {
 				// `children = { ... }` → `children { ... }`.
-				blk := &Block{Pos: n.Pos, End: n.End, Name: n.Key, Entries: val.Entries, LeadingComments: n.LeadingComments}
+				blk := &Block{Pos: n.Pos, End: n.End, Name: n.Key, Entries: val.Entries,
+					LeadingComments: n.LeadingComments, TrailingComments: val.TrailingComments}
 				canonKeyedEntries(blk, fd, keyFd)
 				return blk
 			}
@@ -468,7 +469,7 @@ func canonKeyedEntries(b *Block, fd, keyFd protoreflect.FieldDescriptor) {
 		case *Assignment:
 			if bv, ok := n.Value.(*BlockVal); ok {
 				eb = &Block{Pos: n.Pos, End: n.End, Name: n.Key, NameQuoted: n.KeyQuoted,
-					Entries: bv.Entries, LeadingComments: n.LeadingComments}
+					Entries: bv.Entries, LeadingComments: n.LeadingComments, TrailingComments: bv.TrailingComments}
 				b.Entries[i] = eb
 			}
 		}
@@ -478,7 +479,9 @@ func canonKeyedEntries(b *Block, fd, keyFd protoreflect.FieldDescriptor) {
 		if eb.NameQuoted && identSafeEntryName(eb.Name) {
 			eb.NameQuoted = false
 		}
-		eb.Entries = dropKeyAssignments(eb.Entries, keyName, eb.Name)
+		var left []Comment
+		eb.Entries, left = dropKeyAssignments(eb.Entries, keyName, eb.Name)
+		eb.TrailingComments = append(left, eb.TrailingComments...)
 		eb.Entries = canonEntries(eb.Entries, fd.Message())
 	}
 }
@@ -487,8 +490,9 @@ func canonKeyedEntries(b *Block, fd, keyFd protoreflect.FieldDescriptor) {
 // redundant agreeing spelling of an entry's key — from entries.
 // Disagreeing or non-string assignments are kept (the document is
 // invalid; formatting must not silently change its meaning). Leading
-// comments of a dropped assignment move to the next surviving entry.
-func dropKeyAssignments(entries []Entry, keyName, entryName string) []Entry {
+// comments of a dropped assignment move to the next surviving entry; when
+// none follows, they are returned, for the block's trailing comments.
+func dropKeyAssignments(entries []Entry, keyName, entryName string) ([]Entry, []Comment) {
 	var pending []Comment
 	out := entries[:0]
 	for _, e := range entries {
@@ -511,7 +515,7 @@ func dropKeyAssignments(entries []Entry, keyName, entryName string) []Entry {
 		}
 		out = append(out, e)
 	}
-	return out
+	return out, pending
 }
 
 // canonAnonymousKeyed converts an eligible anonymous list binding of a
@@ -555,14 +559,15 @@ func canonAnonymousKeyed(n *Assignment, lv *ListVal, fd, keyFd protoreflect.Fiel
 	}
 	blk := &Block{Pos: n.Pos, End: n.End, Name: n.Key, LeadingComments: n.LeadingComments}
 	for _, el := range elems {
-		body := dropKeyAssignments(el.bv.Entries, keyName, el.key)
+		body, left := dropKeyAssignments(el.bv.Entries, keyName, el.key)
 		body = canonEntries(body, fd.Message())
 		blk.Entries = append(blk.Entries, &Block{
-			Pos:        el.bv.Pos,
-			End:        el.bv.End,
-			Name:       el.key,
-			NameQuoted: !identSafeEntryName(el.key),
-			Entries:    body,
+			Pos:              el.bv.Pos,
+			End:              el.bv.End,
+			Name:             el.key,
+			NameQuoted:       !identSafeEntryName(el.key),
+			Entries:          body,
+			TrailingComments: append(left, el.bv.TrailingComments...),
 		})
 	}
 	return blk

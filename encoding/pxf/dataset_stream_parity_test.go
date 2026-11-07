@@ -281,6 +281,8 @@ func FuzzDatasetStreamParity(f *testing.F) {
 		"(1\xc2\xb5s, 1)\n",
 		"(-inf, 2)\n",
 		"(~, 1)\n",
+		"# c\n(1, 2)\n# d\n(3, 4)\n", // a row's comments (#279)
+		"(1, # c\n2)\n(3, 4) # d\n",
 	} {
 		f.Add(s)
 	}

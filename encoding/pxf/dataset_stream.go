@@ -211,7 +211,7 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 		kind, start, end := tr.scanRow()
 		switch kind {
 		case scanRow:
-			row, err := tr.parseRow(start, end)
+			row, err := tr.parseRow(end)
 			tr.consume(end)
 			if err != nil {
 				return tr.fail(err)
@@ -222,7 +222,7 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 			// that stopped the scan: the lexer may reject a token before
 			// its end (an oversized bytes literal), and cut there, it
 			// would read as unterminated instead.
-			return tr.fail(tr.rowError(start, len(tr.pending)))
+			return tr.fail(tr.rowError())
 		case scanEnd:
 			// The newlines and comments before the directive stay in the
 			// buffer, so Tail carries them: Parse gives them to that
@@ -236,7 +236,7 @@ func (tr *DatasetReader) Next() (DatasetRow, error) {
 		// comments may remain; anything else is a row cut short.
 		if tr.srcEOF {
 			if start >= 0 {
-				return tr.fail(tr.rowError(start, len(tr.pending)))
+				return tr.fail(tr.rowError())
 			}
 			tr.consume(len(tr.pending))
 			tr.finished = true
@@ -305,10 +305,12 @@ func (tr *DatasetReader) consume(n int) {
 	}
 }
 
-// parseRow parses pending[start:end] as one row with the parser Parse
-// uses, at its document position.
-func (tr *DatasetReader) parseRow(start, end int) (*DatasetRow, error) {
-	p := newParserAt(tr.pending[start:end], tr.posAt(start), tr.lim)
+// parseRow parses the row that ends at pending[end] with the parser Parse
+// uses, at its document position. The parser starts at pending[0]: the
+// scan skipped only newlines and comments before the row's '(', and those
+// comments are the row's LeadingComments, as Parse files them.
+func (tr *DatasetReader) parseRow(end int) (*DatasetRow, error) {
+	p := newParserAt(tr.pending[:end], tr.base, tr.lim)
 	if p.current.Kind != LPAREN {
 		// Parse reports any token here, a lexical error included, as a
 		// top-level entry beside the dataset.
@@ -318,14 +320,14 @@ func (tr *DatasetReader) parseRow(start, end int) (*DatasetRow, error) {
 	return row, err
 }
 
-// rowError reports why the row starting at pending[start] is malformed.
-// The scan has seen every token from the row's '(' up to the one that
-// stopped it (a stray '(', a token the lexer rejects, or the end of the
-// input), and no ')' that closes the row. parseDatasetRow fails on
-// pending[start:end] at the token where Parse fails on the whole
-// document, because the tokens before it are the same.
-func (tr *DatasetReader) rowError(start, end int) error {
-	_, err := tr.parseRow(start, end)
+// rowError reports why the row being scanned is malformed. The scan has
+// seen every token from the row's '(' up to the one that stopped it (a
+// stray '(', a token the lexer rejects, or the end of the input), and no
+// ')' that closes the row. parseDatasetRow fails on the buffer (only
+// newlines and comments precede the '(') at the token where Parse fails
+// on the whole document, because the tokens before it are the same.
+func (tr *DatasetReader) rowError() error {
+	_, err := tr.parseRow(len(tr.pending))
 	if err == nil {
 		// Unreachable: the slice has no closing ')'.
 		err = io.ErrUnexpectedEOF

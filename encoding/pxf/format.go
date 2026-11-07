@@ -16,6 +16,12 @@ import (
 // Unlike Marshal (which works from a proto.Message and loses comments),
 // this formats directly from the parsed AST.
 //
+// A comment is written where it was, before the entry, directive or
+// dataset row it precedes, or before the end of its block or document
+// when none follows it (#279). A row is written on one line, so a comment
+// inside a row comes before it. Comments inside a list are written after
+// the list (#282).
+//
 // It keeps every directive, with its dataset rows, in document order
 // (trendvidia/protowire#558, #262). @type is written first: it binds no
 // anonymous @proto, so moving it changes nothing. The other directives
@@ -37,6 +43,7 @@ func FormatDocument(doc *Document) []byte {
 		}
 		f.writeComments(doc.LeadingComments, 0)
 		f.formatEntries(doc.Entries, 0)
+		f.writeComments(doc.TrailingComments, 0)
 		return buf.Bytes()
 	}
 
@@ -63,6 +70,7 @@ func FormatDocument(doc *Document) []byte {
 		buf.WriteByte('\n')
 		f.formatEntries(doc.Entries, 0)
 	}
+	f.writeComments(doc.TrailingComments, 0)
 	return buf.Bytes()
 }
 
@@ -127,6 +135,7 @@ func (f *formatter) formatDataset(d *DatasetDirective) {
 	f.buf.WriteString(strings.Join(d.Columns, ", "))
 	f.buf.WriteString(")\n")
 	for _, row := range d.Rows {
+		f.writeComments(row.LeadingComments, 0)
 		f.buf.WriteByte('(')
 		for i, cell := range row.Cells {
 			if i > 0 {
@@ -269,6 +278,7 @@ func (f *formatter) formatEntries(entries []Entry, level int) {
 			}
 			f.buf.WriteString(" {\n")
 			f.formatEntries(e.Entries, level+1)
+			f.writeComments(e.TrailingComments, level+1)
 			f.writeIndent(level)
 			f.buf.WriteString("}\n")
 		}
@@ -323,6 +333,7 @@ func (f *formatter) formatValue(val Value, level int) {
 	case *BlockVal:
 		f.buf.WriteString("{\n")
 		f.formatEntries(v.Entries, level+1)
+		f.writeComments(v.TrailingComments, level+1)
 		f.writeIndent(level)
 		f.buf.WriteByte('}')
 	}
