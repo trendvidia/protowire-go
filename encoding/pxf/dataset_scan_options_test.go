@@ -158,9 +158,10 @@ func TestDatasetScan_Validator(t *testing.T) {
 	_, err := bindUnder(t, pxf.UnmarshalOptions{}, md, table)
 	require.NoError(t, err)
 
+	// A validator's error is returned as it is, with no row position: only
+	// a decode error is moved to the row.
 	_, err = bindUnder(t, pxf.UnmarshalOptions{Validator: denyAll{}}, md, table)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "test.deny")
+	assert.EqualError(t, err, "check: id: denied (test.deny)")
 }
 
 func TestDatasetScan_SkipValidate(t *testing.T) {
@@ -168,10 +169,33 @@ func TestDatasetScan_SkipValidate(t *testing.T) {
 	const table = "@dataset sobad.v1.Bad ( id )\n(\"x\")\n"
 
 	_, err := bindUnder(t, pxf.UnmarshalOptions{}, md, table)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `uses PXF-reserved name "null"`)
+	assert.EqualError(t, err, "PXF schema violations:\n  sobad.proto: message field \"sobad.v1.Bad.null\" uses PXF-reserved name \"null\" (draft §3.13)")
 
 	m, err := bindUnder(t, pxf.UnmarshalOptions{SkipValidate: true}, md, table)
 	require.NoError(t, err)
 	assert.Equal(t, "x", m.Get(md.Fields().ByName("id")).String())
+}
+
+// A hook's error is a decode error: it carries the row's position and
+// names the column, wherever the column stands.
+func TestDatasetScan_OnSecretFieldError(t *testing.T) {
+	md := scanOptionsDesc(t, "so.proto", scanOptionsProtoSrc, "Row")
+	o := pxf.UnmarshalOptions{OnSecretField: func(path, value string) error {
+		return errors.New("hook says no")
+	}}
+	for _, table := range []string{
+		"@dataset so.v1.Row ( id, req, pw )\n(\"x\", 1, \"s3cret\")\n",
+		"@dataset so.v1.Row ( pw, id, req )\n(\"s3cret\", \"x\", 1)\n",
+	} {
+		_, err := bindUnder(t, o, md, table)
+		assert.EqualError(t, err, `2:1: column pw: pxf.Secret hook for "pw": hook says no`, table)
+	}
+}
+
+// The column paths are checked before the schema: a row type that breaks
+// both gets the column's error.
+func TestDatasetScan_ColumnPathsBeforeSchema(t *testing.T) {
+	md := scanOptionsDesc(t, "sobad.proto", scanOptionsBadProtoSrc, "Bad")
+	_, err := bindUnder(t, pxf.UnmarshalOptions{}, md, "@dataset sobad.v1.Bad ( nope )\n(\"x\")\n")
+	assert.EqualError(t, err, `2:1: @dataset column "nope": sobad.v1.Bad has no field "nope"`)
 }
