@@ -66,11 +66,11 @@ type DatasetReader struct {
 	typ      string
 	columns  []string
 	dirs     []Directive
-	finished bool         // Next() has returned io.EOF
-	err      error        // sticky error
-	lim      limits       // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
-	base     Position     // document position of pending[0], so rows and errors carry Parse's positions
-	resolver TypeResolver // the options' TypeResolver, for Scan: an Any cell may name its type (protowire#354)
+	finished bool             // Next() has returned io.EOF
+	err      error            // sticky error
+	lim      limits           // the options' limits; lim.maxMessageSize caps pending while a row boundary is sought
+	base     Position         // document position of pending[0], so rows and errors carry Parse's positions
+	opts     UnmarshalOptions // the caller's options, which Scan binds rows under (#280)
 
 	// The header and row scans resume where the previous pull left
 	// them, so a header or a row is lexed once however many reads it
@@ -124,12 +124,13 @@ func NewDatasetReader(r io.Reader) (*DatasetReader, error) {
 // MaxMessageSize, so a stream that never ends a row cannot grow the
 // buffer without bound, and the header and every row are parsed under
 // its MaxNestingDepth and MaxBytesLiteralLength, as [ParseOptions.Parse]
-// parses them. [DatasetReader.Scan] binds a row under every limit but
-// MaxMessageSize, as Unmarshal would bind the body the row stands for,
-// and with the options' TypeResolver, which an Any cell opening with
-// `@type = "..."` needs.
+// parses them. [DatasetReader.Scan] binds a row under every option but
+// MaxMessageSize, as [UnmarshalOptions.BindRow] binds it: the other
+// limits, the TypeResolver (which an Any cell opening with
+// `@type = "..."` needs), DiscardUnknown, SkipPostDecode, SkipValidate,
+// OnSecretField and Validator (#280).
 func (o UnmarshalOptions) NewDatasetReader(r io.Reader) (*DatasetReader, error) {
-	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1, resolver: o.TypeResolver}
+	tr := &DatasetReader{src: r, lim: o.limits(), base: Position{Line: 1, Column: 1}, rowStart: -1, opts: o}
 	if t, ok := r.(*datasetTail); ok {
 		tr.base = t.at
 		tr.chained = true

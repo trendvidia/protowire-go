@@ -71,7 +71,10 @@ import (
 // a reused one, a field an earlier row set keeps its value under a null
 // cell, and a _null mask grows by every row's nulls.
 //
-// msg's descriptor is checked against the bind-time schema rules
+// The row is bound under the options the reader was built with
+// ([UnmarshalOptions.NewDatasetReader]), as [UnmarshalOptions.BindRow]
+// binds it, except MaxMessageSize. Unless they set SkipValidate, msg's
+// descriptor is checked against the bind-time schema rules
 // ([ValidateDescriptor]), as [Unmarshal] checks it, and a violation
 // fails the row. A row's decode error carries the row's position.
 func (tr *DatasetReader) Scan(msg proto.Message) error {
@@ -79,16 +82,10 @@ func (tr *DatasetReader) Scan(msg proto.Message) error {
 	if err != nil {
 		return err
 	}
-	// The reader's limits, not MaxMessageSize: the row's bytes were
+	// The reader's options, except MaxMessageSize: the row's bytes were
 	// capped as they were read, and the synthetic body may format wider.
-	o := UnmarshalOptions{
-		MaxNestingDepth:         tr.lim.maxDepth,
-		MaxNumericLiteralDigits: tr.lim.maxDigits,
-		MaxBytesLiteralLength:   tr.lim.maxBytesLiteral,
-		MaxRepeatedCount:        tr.lim.maxRepeated,
-		MaxBigFloatExponent:     tr.lim.maxBigFloatExp,
-		TypeResolver:            tr.resolver,
-	}
+	o := tr.opts
+	o.MaxMessageSize = 0
 	// The column paths depend on msg's type and the header, never on the
 	// row, so they are checked once per type rather than once per row.
 	if desc := msg.ProtoReflect().Descriptor(); desc != tr.pathsChecked {

@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DatasetReader.Scan` binds a row under the options the reader was built with** ([#280]; from trendvidia/protowire-cpp#166). It used fresh options holding only the limits and the `TypeResolver`, so `SkipValidate`, `SkipPostDecode`, `DiscardUnknown`, `OnSecretField` and `Validator` had no effect on a streamed row, while `UnmarshalOptions.BindRow` honoured them for the same row. `Scan` now binds as `BindRow` does, under every option but `MaxMessageSize`. So a `pxf.Secret` cell goes to `OnSecretField` instead of into the message, and a `Validator`'s violations fail the row. At the zero options nothing changes. protowire-cpp's `Scan` already behaves this way.
+
+[#280]: https://github.com/trendvidia/protowire-go/issues/280
+
 ## [1.16.1] — 2026-11-05
 
 A patch release. A PXF BigFloat literal whose precision suffix runs to
