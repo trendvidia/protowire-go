@@ -11,6 +11,16 @@ format changes.
 
 ## [Unreleased]
 
+## [1.17.0] — 2026-11-07
+
+A minor release, because a streamed dataset row now binds under the
+reader's options, so a `Validator` or `OnSecretField` set on the reader
+can now refuse or divert a row it used to accept ([#280]). `FormatDocument`
+keeps comments that come before the end of a document or block, or
+between dataset rows. It used to drop them or move them ([#279]).
+`Document`, `Block`, `BlockVal` and `DatasetRow` gain comment fields. No
+wire-format change.
+
 ### Fixed
 
 - **`FormatDocument` keeps a comment that no entry follows** ([#279]). The parser attached a comment only to the entry after it. So a comment at the end of a document was dropped, and one before a block's closing `}` was dropped or carried out of the block onto the next entry. Comments between dataset rows went to the next directive, or were dropped at the end. Now `Document` and `Block` and `BlockVal` gain `TrailingComments`, and `DatasetRow` gains `LeadingComments`, which `Parse` and `DatasetReader` both set. `FormatDocument` writes each in place, and `CanonicalizeKeyed` keeps them when it rewrites a keyed block, as well as the comments of a redundant key assignment it drops last in a block. A comment inside a row now comes before the row. Comments inside a list still move after it ([#282]).
