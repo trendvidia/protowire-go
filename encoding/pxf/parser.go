@@ -434,6 +434,7 @@ directives:
 			doc.Entries = append(doc.Entries, entry)
 		}
 	}
+	doc.TrailingComments = p.flushComments() // comments after the last entry, directive or row
 	return doc, nil
 }
 
@@ -513,8 +514,14 @@ func (p *parser) parseDatasetDirective() (*DatasetDirective, int, error) {
 // parseDatasetRow reads `( cell ( ',' cell )* )` with an arity check
 // against expected. LPAREN is current on entry. Returns the row plus
 // the byte offset immediately past the closing `)`.
+//
+// The comments pending at the '(' and those inside the row are the row's
+// LeadingComments. Left pending, they would pass to the next row or
+// directive, or to the document's end. The row parsers of [DatasetReader]
+// call this too, so they file the comments as Parse does.
 func (p *parser) parseDatasetRow(expected int) (*DatasetRow, int, error) {
 	pos := p.current.Pos
+	leading := p.flushComments()
 	p.advance() // consume (
 
 	row := &DatasetRow{Pos: pos, Cells: make([]Value, 0, expected)}
@@ -537,6 +544,9 @@ func (p *parser) parseDatasetRow(expected int) (*DatasetRow, int, error) {
 		return nil, 0, errorf(p.current.Pos, "expected ',' or ')' in @dataset row, got %s", p.current.Kind)
 	}
 	endOffset := p.current.Pos.Offset + 1
+	// Taken before the ')' is consumed: advance would add the comments
+	// after it, which belong to what follows the row.
+	row.LeadingComments = append(leading, p.flushComments()...)
 	p.advance() // consume )
 
 	if len(row.Cells) != expected {
@@ -1032,11 +1042,12 @@ func (p *parser) parseEntry(depth int, allowMapEntry bool) (Entry, error) {
 			return &Block{Pos: pos, End: end, Name: key, NameQuoted: keyKind == STRING, LeadingComments: leading}, nil
 		}
 		p.advance() // consume {
-		entries, bodyEnd, err := p.parseBody(depth + 1)
+		entries, trailing, bodyEnd, err := p.parseBody(depth + 1)
 		if err != nil {
 			return nil, err
 		}
-		return &Block{Pos: pos, End: bodyEnd, Name: key, NameQuoted: keyKind == STRING, Entries: entries, LeadingComments: leading}, nil
+		return &Block{Pos: pos, End: bodyEnd, Name: key, NameQuoted: keyKind == STRING, Entries: entries,
+			LeadingComments: leading, TrailingComments: trailing}, nil
 
 	default:
 		if err := p.soft(errorf(p.current.Pos, "expected '=', ':', or '{' after %q, got %s", key, p.current.Kind)); err != nil {
@@ -1225,20 +1236,24 @@ func (p *parser) parseBlockVal(depth int) (Value, error) {
 	}
 	pos := p.current.Pos
 	p.advance() // consume {
-	entries, bodyEnd, err := p.parseBody(depth + 1)
+	entries, trailing, bodyEnd, err := p.parseBody(depth + 1)
 	if err != nil {
 		return nil, err
 	}
-	return &BlockVal{Pos: pos, End: bodyEnd, Entries: entries}, nil
+	return &BlockVal{Pos: pos, End: bodyEnd, Entries: entries, TrailingComments: trailing}, nil
 }
 
-func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
+// parseBody reads the entries of a block up to its closing '}', which it
+// consumes. It returns the entries, the comments after the last of them
+// (they precede no entry, so no entry flushes them), and the position just
+// past the '}'.
+func (p *parser) parseBody(depth int) ([]Entry, []Comment, Position, error) {
 	entries := make([]Entry, 0, 4)
 	for p.current.Kind != RBRACE && p.current.Kind != EOF && !p.tolerantRowClose() {
 		if p.current.Kind == AT_TYPE {
 			entry, err := p.parseTypeEntry(len(entries) == 0)
 			if err != nil {
-				return nil, Position{}, err
+				return nil, nil, Position{}, err
 			}
 			if entry != nil {
 				entries = append(entries, entry)
@@ -1250,16 +1265,19 @@ func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 		// disambiguated by the schema layer.
 		entry, err := p.parseEntry(depth, true)
 		if err != nil {
-			return nil, Position{}, err
+			return nil, nil, Position{}, err
 		}
 		// Tolerant mode returns (nil, nil) for an entry it skipped past.
 		if entry != nil {
 			entries = append(entries, entry)
 		}
 	}
+	// Taken before the '}' is consumed: advance would add the comments
+	// after it, which belong to whatever follows the block.
+	trailing := p.flushComments()
 	if p.current.Kind != RBRACE {
 		if !p.tolerant {
-			return nil, Position{}, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
+			return nil, nil, Position{}, errorf(p.current.Pos, "expected '}', got %s", p.current.Kind)
 		}
 		// Unclosed block: close it at EOF, or at the ')' of the @dataset
 		// row it is a cell of, with the entries parsed so far.
@@ -1268,11 +1286,11 @@ func (p *parser) parseBody(depth int) ([]Entry, Position, error) {
 		} else {
 			p.record(errorf(p.current.Pos, "unclosed block: expected '}' before end of input"))
 		}
-		return entries, p.current.Pos, nil
+		return entries, trailing, p.current.Pos, nil
 	}
 	end := p.tokenEnd()
 	p.advance()
-	return entries, end, nil
+	return entries, trailing, end, nil
 }
 
 // parseTypeEntry parses `@type = "<type-url>"`, the type entry of a

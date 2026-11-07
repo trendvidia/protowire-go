@@ -23,6 +23,9 @@ type Document struct {
 	BodyOffset      int                // byte offset in the input where the schema-typed body begins (after all leading directives)
 	Entries         []Entry
 	LeadingComments []Comment // comments before the first entry (or after @type)
+	// TrailingComments are the comments after the document's last entry,
+	// directive or dataset row, which precede no entry of their own.
+	TrailingComments []Comment
 }
 
 // DatasetDirective is a `@dataset <type> ( col1, col2, ... ) row*`
@@ -59,6 +62,10 @@ type DatasetDirective struct {
 type DatasetRow struct {
 	Pos   Position
 	Cells []Value // nil entries denote absent fields; len == len(dataset.Columns)
+	// LeadingComments are the comments before this row (after the column
+	// list or the previous row) and inside it. [FormatDocument] writes a
+	// row on one line, so it writes them all before the row.
+	LeadingComments []Comment
 }
 
 // ProtoShape distinguishes the four body shapes of a @proto directive
@@ -225,6 +232,9 @@ type Block struct {
 	NameQuoted      bool
 	Entries         []Entry
 	LeadingComments []Comment
+	// TrailingComments are the comments after the last entry, before the
+	// closing '}' (all of an empty block's comments).
+	TrailingComments []Comment
 }
 
 func (*Block) entryNode()      {}
@@ -399,6 +409,9 @@ type BlockVal struct {
 	Pos     Position
 	End     Position // just past the closing '}'
 	Entries []Entry
+	// TrailingComments are the comments after the last entry, before the
+	// closing '}' (all of an empty block's comments).
+	TrailingComments []Comment
 }
 
 func (*BlockVal) valueNode()      {}
