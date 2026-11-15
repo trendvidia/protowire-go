@@ -11,6 +11,13 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **SBE `Unmarshal` refuses a group of entries with blockLength 0** ([#291]). The draft says a group header with a count above 0 and a blockLength of 0 MUST be rejected. When a group's entry message has no fields its template block is 0, and nothing refused it, so a 4-byte group header could append up to `MaxRepeatedCount` empty entries while consuming no bytes. `Unmarshal` now refuses it with `sbe: group e declares 3 entries of blockLength 0`, whatever the template's block. A count of 0 still decodes. `Marshal` still writes such a group, which `Unmarshal` now refuses ([#293]).
+
+[#291]: https://github.com/trendvidia/protowire-go/issues/291
+[#293]: https://github.com/trendvidia/protowire-go/issues/293
+
 ## [1.17.0] — 2026-11-07
 
 A minor release, because a streamed dataset row now binds under the
