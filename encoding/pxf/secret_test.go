@@ -388,6 +388,40 @@ func TestSecretBlockForm_MarksInnerValuePresent(t *testing.T) {
 	assert.True(t, res.IsSet("db_password.hint"))
 }
 
+// A literal in a list element or a map value records `value` present, as
+// the block form does there and as a field's literal does (#289). Before,
+// `IsSet("backup_keys[1].value")` depended on which spelling of one value
+// the document used. The same holds with OnSecretField set, where the
+// value goes to the hook instead of into the message.
+func TestSecretElementLiteral_MarksInnerValuePresent(t *testing.T) {
+	desc := secretDemoDesc(t)
+	const input = `
+db_password = "x"
+backup_keys = [{ value = "a"  hint = "h" }, "b"]
+tenant_keys = { "acme": "k"  "z": { value = "v" } }
+`
+	want := []string{
+		"backup_keys",
+		"backup_keys[0].hint",
+		"backup_keys[0].value",
+		"backup_keys[1].value",
+		"db_password",
+		"db_password.value",
+		"tenant_keys",
+		`tenant_keys["acme"].value`,
+		`tenant_keys["z"].value`,
+	}
+	for _, hook := range []bool{false, true} {
+		var opts pxf.UnmarshalOptions
+		if hook {
+			opts.OnSecretField = func(string, string) error { return nil }
+		}
+		_, res, err := opts.UnmarshalFullDescriptor([]byte(input), desc)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, want, res.PresentFields(), "OnSecretField set: %v", hook)
+	}
+}
+
 // --- regression: the existing "expected '{'" error must still fire for
 // non-Secret message fields when handed a bare string. ---
 

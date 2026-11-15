@@ -945,7 +945,9 @@ func (d *directDecoder) decodeFieldValue(msg protoreflect.Message, fd protorefle
 //
 // The WKT shorthands of list elements and map values do not call it:
 // the element itself is the unit there, recorded when its body is a
-// block (see enterIndex and enterKey).
+// block (see enterIndex and enterKey). pxf.Secret is the exception: its
+// literal records `value` in every position, as its block form does
+// (#289).
 func (d *directDecoder) markInnerPresent(fd protoreflect.FieldDescriptor, names ...string) {
 	if d.result == nil {
 		return
@@ -1408,8 +1410,16 @@ func (d *directDecoder) consumeListMsg(fd protoreflect.FieldDescriptor, list pro
 				return protoreflect.Value{}, errorf(pos, "pxf.Secret hook for %q: %v", path, err)
 			}
 			d.advance()
+			if d.result != nil {
+				d.result.markPresent(path + ".value")
+			}
 			sub := list.NewElement().Message()
 			return protoreflect.ValueOfMessage(sub), nil
+		}
+		// The literal records `value` present, as the block form does
+		// and as a field's literal does (#289).
+		if d.result != nil {
+			d.result.markPresent(d.pathPrefix + string(fd.Name()) + indexSuffix(list.Len()) + ".value")
 		}
 		v, err := d.consumeScalarAs(innerFd, fd)
 		if err != nil {
@@ -1689,9 +1699,17 @@ func (d *directDecoder) decodeMapInline(msg protoreflect.Message, fd protoreflec
 						return errorf(pos, "pxf.Secret hook for %q: %v", path, err)
 					}
 					d.advance()
+					if d.result != nil {
+						d.result.markPresent(path + ".value")
+					}
 					sub := m.NewValue().Message()
 					fastMapSet(m, k, protoreflect.ValueOfMessage(sub))
 					continue
+				}
+				// The literal records `value` present, as the block form
+				// does and as a field's literal does (#289).
+				if d.result != nil {
+					d.result.markPresent(d.pathPrefix + string(fd.Name()) + keySuffix(k) + ".value")
 				}
 				v, err := d.consumeScalarAs(innerFd, fd)
 				if err != nil {
