@@ -17,6 +17,8 @@
 //
 //	Exit 0 → input was accepted
 //	Exit 1 → input was rejected (clean error)
+//	Exit 2 → the harness cannot judge the row (bad flags, or a pb mirror
+//	         that does not match --proto), which the gate reports as a crash
 //	Other  → bug in the decoder (panic / abort / OOM / hang / ...)
 //
 // pb-text and pxf-pb also write their output on stdout, for the text gate
@@ -32,6 +34,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -50,12 +53,15 @@ import (
 // FileDescriptor descriptors — so the PB path needs concrete Go types here.
 // The PXF path uses descriptors compiled from --proto at runtime.
 //
-// Mirror of protowire/testdata/adversarial/adversarial.proto. Drift between
-// this file and the .proto must be caught by the conformance run itself: a
-// missing or wrong tag will fail the manifest's accept/reject expectations.
+// Mirror of protowire/testdata/adversarial/adversarial.proto. pbDecode
+// compares the row's mirror with the message --proto compiles to, field
+// number by field number, and exits 2 on any difference. A row's verdict
+// alone cannot catch drift: pb.Unmarshal skips a field the struct does not
+// declare, so a missing field is accepted at any depth (#285).
 type Tree struct {
 	Child    *Tree             `protowire:"1"`
 	Label    string            `protowire:"2"`
+	Children []*Tree           `protowire:"3"`
 	Branches map[string]*Tree  `protowire:"4"`
 	Tags     map[string]string `protowire:"5"`
 }
@@ -101,15 +107,59 @@ func main() {
 	}
 
 	if err := run(format, schema, proto, input, limits); err != nil {
+		var he harnessError
+		if errors.As(err, &he) {
+			fmt.Fprintln(os.Stderr, "check_decode:", err)
+			os.Exit(2)
+		}
 		fmt.Fprintln(os.Stderr, "reject:", err)
 		os.Exit(1)
 	}
 }
 
+// harnessError is a failure of the harness, not a verdict on the input,
+// so main exits 2 for it rather than 1. Exiting 1 would count it as a
+// rejection, and a reject row would pass without its input being read.
+type harnessError struct{ error }
+
+func harnessErrorf(format string, a ...any) error {
+	return harnessError{fmt.Errorf(format, a...)}
+}
+
+// checkMirror reports a difference between the field numbers a pb mirror
+// declares in its protowire tags and the fields of md, in either direction.
+func checkMirror(md protoreflect.MessageDescriptor, mirror any) error {
+	declared := map[protoreflect.FieldNumber]string{}
+	rt := reflect.TypeOf(mirror).Elem()
+	for i := 0; i < rt.NumField(); i++ {
+		tag, ok := rt.Field(i).Tag.Lookup("protowire")
+		if !ok {
+			continue
+		}
+		num, err := strconv.Atoi(strings.SplitN(tag, ",", 2)[0])
+		if err != nil {
+			return fmt.Errorf("pb mirror %s.%s: bad tag %q", rt.Name(), rt.Field(i).Name, tag)
+		}
+		declared[protoreflect.FieldNumber(num)] = rt.Field(i).Name
+	}
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if _, ok := declared[fd.Number()]; !ok {
+			return fmt.Errorf("pb mirror %s has no field %d (%s) of %s", rt.Name(), fd.Number(), fd.Name(), md.FullName())
+		}
+		delete(declared, fd.Number())
+	}
+	for num, name := range declared {
+		return fmt.Errorf("pb mirror %s.%s is field %d, which %s does not have", rt.Name(), name, num, md.FullName())
+	}
+	return nil
+}
+
 func run(format, schema, protoPath, input string, lim limitFlags) error {
 	data, err := os.ReadFile(input)
 	if err != nil {
-		return fmt.Errorf("read input: %w", err)
+		return harnessErrorf("read input: %w", err)
 	}
 	switch format {
 	case "pxf":
@@ -117,23 +167,23 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 	case "pxf-pb":
 		return pxfPb(data, schema, protoPath, lim)
 	case "pb":
-		return pbDecode(data, schema, lim)
+		return pbDecode(data, schema, protoPath, lim)
 	case "pb-render":
 		return pbRender(data, schema, protoPath)
 	case "pb-text":
 		return pbText(data, schema, protoPath)
 	case "envelope":
-		return errors.New("envelope decode not yet implemented in this reference")
+		return harnessErrorf("envelope decode not yet implemented in this reference")
 	case "sbe":
 		return sbeDecode(data, schema, protoPath, lim)
 	default:
-		return fmt.Errorf("unsupported format: %s", format)
+		return harnessErrorf("unsupported format: %s", format)
 	}
 }
 
 func pxfDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 	if protoPath == "" {
-		return errors.New("--proto is required for format=pxf")
+		return harnessErrorf("--proto is required for format=pxf")
 	}
 	desc, err := loadDescriptor(protoPath, schema)
 	if err != nil {
@@ -157,7 +207,7 @@ func pxfDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 // key. Text and security gates never compare these bytes (protowire#509).
 func pxfPb(data []byte, schema, protoPath string, lim limitFlags) error {
 	if protoPath == "" {
-		return errors.New("--proto is required for format=pxf-pb")
+		return harnessErrorf("--proto is required for format=pxf-pb")
 	}
 	desc, err := loadDescriptor(protoPath, schema)
 	if err != nil {
@@ -182,7 +232,7 @@ func pxfPb(data []byte, schema, protoPath string, lim limitFlags) error {
 	return err
 }
 
-func pbDecode(data []byte, schema string, lim limitFlags) error {
+func pbDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 	var msg any
 	switch schema {
 	case "adversarial.v1.Tree":
@@ -198,7 +248,16 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 	case "adversarial.v1.BigNumHolder":
 		msg = &BigNumHolder{}
 	default:
-		return fmt.Errorf("unknown schema for pb: %s", schema)
+		return harnessErrorf("unknown schema for pb: %s", schema)
+	}
+	if protoPath != "" {
+		desc, err := loadDescriptor(protoPath, schema)
+		if err != nil {
+			return err
+		}
+		if err := checkMirror(desc, msg); err != nil {
+			return harnessError{err}
+		}
 	}
 	return pwpb.UnmarshalOptions{
 		MaxMessageSize:          lim["MaxMessageSize"],
@@ -219,7 +278,7 @@ func pbDecode(data []byte, schema string, lim limitFlags) error {
 // as in pbRender, so the comparison is of the marshaller alone.
 func pbText(data []byte, schema, protoPath string) error {
 	if protoPath == "" {
-		return errors.New("--proto is required for format=pb-text")
+		return harnessErrorf("--proto is required for format=pb-text")
 	}
 	desc, err := loadDescriptor(protoPath, schema)
 	if err != nil {
@@ -239,7 +298,7 @@ func pbText(data []byte, schema, protoPath string) error {
 
 func pbRender(data []byte, schema, protoPath string) error {
 	if protoPath == "" {
-		return errors.New("--proto is required for format=pb-render")
+		return harnessErrorf("--proto is required for format=pb-render")
 	}
 	desc, err := loadDescriptor(protoPath, schema)
 	if err != nil {
@@ -258,7 +317,7 @@ func pbRender(data []byte, schema, protoPath string) error {
 // SBE rows are decoded rather than refused for want of a codec.
 func sbeDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 	if protoPath == "" {
-		return errors.New("--proto is required for format=sbe")
+		return harnessErrorf("--proto is required for format=sbe")
 	}
 	desc, err := loadDescriptor(protoPath, schema)
 	if err != nil {
@@ -269,7 +328,7 @@ func sbeDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 		MaxRepeatedCount: lim["MaxRepeatedCount"],
 	}.NewCodec(desc.ParentFile())
 	if err != nil {
-		return err
+		return harnessError{err}
 	}
 	_, err = codec.UnmarshalDescriptor(data, desc)
 	return err
@@ -278,7 +337,7 @@ func sbeDecode(data []byte, schema, protoPath string, lim limitFlags) error {
 func loadDescriptor(protoPath, schema string) (protoreflect.MessageDescriptor, error) {
 	abs, err := filepath.Abs(protoPath)
 	if err != nil {
-		return nil, fmt.Errorf("resolve proto path: %w", err)
+		return nil, harnessErrorf("resolve proto path: %w", err)
 	}
 	dir := filepath.Dir(abs)
 	base := filepath.Base(abs)
@@ -298,10 +357,10 @@ func loadDescriptor(protoPath, schema string) (protoreflect.MessageDescriptor, e
 	}
 	files, err := compiler.Compile(context.Background(), base)
 	if err != nil {
-		return nil, fmt.Errorf("compile %s: %w", protoPath, err)
+		return nil, harnessErrorf("compile %s: %w", protoPath, err)
 	}
 	if len(files) == 0 {
-		return nil, errors.New("compile produced no files")
+		return nil, harnessErrorf("compile produced no files")
 	}
 	fd := files[0]
 
@@ -311,7 +370,7 @@ func loadDescriptor(protoPath, schema string) (protoreflect.MessageDescriptor, e
 			return m, nil
 		}
 	}
-	return nil, fmt.Errorf("schema %q not found in %s", schema, protoPath)
+	return nil, harnessErrorf("schema %q not found in %s", schema, protoPath)
 }
 
 func dirExists(path string) bool {
