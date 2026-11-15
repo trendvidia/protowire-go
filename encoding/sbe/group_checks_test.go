@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/trendvidia/protowire-go/encoding/sbe"
@@ -69,4 +70,59 @@ func TestUnmarshalGroupZeroBlockLength(t *testing.T) {
 			require.Equal(t, 0, msg.Get(md.Fields().ByName("e")).List().Len())
 		})
 	}
+}
+
+// TestNewCodecGroupOneof: a oneof in a group entry is refused, as in the
+// root message and in a composite. Before #292 it bound, gave each member
+// its own block slot, and lost the first member on the way back: {a: 5}
+// read back as {a: 0}. A proto3 optional field is a synthetic oneof, and
+// still binds and round-trips.
+func TestNewCodecGroupOneof(t *testing.T) {
+	t.Run("oneof refused", func(t *testing.T) {
+		fd := boundsFile(t, "1", "0", `
+message E { oneof o { uint32 a = 1; uint32 b = 2; } }
+message M { option (sbe.template_id) = 1; repeated E e = 1; }`)
+		_, err := sbe.NewCodec(fd)
+		require.EqualError(t, err, "sbe: oneof field in group bounds.v1.E not supported")
+	})
+
+	t.Run("oneof inside a composite in a group refused", func(t *testing.T) {
+		fd := boundsFile(t, "1", "0", `
+message C { oneof o { uint32 a = 1; uint32 b = 2; } }
+message E { C c = 1; }
+message M { option (sbe.template_id) = 1; repeated E e = 1; }`)
+		_, err := sbe.NewCodec(fd)
+		require.ErrorContains(t, err, "composite bounds.v1.C contains oneof field a")
+	})
+
+	t.Run("proto3 optional binds and round-trips", func(t *testing.T) {
+		fd := boundsFile(t, "1", "0", `
+message E { optional uint32 a = 1; uint32 b = 2; }
+message M { option (sbe.template_id) = 1; repeated E e = 1; }`)
+		codec, err := sbe.NewCodec(fd)
+		require.NoError(t, err)
+
+		md := fd.Messages().ByName("M")
+		ed := fd.Messages().ByName("E")
+		src := dynamicpb.NewMessage(md)
+		list := src.Mutable(md.Fields().ByName("e")).List()
+		for _, v := range [][2]uint32{{5, 0}, {0, 6}} {
+			e := dynamicpb.NewMessage(ed)
+			e.Set(ed.Fields().ByName("a"), protoreflect.ValueOfUint32(v[0]))
+			e.Set(ed.Fields().ByName("b"), protoreflect.ValueOfUint32(v[1]))
+			list.Append(protoreflect.ValueOfMessage(e))
+		}
+		wire, err := codec.Marshal(src)
+		require.NoError(t, err)
+
+		got := dynamicpb.NewMessage(md)
+		require.NoError(t, codec.Unmarshal(wire, got))
+		gl := got.Get(md.Fields().ByName("e")).List()
+		require.Equal(t, 2, gl.Len())
+		for i, v := range [][2]uint32{{5, 0}, {0, 6}} {
+			e := gl.Get(i).Message()
+			require.Equal(t, uint64(v[0]), e.Get(ed.Fields().ByName("a")).Uint(), "entry %d a", i)
+			require.Equal(t, uint64(v[1]), e.Get(ed.Fields().ByName("b")).Uint(), "entry %d b", i)
+		}
+	})
 }

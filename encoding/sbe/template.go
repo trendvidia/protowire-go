@@ -222,6 +222,11 @@ func buildGroupTemplate(fd protoreflect.FieldDescriptor) (groupTemplate, error) 
 		if f.IsMap() {
 			return gt, fmt.Errorf("sbe: map field in group %s not supported", md.FullName())
 		}
+		// Each member would get its own block slot, and reading the
+		// second sets it and clears the first, so a value is lost.
+		if f.ContainingOneof() != nil && !f.ContainingOneof().IsSynthetic() {
+			return gt, fmt.Errorf("sbe: oneof field in group %s not supported", md.FullName())
+		}
 		if f.IsList() {
 			return gt, fmt.Errorf("sbe: nested repeated field in group %s not supported", md.FullName())
 		}
