@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A keyed error in a `@dataset` cell is reported at its row and names its column** ([#290]). `DatasetReader.Scan` and `BindRow` moved a cell's `*Error` to the row and prefixed `column <name>:`, but returned a `*KeyedError` (duplicate key, empty key, key conflict, quoted name on an unkeyed field) at a line of the synthetic body the row is decoded from, which points at nothing in the caller's file. `({ a {} a {} })` on line 2 gave `5:3: duplicate key "a" in keyed field "kd"`, and now gives `2:1: column kd: duplicate key "a" in keyed field "kd"`, as protowire-cpp, protowire-java and protowire-rust do. It is still a `*KeyedError` of the same `Kind`.
+
+[#290]: https://github.com/trendvidia/protowire-go/issues/290
+
 ## [1.17.0] — 2026-11-07
 
 A minor release, because a streamed dataset row now binds under the
