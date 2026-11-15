@@ -406,13 +406,13 @@ you add the replace. They are tagged in lockstep on every fork bump.
 
 ## Command-line tool
 
-The `protowire` CLI is shared across every port and lives in the spec repo at [github.com/trendvidia/protowire/cmd/protowire](https://github.com/trendvidia/protowire/tree/main/cmd/protowire). It is written in Go and depends on this repo as a library. Install:
+The `pxf` CLI is shared across every port and lives in the spec repo at [github.com/trendvidia/protowire/cmd/pxf](https://github.com/trendvidia/protowire/tree/main/cmd/pxf). It is written in Go and depends on this repo as a library. Install:
 
 ```bash
-go install github.com/trendvidia/protowire/cmd/protowire@latest
+go install github.com/trendvidia/protowire/cmd/pxf@latest
 ```
 
-See the [spec repo README](https://github.com/trendvidia/protowire#cli) for subcommands (encode / decode / validate / fmt / sbe2proto / proto2sbe) and registry-mode flags.
+See the [spec repo README](https://github.com/trendvidia/protowire#cli) for the subcommands and registry-mode flags.
 
 ## Performance: opting into the fast path
 
@@ -561,7 +561,7 @@ This is the canonical reference port — when behavior is ambiguous, this implem
 - **`sint32` / `sint64` are off the dynamicpb fast path.** The hot-path optimization reaches for `SetUnsafe` on the standard kinds; the signed-zigzag varieties go through the slow path. Latency-sensitive callers using `sint*` should benchmark before committing.
 - **PXF triple-quoted string dedent** uses the closing-line indent as the base; mixing tabs and spaces in the same block is implementation-defined (matches the spec's "implementation choice" carve-out — reasonable callers should avoid it).
 - **SBE XML schema generation is one-way at runtime.** `proto2sbe` emits an XML schema from annotated `.proto`, but consuming a hand-authored XML schema and producing `.proto` is driven by the shared CLI rather than this runtime library. Programmatic consumers should generate at build time.
-- **The CLI lives in [trendvidia/protowire/cmd/protowire](https://github.com/trendvidia/protowire/tree/main/cmd/protowire), not here.** The library here is consumed by that CLI; standalone Go callers don't need it.
+- **The CLI lives in [trendvidia/protowire/cmd/pxf](https://github.com/trendvidia/protowire/tree/main/cmd/pxf), not here.** The library here is consumed by that CLI; standalone Go callers don't need it.
 
 ## Contributing
 
