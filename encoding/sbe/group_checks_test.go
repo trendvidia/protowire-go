@@ -5,6 +5,7 @@ package sbe_test
 
 import (
 	"encoding/hex"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -70,6 +71,34 @@ func TestUnmarshalGroupZeroBlockLength(t *testing.T) {
 			require.Equal(t, 0, msg.Get(md.Fields().ByName("e")).List().Len())
 		})
 	}
+}
+
+// TestMarshalGroupZeroBlockLength: Marshal refuses what Unmarshal refuses.
+// Before #293 three empty entries wrote 000001000100000000000300, which
+// TestUnmarshalGroupZeroBlockLength shows is refused on the way back. An
+// empty list still writes and reads back.
+func TestMarshalGroupZeroBlockLength(t *testing.T) {
+	fd := boundsFile(t, "1", "0", `message E {} message M { option (sbe.template_id) = 1; repeated E e = 1; }`)
+	codec, err := sbe.NewCodec(fd)
+	require.NoError(t, err)
+	md := fd.Messages().ByName("M")
+	ed := fd.Messages().ByName("E")
+
+	for _, n := range []int{1, 3} {
+		src := dynamicpb.NewMessage(md)
+		list := src.Mutable(md.Fields().ByName("e")).List()
+		for range n {
+			list.Append(protoreflect.ValueOfMessage(dynamicpb.NewMessage(ed)))
+		}
+		wire, err := codec.Marshal(src)
+		require.EqualError(t, err, fmt.Sprintf("sbe: field bounds.v1.M.e has %d entries of blockLength 0, which a decoder must refuse", n))
+		require.Nil(t, wire)
+	}
+
+	wire, err := codec.Marshal(dynamicpb.NewMessage(md))
+	require.NoError(t, err)
+	require.Equal(t, "000001000100000000000000", hex.EncodeToString(wire))
+	require.NoError(t, codec.Unmarshal(wire, dynamicpb.NewMessage(md)))
 }
 
 // TestNewCodecGroupOneof: a oneof in a group entry is refused, as in the

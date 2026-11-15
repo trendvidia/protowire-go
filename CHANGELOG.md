@@ -13,9 +13,9 @@ format changes.
 
 ### Fixed
 
-- **SBE `Unmarshal` refuses a group of entries with blockLength 0** ([#291]). The draft says a group header with a count above 0 and a blockLength of 0 MUST be rejected. When a group's entry message has no fields its template block is 0, and nothing refused it, so a 4-byte group header could append up to `MaxRepeatedCount` empty entries while consuming no bytes. `Unmarshal` now refuses it with `sbe: group e declares 3 entries of blockLength 0`, whatever the template's block. A count of 0 still decodes. `Marshal` still writes such a group, which `Unmarshal` now refuses ([#293]).
+- **SBE `Unmarshal` refuses a group of entries with blockLength 0** ([#291]). The draft says a group header with a count above 0 and a blockLength of 0 MUST be rejected. When a group's entry message has no fields its template block is 0, and nothing refused it, so a 4-byte group header could append up to `MaxRepeatedCount` empty entries while consuming no bytes. `Unmarshal` now refuses it with `sbe: group e declares 3 entries of blockLength 0`, whatever the template's block. A count of 0 still decodes. `Marshal` refuses to write such a group too, with `sbe: field pkg.M.e has 3 entries of blockLength 0, which a decoder must refuse`, so it no longer writes bytes `Unmarshal` refuses ([#293]). An empty list still writes.
 
-- **SBE `NewCodec` refuses a oneof in a group entry** ([#292]). It refused a oneof in the root message and in a composite, but bound one in a repeating group's entry. Each member got its own block slot, and reading the second member set it and cleared the first, so `{a: 5}` read back as `{a: 0}` with no error on either side. `NewCodec` now refuses it with `sbe: oneof field in group E not supported`. A proto3 `optional` field still binds.
+- **SBE `NewCodec` refuses a oneof in a group entry** ([#292]). It refused a oneof in the root message and in a composite, but bound one in a repeating group's entry. Each member got its own block slot, and reading the second member set it and cleared the first, so `{a: 5}` read back as `{a: 0}` with no error on either side. `NewCodec` now refuses it with `sbe: oneof field in group pkg.E not supported`. A proto3 `optional` field still binds.
 
 [#291]: https://github.com/trendvidia/protowire-go/issues/291
 [#292]: https://github.com/trendvidia/protowire-go/issues/292
