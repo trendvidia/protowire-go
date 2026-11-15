@@ -13,7 +13,7 @@ format changes.
 
 ### Changed
 
-- **A `pxf.Secret` literal in a list element or map value records `value` present** ([#289]). `UnmarshalFull` recorded `pw.value` for `pw = "x"` and for the block form everywhere, but nothing for the literal in a list or map: `backup_keys = ["b"]` left `IsSet("backup_keys[0].value")` false, while `backup_keys = [{ value = "b" }]` made it true. Now both spellings record it, with or without `OnSecretField`, as protowire-java does. Other well-known types in lists and maps are unchanged ([#298]).
+- **A `pxf.Secret` literal in a list element or map value records `value` present** ([#289]). `UnmarshalFull` recorded `pw.value` for `pw = "x"` and for the block form everywhere, but nothing for the literal in a list or map: `backup_keys = ["b"]` left `IsSet("backup_keys[0].value")` false, while `backup_keys = [{ value = "b" }]` made it true. Now both spellings record it, with or without `OnSecretField`, as protowire-java does. Secret is the only such type: a Timestamp, Duration, wrapper or bignum literal in a list or map still records the element alone, while its block form records the inner field it writes. The `Result` docs now say so, and a test pins it for each type ([#298]).
 
 [#289]: https://github.com/trendvidia/protowire-go/issues/289
 [#298]: https://github.com/trendvidia/protowire-go/issues/298
