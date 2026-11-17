@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `pxf.Secret` literal in a list element or map value records `value` present** ([#289]). `UnmarshalFull` recorded `pw.value` for `pw = "x"` and for the block form everywhere, but nothing for the literal in a list or map: `backup_keys = ["b"]` left `IsSet("backup_keys[0].value")` false, while `backup_keys = [{ value = "b" }]` made it true. Now both spellings record it, with or without `OnSecretField`, as protowire-java does. Secret is the only such type: a Timestamp, Duration, wrapper or bignum literal in a list or map still records the element alone, while its block form records the inner field it writes. The `Result` docs now say so, and a test pins it for each type ([#298]).
+
+[#289]: https://github.com/trendvidia/protowire-go/issues/289
+[#298]: https://github.com/trendvidia/protowire-go/issues/298
 ### Fixed
 
 - **A keyed error in a `@dataset` cell is reported at its row and names its column** ([#290]). `DatasetReader.Scan` and `BindRow` moved a cell's `*Error` to the row and prefixed `column <name>:`, but returned a `*KeyedError` (duplicate key, empty key, key conflict, quoted name on an unkeyed field) at a line of the synthetic body the row is decoded from, which points at nothing in the caller's file. `({ a {} a {} })` on line 2 gave `5:3: duplicate key "a" in keyed field "kd"`, and now gives `2:1: column kd: duplicate key "a" in keyed field "kd"`, as protowire-cpp, protowire-java and protowire-rust do. It is still a `*KeyedError` of the same `Kind`.

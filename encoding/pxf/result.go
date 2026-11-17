@@ -12,6 +12,14 @@ import "github.com/trendvidia/protowire-go/check"
 // A field inside a list element or map value is named under the element:
 // "items[0].label", "by_key[\"k\"].label" (a string key quoted, other keys
 // bare), as are the paths given to [UnmarshalOptions.OnSecretField].
+//
+// A well-known-type literal records its inner fields as a field's value,
+// but not as a list element or map value: `d = 2s` records "d",
+// "d.seconds" and "d.nanos", while `ds = [2s]` records "ds" alone. The
+// block form records what it writes in every position, so
+// `ds = [{ seconds = 2 }]` records "ds" and "ds[0].seconds". pxf.Secret
+// is the exception: its literal records "value" in every position, so
+// `keys = ["k"]` records "keys" and "keys[0].value".
 type Result struct {
 	nullFields    map[string]struct{}
 	presentFields map[string]struct{}
