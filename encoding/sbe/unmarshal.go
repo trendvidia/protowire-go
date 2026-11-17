@@ -188,6 +188,15 @@ func unmarshalGroup(data []byte, msg protoreflect.Message, gt groupTemplate, max
 			gt.fd.Name(), blockLength, gt.blockLength)
 	}
 
+	// An entry of blockLength 0 occupies no bytes, so a count alone would
+	// allocate that many entries from a 4-byte header. The check above
+	// cannot catch it when the entry message is empty and its template
+	// block is 0 too (draft -01, Repeating Groups, item 4).
+	if blockLength == 0 && numInGroup > 0 {
+		return 0, fmt.Errorf("sbe: group %s declares %d entries of blockLength 0",
+			gt.fd.Name(), numInGroup)
+	}
+
 	// Bound numInGroup against the available data without computing the
 	// product directly: numInGroup*blockLength can overflow int on 32-bit
 	// platforms (each factor is uint16, product can reach ~4.3 G).

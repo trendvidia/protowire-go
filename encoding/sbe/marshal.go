@@ -23,6 +23,13 @@ func marshalMessage(msg protoreflect.Message, tmpl *messageTemplate) ([]byte, er
 		if n > maxUint16 {
 			return nil, fmt.Errorf("sbe: field %s has %d entries, past %d, the largest numInGroup SBE can state", gt.fd.FullName(), n, maxUint16)
 		}
+		// An entry with no block carries nothing but the count, and a
+		// decoder must refuse a count with blockLength 0 (draft -01,
+		// Repeating Groups, item 4), so the bytes would not read back
+		// (issue #293). An empty list still writes.
+		if n > 0 && gt.blockLength == 0 {
+			return nil, fmt.Errorf("sbe: field %s has %d entries of blockLength 0, which a decoder must refuse", gt.fd.FullName(), n)
+		}
 		totalSize += groupHeaderSize + n*int(gt.blockLength)
 	}
 

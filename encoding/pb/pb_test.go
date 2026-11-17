@@ -328,9 +328,26 @@ func TestEmptyMap(t *testing.T) {
 }
 
 func TestMapZeroValueEntries(t *testing.T) {
-	// proto3 map entries that contain zero-value keys/values still round-trip
-	// — the entry message is emitted, but key/value fields are skipped per
-	// proto3 semantics and decode back to zero.
+	// A map entry carries both its key and its value, zeros included
+	// (#105): {"": ""} is the entry 0a 00 12 00, not an empty entry. The
+	// bytes are pinned on one-entry maps, so map order cannot move them; a
+	// round trip alone cannot tell the two encodings apart, since a reader
+	// takes an omitted key or value as zero.
+	one, err := Marshal(&WithMaps{
+		Tags:   map[string]string{"": ""},
+		Counts: map[string]int64{"": 0},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	want := []byte{
+		0x0a, 0x04, 0x0a, 0x00, 0x12, 0x00, // tags {"": ""}
+		0x1a, 0x04, 0x0a, 0x00, 0x10, 0x00, // counts {"": 0}
+	}
+	if !bytes.Equal(one, want) {
+		t.Errorf("zero entries: got % x, want % x", one, want)
+	}
+
 	orig := &WithMaps{
 		Tags:   map[string]string{"": "", "k": ""},
 		Counts: map[string]int64{"": 0},

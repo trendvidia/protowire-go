@@ -166,27 +166,37 @@ func headerError(msg string, pos Position) error {
 // line belongs to. A required field's error has no position at all
 // (1:1), which is the body's empty first line, so it names no column. A
 // row built by hand has no position to give, and keeps the body's,
-// counted without that empty first line.
+// counted without that empty first line. A *KeyedError keeps its type,
+// so errors.As and its Kind still work.
 func atRow(err error, pos Position, columns []string, spans []cellSpan) error {
-	pe, ok := err.(*Error)
-	if !ok {
-		return err
+	switch e := err.(type) {
+	case *Error:
+		p, msg := rowPosition(e.Pos, e.Msg, pos, columns, spans)
+		return &Error{Pos: p, Msg: msg}
+	case *KeyedError:
+		moved := *e
+		moved.Pos, moved.Msg = rowPosition(e.Pos, e.Msg, pos, columns, spans)
+		return &moved
 	}
-	msg := pe.Msg
+	return err
+}
+
+// rowPosition is [atRow]'s move for one error at body position at.
+func rowPosition(at Position, msg string, pos Position, columns []string, spans []cellSpan) (Position, string) {
 	for _, sp := range spans {
-		if pe.Pos.Line >= sp.first && pe.Pos.Line <= sp.last {
+		if at.Line >= sp.first && at.Line <= sp.last {
 			msg = "column " + columns[sp.col] + ": " + msg
 			break
 		}
 	}
 	if pos.Line == 0 {
-		pos = pe.Pos
+		pos = at
 		if pos.Line > 1 {
 			pos.Line--
 			pos.Offset--
 		}
 	}
-	return &Error{Pos: pos, Msg: msg}
+	return pos, msg
 }
 
 // Row types [rowNeedsPresence] has answered for, memoized because
