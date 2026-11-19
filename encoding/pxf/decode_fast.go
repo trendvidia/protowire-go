@@ -371,6 +371,9 @@ func (d *directDecoder) consumeProtoDirective() (ProtoDirective, error) {
 		return pd, nil
 
 	case STRING:
+		if !d.lex.tripleAt(d.current.Pos) {
+			return pd, errorf(d.current.Pos, protoSourceNotTriple)
+		}
 		pd.Shape = ProtoSource
 		pd.Body = []byte(d.current.Value)
 		d.advance()

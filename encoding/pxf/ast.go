@@ -117,7 +117,9 @@ func (s ProtoShape) String() string {
 //     must be compiled by a downstream consumer.
 //   - ProtoSource: the contents of the triple-quoted string (with
 //     leading-LF stripping and common-prefix dedent already applied).
-//     The bytes are a complete .proto source file.
+//     The bytes are a complete .proto source file. Parsing never yields
+//     a body holding `"""`, which no triple-quoted string can carry; a
+//     hand-built one formats to text that does not parse (#305).
 //   - ProtoDescriptor: the base64-decoded bytes of the bytes literal.
 //     The bytes are a serialised google.protobuf.FileDescriptorSet.
 type ProtoDirective struct {

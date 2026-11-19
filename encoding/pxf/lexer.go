@@ -135,6 +135,13 @@ func (l *lexer) advance() byte {
 	return ch
 }
 
+// tripleAt reports whether the token at pos, a STRING, was written
+// triple-quoted. The token's Value cannot tell: both forms lex to STRING.
+func (l *lexer) tripleAt(pos Position) bool {
+	i := pos.Offset - l.base
+	return i >= 0 && i+3 <= len(l.input) && string(l.input[i:i+3]) == `"""`
+}
+
 func (l *lexer) currentPos() Position {
 	return Position{Line: l.line, Column: l.col, Offset: l.base + l.pos}
 }
