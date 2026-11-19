@@ -62,6 +62,7 @@ import (
 )
 
 var (
+	bytesType    = reflect.TypeOf([]byte(nil))
 	bigIntType   = reflect.TypeOf(big.Int{})
 	bigRatType   = reflect.TypeOf(big.Rat{})
 	bigFloatType = reflect.TypeOf(big.Float{})
@@ -188,6 +189,69 @@ type fieldInfo struct {
 	index    int              // struct field index
 	fieldNum protowire.Number // protobuf field number
 	zigzag   bool             // signed ints use zigzag (proto3 sint32/sint64)
+	wire     wireTypes        // the wire types the field is read from
+}
+
+// wireTypes is the set of wire types a field is read from: the one its type
+// is written with and, for a repeated numeric scalar, the packed
+// (length-delimited) form. A tag with any other wire type is not that
+// field's value, so Unmarshal skips it as protobuf skips an unknown field
+// (draft -01 § PB Binary Encoding; protowire#614).
+type wireTypes struct {
+	typ    protowire.Type
+	packed bool
+	any    bool // a kind this package does not encode; unmarshalField refuses it
+}
+
+func (w wireTypes) accepts(typ protowire.Type) bool {
+	return w.any || typ == w.typ || (w.packed && typ == protowire.BytesType)
+}
+
+// wireTypesOf mirrors unmarshalField's dispatch on t's kind.
+func wireTypesOf(t reflect.Type) wireTypes {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Slice && t != bytesType {
+		et := t.Elem()
+		for et.Kind() == reflect.Ptr {
+			et = et.Elem()
+		}
+		w := scalarWireTypes(et)
+		w.packed = !w.any && packedKind(et.Kind())
+		return w
+	}
+	return scalarWireTypes(t)
+}
+
+func scalarWireTypes(t reflect.Type) wireTypes {
+	switch t.Kind() {
+	case reflect.Bool,
+		reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8,
+		reflect.Uint, reflect.Uint64, reflect.Uint32, reflect.Uint16, reflect.Uint8:
+		return wireTypes{typ: protowire.VarintType}
+	case reflect.Float64:
+		return wireTypes{typ: protowire.Fixed64Type}
+	case reflect.Float32:
+		return wireTypes{typ: protowire.Fixed32Type}
+	case reflect.String, reflect.Struct, reflect.Map:
+		return wireTypes{typ: protowire.BytesType}
+	case reflect.Slice:
+		if t == bytesType {
+			return wireTypes{typ: protowire.BytesType}
+		}
+	}
+	return wireTypes{any: true}
+}
+
+// skipField consumes the value of a field read as unknown. It refuses wire
+// types 6 and 7, a stray end-group, and a value cut short, as protobuf does.
+func skipField(num protowire.Number, typ protowire.Type, data []byte, in string) (int, error) {
+	n := protowire.ConsumeFieldValue(num, typ, data)
+	if n < 0 {
+		return 0, fmt.Errorf("corrupt field %d%s: %v", num, in, protowire.ParseError(n))
+	}
+	return n, nil
 }
 
 // structInfo caches all tagged fields for a struct type.
@@ -216,7 +280,7 @@ func getStructInfo(t reflect.Type) *structInfo {
 		if err != nil || num < 1 {
 			continue
 		}
-		fi := fieldInfo{index: i, fieldNum: protowire.Number(num)}
+		fi := fieldInfo{index: i, fieldNum: protowire.Number(num), wire: wireTypesOf(t.Field(i).Type)}
 		for _, opt := range parts[1:] {
 			if opt == "zigzag" {
 				fi.zigzag = true
@@ -502,11 +566,12 @@ func unmarshalStruct(data []byte, rv reflect.Value, depth int, lim limits) error
 		data = data[n:]
 
 		fi, ok := info.byNumber[num]
-		if !ok {
-			// Skip unknown field
-			n = protowire.ConsumeFieldValue(num, typ, data)
-			if n < 0 {
-				return fmt.Errorf("corrupt field %d", num)
+		if !ok || !fi.wire.accepts(typ) {
+			// An unknown field, or a known one whose wire type does not
+			// match its type, which protobuf treats as unknown.
+			n, err := skipField(num, typ, data, "")
+			if err != nil {
+				return err
 			}
 			data = data[n:]
 			continue
@@ -532,7 +597,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 	}
 
 	// Handle slices (repeated fields) — except []byte
-	if fv.Kind() == reflect.Slice && !(fv.Type().Elem().Kind() == reflect.Uint8 && fv.Type() == reflect.TypeOf([]byte(nil))) {
+	if fv.Kind() == reflect.Slice && fv.Type() != bytesType {
 		// Packed repeated numerics (proto3 default): a LEN-typed record
 		// carrying concatenated element encodings. The scalar branches
 		// below decode by element kind, not wire type, so each element
@@ -690,6 +755,7 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 		}
 		key := reflect.New(fv.Type().Key()).Elem()
 		val := reflect.New(fv.Type().Elem()).Elem()
+		keyWire, valWire := wireTypesOf(key.Type()), wireTypesOf(val.Type())
 		entry := v
 		for len(entry) > 0 {
 			enum, etyp, en := protowire.ConsumeTag(entry)
@@ -697,23 +763,23 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 				return 0, fmt.Errorf("corrupt tag in map entry")
 			}
 			entry = entry[en:]
-			switch enum {
-			case 1:
+			switch {
+			case enum == 1 && keyWire.accepts(etyp):
 				consumed, err := unmarshalField(entry, enum, etyp, key, zigzag, depth+1, lim)
 				if err != nil {
 					return 0, fmt.Errorf("map key: %w", err)
 				}
 				entry = entry[consumed:]
-			case 2:
+			case enum == 2 && valWire.accepts(etyp):
 				consumed, err := unmarshalField(entry, enum, etyp, val, zigzag, depth+1, lim)
 				if err != nil {
 					return 0, fmt.Errorf("map value: %w", err)
 				}
 				entry = entry[consumed:]
 			default:
-				cn := protowire.ConsumeFieldValue(enum, etyp, entry)
-				if cn < 0 {
-					return 0, fmt.Errorf("corrupt unknown field %d in map entry", enum)
+				cn, err := skipField(enum, etyp, entry, " in map entry")
+				if err != nil {
+					return 0, err
 				}
 				entry = entry[cn:]
 			}
@@ -928,15 +994,15 @@ func unmarshalBigIntMsg(data []byte, bi *big.Int) error {
 			return fmt.Errorf("corrupt tag in BigInt")
 		}
 		data = data[n:]
-		switch num {
-		case 1:
+		switch {
+		case num == 1 && typ == protowire.BytesType:
 			v, vn := protowire.ConsumeBytes(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt abs in BigInt")
 			}
 			absBytes = v
 			data = data[vn:]
-		case 2:
+		case num == 2 && typ == protowire.VarintType:
 			v, vn := protowire.ConsumeVarint(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt negative in BigInt")
@@ -944,9 +1010,10 @@ func unmarshalBigIntMsg(data []byte, bi *big.Int) error {
 			negative = v != 0
 			data = data[vn:]
 		default:
-			n = protowire.ConsumeFieldValue(num, typ, data)
-			if n < 0 {
-				return fmt.Errorf("corrupt field %d in BigInt", num)
+			// Unknown, or a known field whose wire type does not match.
+			n, err := skipField(num, typ, data, " in BigInt")
+			if err != nil {
+				return err
 			}
 			data = data[n:]
 		}
@@ -968,15 +1035,15 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat, maxDigits int) error {
 			return fmt.Errorf("corrupt tag in Decimal")
 		}
 		data = data[n:]
-		switch num {
-		case 1:
+		switch {
+		case num == 1 && typ == protowire.BytesType:
 			v, vn := protowire.ConsumeBytes(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt unscaled in Decimal")
 			}
 			unscaledBytes = v
 			data = data[vn:]
-		case 2:
+		case num == 2 && typ == protowire.VarintType:
 			v, vn := protowire.ConsumeVarint(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt scale in Decimal")
@@ -984,7 +1051,7 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat, maxDigits int) error {
 			// Plain varint: the low 32 bits, read as signed.
 			scale = int32(v)
 			data = data[vn:]
-		case 3:
+		case num == 3 && typ == protowire.VarintType:
 			v, vn := protowire.ConsumeVarint(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt negative in Decimal")
@@ -992,9 +1059,10 @@ func unmarshalBigRatMsg(data []byte, rat *big.Rat, maxDigits int) error {
 			negative = v != 0
 			data = data[vn:]
 		default:
-			n = protowire.ConsumeFieldValue(num, typ, data)
-			if n < 0 {
-				return fmt.Errorf("corrupt field %d in Decimal", num)
+			// Unknown, or a known field whose wire type does not match.
+			n, err := skipField(num, typ, data, " in Decimal")
+			if err != nil {
+				return err
 			}
 			data = data[n:]
 		}
@@ -1044,15 +1112,15 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp, maxDigits int) err
 			return fmt.Errorf("corrupt tag in BigFloat")
 		}
 		data = data[n:]
-		switch num {
-		case 1:
+		switch {
+		case num == 1 && typ == protowire.BytesType:
 			v, vn := protowire.ConsumeBytes(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt mantissa in BigFloat")
 			}
 			mantBytes = v
 			data = data[vn:]
-		case 2:
+		case num == 2 && typ == protowire.VarintType:
 			v, vn := protowire.ConsumeVarint(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt exponent in BigFloat")
@@ -1060,7 +1128,7 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp, maxDigits int) err
 			// Plain varint, as for Decimal.scale.
 			exp = int32(v)
 			data = data[vn:]
-		case 3:
+		case num == 3 && typ == protowire.VarintType:
 			v, vn := protowire.ConsumeVarint(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt prec in BigFloat")
@@ -1071,7 +1139,7 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp, maxDigits int) err
 			// 2^32-1 bits rather than as precision 0 (#230).
 			prec = uint(uint32(v))
 			data = data[vn:]
-		case 4:
+		case num == 4 && typ == protowire.VarintType:
 			v, vn := protowire.ConsumeVarint(data)
 			if vn < 0 {
 				return fmt.Errorf("corrupt negative in BigFloat")
@@ -1079,9 +1147,10 @@ func unmarshalBigFloatMsg(data []byte, bf *big.Float, maxExp, maxDigits int) err
 			negative = v != 0
 			data = data[vn:]
 		default:
-			n = protowire.ConsumeFieldValue(num, typ, data)
-			if n < 0 {
-				return fmt.Errorf("corrupt field %d in BigFloat", num)
+			// Unknown, or a known field whose wire type does not match.
+			n, err := skipField(num, typ, data, " in BigFloat")
+			if err != nil {
+				return err
 			}
 			data = data[n:]
 		}
