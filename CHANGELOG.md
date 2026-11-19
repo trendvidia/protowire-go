@@ -40,6 +40,10 @@ format changes.
 
 [#303]: https://github.com/trendvidia/protowire-go/issues/303
 
+- **PB `Unmarshal` reads a field only from a tag of its wire type, as protobuf does** ([#304]). It read a known field by its Go type whatever the tag said. Wire types 6 and 7 were accepted, and `0a01` on an int64 read the length byte as the value 1. A well-formed record with another wire type, such as an int64 sent as `0a0101`, was refused as corrupt. Now wire type 6 or 7 is refused on any field. A known field whose wire type does not match is skipped as an unknown field, and the field is left as it was (trendvidia/protowire#614). A repeated numeric field still reads both its own wire type and the packed form. Map entries and the `big.Int`, `big.Rat` and `big.Float` messages follow the same rule. Every verdict and value matches protobuf-go on 606 test inputs.
+
+[#304]: https://github.com/trendvidia/protowire-go/issues/304
+
 ## [1.17.0] — 2026-11-07
 
 A minor release, because a streamed dataset row now binds under the
