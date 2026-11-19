@@ -36,6 +36,10 @@ format changes.
 [#292]: https://github.com/trendvidia/protowire-go/issues/292
 [#293]: https://github.com/trendvidia/protowire-go/issues/293
 
+- **`FormatDocument` writes a triple-quoted `@proto` with its `"""` on lines of their own** ([#303]). It wrote the body straight after the opening `"""` and straight before the closing one. Reading strips a line break after the opening `"""` and drops a last line holding only whitespace, so some bodies did not read back. A body ending in `"`, such as a last line `import "x.proto"`, was written as `...proto""""`, which does not parse. A body's leading line break, trailing line break, or whitespace-only last line was lost. Now the output is `@proto """`, a line break, the body, a line break, and `"""`. Every body without a `"""` in it reads back byte for byte, and a readable schema stays readable.
+
+[#303]: https://github.com/trendvidia/protowire-go/issues/303
+
 ## [1.17.0] — 2026-11-07
 
 A minor release, because a streamed dataset row now binds under the
