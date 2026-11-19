@@ -10,7 +10,7 @@
 //
 // Contract:
 //
-//	check_decode --format <pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope> \
+//	check_decode --format <pxf|pxf-pb|pxf-fmt|pb|pb-render|pb-text|sbe|envelope> \
 //	             --schema <fully.qualified.MessageType> \
 //	             --proto  <path-to-adversarial.proto> \
 //	             --input  <path>
@@ -23,7 +23,8 @@
 //
 // pb-text and pxf-pb also write their output on stdout, for the text gate
 // and the write gate (protowire/scripts/cross_text_check.sh and
-// cross_write_check.sh).
+// cross_write_check.sh). pxf-fmt writes the formatted document on stdout, for
+// the format gate (cross_fmt_check.sh); it needs no --schema or --proto.
 package main
 
 import (
@@ -93,7 +94,7 @@ type BigNumHolder struct {
 
 func main() {
 	var format, schema, proto, input string
-	flag.StringVar(&format, "format", "", "pxf|pxf-pb|pb|pb-render|pb-text|sbe|envelope")
+	flag.StringVar(&format, "format", "", "pxf|pxf-pb|pxf-fmt|pb|pb-render|pb-text|sbe|envelope")
 	flag.StringVar(&schema, "schema", "", "fully.qualified.MessageType")
 	flag.StringVar(&proto, "proto", "", "path to adversarial.proto")
 	flag.StringVar(&input, "input", "", "path to corpus file")
@@ -101,7 +102,8 @@ func main() {
 	flag.Var(&limits, "limit", "NAME=VALUE, repeatable: lower a HARDENING limit for this run — MaxMessageSize, MaxNestingDepth, MaxNumericLiteralDigits, MaxBytesLiteralLength, MaxRepeatedCount, MaxBigFloatExponent")
 	flag.Parse()
 
-	if format == "" || schema == "" || input == "" {
+	// Formatting reads no schema, so pxf-fmt alone may leave --schema out.
+	if format == "" || (schema == "" && format != "pxf-fmt") || input == "" {
 		fmt.Fprintln(os.Stderr, "usage: check_decode --format ... --schema ... --input ... [--proto ...]")
 		os.Exit(2)
 	}
@@ -166,6 +168,8 @@ func run(format, schema, protoPath, input string, lim limitFlags) error {
 		return pxfDecode(data, schema, protoPath, lim)
 	case "pxf-pb":
 		return pxfPb(data, schema, protoPath, lim)
+	case "pxf-fmt":
+		return pxfFmt(data)
 	case "pb":
 		return pbDecode(data, schema, protoPath, lim)
 	case "pb-render":
@@ -229,6 +233,20 @@ func pxfPb(data []byte, schema, protoPath string, lim limitFlags) error {
 		return err
 	}
 	_, err = os.Stdout.Write(out)
+	return err
+}
+
+// pxfFmt writes the formatted document on stdout, for the format gate
+// (protowire/scripts/cross_fmt_check.sh, protowire#584). Formatting works on
+// the parsed document, not a message, so it keeps comments, directives and
+// dataset rows and needs no schema. A document that does not parse is a
+// rejection.
+func pxfFmt(data []byte) error {
+	doc, err := pxf.Parse(data)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(pxf.FormatDocument(doc))
 	return err
 }
 
