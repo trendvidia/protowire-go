@@ -164,9 +164,14 @@ func (f *formatter) formatProto(d *ProtoDirective) {
 		f.buf.Write(d.Body)
 		f.buf.WriteByte('}')
 	case ProtoSource:
-		f.buf.WriteString(` """`)
+		// The delimiters go on lines of their own. Reading strips the line
+		// break after the opening """ and drops the last line when it holds
+		// only whitespace, so the body reads back byte for byte; written on
+		// the delimiters' lines instead, a body ending in '"' would close the
+		// string early and a whitespace-only last line would be dropped.
+		f.buf.WriteString(" \"\"\"\n")
 		f.buf.Write(d.Body)
-		f.buf.WriteString(`"""`)
+		f.buf.WriteString("\n\"\"\"")
 	case ProtoDescriptor:
 		f.buf.WriteString(` b"`)
 		f.buf.WriteString(base64.StdEncoding.EncodeToString(d.Body))

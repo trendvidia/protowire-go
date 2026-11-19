@@ -5,7 +5,9 @@ package pxf_test
 
 // FormatDocument keeps every directive, with its dataset rows, in document
 // order (trendvidia/protowire#558, #262). The expected texts are the ones
-// protowire-typescript's format writes for the same sources.
+// protowire-typescript's format writes for the same sources, except a
+// triple-quoted @proto, whose delimiters this port has written on lines of
+// their own since #303.
 
 import (
 	"testing"
@@ -78,7 +80,9 @@ func TestFormatDocument_ProtoShapes(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"@proto { string id = 1; }\n@dataset (id)\n(\"a\")\n", ""},
 		{"@proto a.v1.R { string id = 1; }\n@dataset a.v1.R (id)\n(\"a\")\n", ""},
-		{"@proto \"\"\"syntax = \"proto3\"; message R { string id = 1; }\"\"\"\n@dataset R (id)\n(\"a\")\n", ""},
+		// The triple quotes go on lines of their own (#303).
+		{"@proto \"\"\"syntax = \"proto3\"; message R { string id = 1; }\"\"\"\n@dataset R (id)\n(\"a\")\n",
+			"@proto \"\"\"\nsyntax = \"proto3\"; message R { string id = 1; }\n\"\"\"\n@dataset R (id)\n(\"a\")\n"},
 		// @type moves to the front: it binds no @proto, so this changes nothing.
 		{"@proto b\"CgA=\"\n@type a.v1.M\n\nx = 1\n", "@type a.v1.M\n@proto b\"CgA=\"\n\nx = 1\n"},
 	} {
@@ -110,4 +114,34 @@ func TestFormatDocument_OnlyTypeUnchanged(t *testing.T) {
 	doc, err := pxf.Parse([]byte("# c\n@type a.v1.M\n\nx = 1\n"))
 	require.NoError(t, err)
 	assert.Equal(t, "@type a.v1.M\n\n# c\nx = 1\n", string(pxf.FormatDocument(doc)))
+}
+
+// A triple-quoted @proto is written with its delimiters on lines of their
+// own, and its body reads back byte for byte (#303).
+func TestFormatDocument_ProtoSourceLayout(t *testing.T) {
+	// The issue's document: the line breaks around the body stay.
+	src := "@proto \"\"\"\n  syntax = \"proto3\";\n  package fmt.v1;\n  message Doc { string name = 1; }\n\"\"\"\n@type fmt.v1.Doc\n"
+	assert.Equal(t, "@type fmt.v1.Doc\n@proto \"\"\"\n  syntax = \"proto3\";\n  package fmt.v1;\n  message Doc { string name = 1; }\n\"\"\"\n", formatRoundTrip(t, src))
+
+	for _, tc := range []struct{ name, src, body string }{
+		// Written on the closing delimiter's line, the last quote would
+		// open the closing """ early, and the output would not parse.
+		{"body ends in a quote", "@proto \"\"\"\n  syntax = \"proto3\";\n  import \"google/protobuf/empty.proto\"\n  \"\"\"\n",
+			"syntax = \"proto3\";\nimport \"google/protobuf/empty.proto\""},
+		// Written on the closing delimiter's line, a last line of only
+		// whitespace would be taken for the delimiter's indent and dropped.
+		{"whitespace-only last line", "@proto \"\"\"syntax = \"proto3\";\n  \n\"\"\"\n", "syntax = \"proto3\";\n  "},
+		{"leading line break", "@proto \"\"\"\n\nsyntax = \"proto3\";\"\"\"\n", "\nsyntax = \"proto3\";"},
+		{"trailing line break", "@proto \"\"\"syntax = \"proto3\";\n\n\"\"\"\n", "syntax = \"proto3\";\n"},
+		{"empty body", "@proto \"\"\"\"\"\"\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := pxf.Parse([]byte(tc.src))
+			require.NoError(t, err)
+			require.Len(t, doc.Protos, 1)
+			require.Equal(t, tc.body, string(doc.Protos[0].Body), "body as read")
+			out := formatRoundTrip(t, tc.src)
+			assert.Equal(t, "@proto \"\"\"\n"+tc.body+"\n\"\"\"\n", out)
+		})
+	}
 }
