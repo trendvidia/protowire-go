@@ -17,6 +17,12 @@ format changes.
 
 [#305]: https://github.com/trendvidia/protowire-go/issues/305
 
+### Fixed
+
+- **`ParseTolerant` reports a malformed directive once** ([#310]). After a directive failed, recovery resumed at the next token that could start an entry, even one still on the directive's own line or inside the rows of a dataset whose header failed. Each stray token then gave an error of its own, and a following `@type` was read as body. `@proto 5` then `@type a.v1.M` gave four errors and no type, and `@type {{packageName}}.AppConfig` in a template gave six. Now the rest of the failed directive's line is skipped, unless it starts an entry (a key followed by `=`, `:` or `{`), and so is each parenthesized row after a failed `@dataset` header. Both give one error and keep what follows. Across 22,005 `.pxf` files in the trendvidia repositories, `ParseTolerant` changed on 497 files (9 distinct fixtures). Each has the same first error, fewer errors, and only junk entries gone. No file lost a directive or a type.
+
+[#310]: https://github.com/trendvidia/protowire-go/issues/310
+
 ## [1.18.0] — 2026-11-19
 
 A minor release, because it adds `DatasetKeyedDiagnostics`, which reports
