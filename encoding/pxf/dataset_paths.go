@@ -62,30 +62,49 @@ func checkColumnPaths(desc protoreflect.MessageDescriptor, cols []string) string
 		return msg
 	}
 	for _, c := range cols {
-		md := desc
-		for rest := c; ; {
-			seg, tail, more := strings.Cut(rest, ".")
-			fd := md.Fields().ByName(protoreflect.Name(seg))
-			if fd == nil {
-				return fmt.Sprintf("@dataset column %q: %s has no field %q", c, md.FullName(), seg)
-			}
-			if !more {
-				break
-			}
-			at := c[:len(c)-len(tail)-1]
-			switch {
-			case fd.IsMap():
-				return fmt.Sprintf("@dataset column %q: %q is a map field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
-			case fd.IsList():
-				return fmt.Sprintf("@dataset column %q: %q is a repeated field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
-			case fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind:
-				return fmt.Sprintf("@dataset column %q: %q is not a message field", c, at)
-			case isLiteralMessageType(fd.Message()) && !isSecret(fd.Message()):
-				return fmt.Sprintf("@dataset column %q: %q is a %s, which is written as a literal; a column path cannot go into it (draft §3.4.4)", c, at, fd.Message().FullName())
-			}
-			md = fd.Message()
-			rest = tail
+		if _, msg := resolveColumn(desc, c); msg != "" {
+			return msg
 		}
 	}
 	return ""
+}
+
+// columnField is the field column c ends at in the row type desc, or nil
+// when c breaks a rule of [checkColumnPaths].
+func columnField(desc protoreflect.MessageDescriptor, c string) protoreflect.FieldDescriptor {
+	fd, msg := resolveColumn(desc, c)
+	if msg != "" {
+		return nil
+	}
+	return fd
+}
+
+// resolveColumn walks column c from the row type desc and returns the
+// field it ends at, or the message for the first rule it breaks. Only a
+// broken rule allocates.
+func resolveColumn(desc protoreflect.MessageDescriptor, c string) (protoreflect.FieldDescriptor, string) {
+	md := desc
+	for rest := c; ; {
+		seg, tail, more := strings.Cut(rest, ".")
+		fd := md.Fields().ByName(protoreflect.Name(seg))
+		if fd == nil {
+			return nil, fmt.Sprintf("@dataset column %q: %s has no field %q", c, md.FullName(), seg)
+		}
+		if !more {
+			return fd, ""
+		}
+		at := c[:len(c)-len(tail)-1]
+		switch {
+		case fd.IsMap():
+			return nil, fmt.Sprintf("@dataset column %q: %q is a map field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
+		case fd.IsList():
+			return nil, fmt.Sprintf("@dataset column %q: %q is a repeated field, and a column path cannot go through one; use a value cell for %q (draft §3.4.4)", c, at, at)
+		case fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind:
+			return nil, fmt.Sprintf("@dataset column %q: %q is not a message field", c, at)
+		case isLiteralMessageType(fd.Message()) && !isSecret(fd.Message()):
+			return nil, fmt.Sprintf("@dataset column %q: %q is a %s, which is written as a literal; a column path cannot go into it (draft §3.4.4)", c, at, fd.Message().FullName())
+		}
+		md = fd.Message()
+		rest = tail
+	}
 }

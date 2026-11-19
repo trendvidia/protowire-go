@@ -177,16 +177,59 @@ func identSafeEntryName(s string) bool {
 // the parse. Entries that don't resolve against the schema (unknown
 // fields, shape mismatches) are skipped — they are ordinary schema
 // errors, not keyed diagnostics.
+//
+// It walks the document's body only. A document with a @dataset has no
+// body, and its cells are values of the row type, which desc does not
+// name for every dataset: [DatasetKeyedDiagnostics] checks those, one
+// dataset at a time.
 func KeyedDiagnostics(doc *Document, desc protoreflect.MessageDescriptor) []KeyedError {
 	if doc == nil || desc == nil {
 		return nil
 	}
 	var out []KeyedError
 	diagEntries(doc.Entries, desc, nil, &out)
+	sortByOffset(out)
+	return out
+}
+
+// DatasetKeyedDiagnostics is [KeyedDiagnostics] for the cells of one
+// @dataset directive, checked against its row type row: each cell is
+// walked as `<column> = <cell>` would be in a body of that type, and
+// each finding is at its own position in the file, in source order.
+//
+// The caller supplies row because only it can resolve it: the header
+// names the type (ds.Type), but a typeless @dataset binds to an anonymous
+// @proto, and which descriptor stands for either is the caller's to
+// choose, as it is for [DatasetReader.Scan]. A column that does not
+// resolve against row (a field row lacks, a path through a repeated, map
+// or scalar field, or one into a type written as a literal) is skipped,
+// as an unresolved entry is: it is a header error, which [BindRow]
+// reports, not a keyed diagnostic.
+func DatasetKeyedDiagnostics(ds *DatasetDirective, row protoreflect.MessageDescriptor) []KeyedError {
+	if ds == nil || row == nil {
+		return nil
+	}
+	fds := make([]protoreflect.FieldDescriptor, len(ds.Columns))
+	for i, c := range ds.Columns {
+		fds[i] = columnField(row, c)
+	}
+	var out []KeyedError
+	for _, r := range ds.Rows {
+		for i, cell := range r.Cells {
+			if cell == nil || i >= len(fds) || fds[i] == nil {
+				continue
+			}
+			diagValue(cell, fds[i], &out)
+		}
+	}
+	sortByOffset(out)
+	return out
+}
+
+func sortByOffset(out []KeyedError) {
 	sort.SliceStable(out, func(i, j int) bool {
 		return out[i].Pos.Offset < out[j].Pos.Offset
 	})
-	return out
 }
 
 func diagEntries(entries []Entry, desc protoreflect.MessageDescriptor, ke *keyedElemState, out *[]KeyedError) {

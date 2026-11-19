@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+### Added
+
+- **`DatasetKeyedDiagnostics` reports keyed violations in `@dataset` cells** ([#296]). `KeyedDiagnostics` walks a document's body, and a document with a `@dataset` has none, so editor tooling that runs `ParseTolerant` and then `KeyedDiagnostics` showed nothing for `({ a {} a {} })` in a keyed column, a row `DatasetReader.Scan` and `BindRow` refuse. `DatasetKeyedDiagnostics(ds, row)` takes one dataset and its row type, walks each cell against the field its column path ends at, and reports every finding at its own position in the file: that row on line 2 gives `2:9: duplicate key "a" in keyed field "kd"`, at the second `a`. The caller passes the row type because a typeless `@dataset` binds to an anonymous `@proto` that only the caller can compile. A column that does not resolve against the row type is skipped. `KeyedDiagnostics` itself is unchanged, and its comment now points to the new function.
+
+[#296]: https://github.com/trendvidia/protowire-go/issues/296
+
 ### Changed
 
 - **A `pxf.Secret` literal in a list element or map value records `value` present** ([#289]). `UnmarshalFull` recorded `pw.value` for `pw = "x"` and for the block form everywhere, but nothing for the literal in a list or map: `backup_keys = ["b"]` left `IsSet("backup_keys[0].value")` false, while `backup_keys = [{ value = "b" }]` made it true. Now both spellings record it, with or without `OnSecretField`, as protowire-java does. Secret is the only such type: a Timestamp, Duration, wrapper or bignum literal in a list or map still records the element alone, while its block form records the inner field it writes. The `Result` docs now say so, and a test pins it for each type ([#298]).
