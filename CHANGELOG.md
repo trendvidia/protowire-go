@@ -44,6 +44,10 @@ format changes.
 
 [#304]: https://github.com/trendvidia/protowire-go/issues/304
 
+- **PB `Unmarshal` reads a map entry with no message value as an empty message** ([#307]). Into a `map[K]*Msg`, an entry with a key and no value decoded to a nil pointer. protobuf-go reads it as an empty message, which is the default of a message-valued map, and code reading a field of it panicked here. Now the value is an allocated zero `Msg`, as a nil list element already was.
+
+[#307]: https://github.com/trendvidia/protowire-go/issues/307
+
 ## [1.17.0] — 2026-11-07
 
 A minor release, because a streamed dataset row now binds under the
