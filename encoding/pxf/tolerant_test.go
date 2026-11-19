@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
 
@@ -370,4 +373,43 @@ func TestParseTolerantStrictUnchanged(t *testing.T) {
 			t.Errorf("Parse(%q) unexpectedly succeeded", src)
 		}
 	}
+}
+
+// A malformed directive gives one error, and recovery does not read the
+// rest of its line, or the rows of a dataset whose header failed, as
+// entries (#310). Each document here used to give one error per stray
+// token and lose what followed. A bare named directive such as `@header`
+// does not fail, so tokens after it start the body; that is not recovery.
+func TestParseTolerantDirectiveRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		src, err string
+		typeURL  string
+		entries  int
+	}{
+		{"@proto 5\n@type a.v1.M\n\nx = 1\n", `1:8: expected '{', dotted identifier`, "a.v1.M", 1},
+		{"@proto a.b c\n@type a.v1.M\n\nx = 1\n", "1:12: expected '{' after @proto a.b", "a.v1.M", 1},
+		{"@type 5\n\nx = 1\n", "1:7: expected type name after @type", "", 1},
+		{"@dataset T 5\n(1)\n(2, \"a\")\n", "1:12: expected '(' to start @dataset column list", "", 0},
+	} {
+		t.Run(tc.src, func(t *testing.T) {
+			doc, errs := pxf.ParseTolerant([]byte(tc.src))
+			require.Len(t, errs, 1, "%v", errs)
+			assert.Contains(t, errs[0].Error(), tc.err)
+			assert.Equal(t, tc.typeURL, doc.TypeURL)
+			assert.Len(t, doc.Entries, tc.entries)
+		})
+	}
+
+	// A key on the directive's line that starts an entry still starts one:
+	// the dangling-@type recovery reads `x = 1` as the first entry.
+	doc, errs := pxf.ParseTolerant([]byte("@type x = 1\ny = 2\n"))
+	require.Len(t, errs, 1, "%v", errs)
+	assert.Len(t, doc.Entries, 2)
+
+	// A valid dataset after a failed one still parses.
+	doc, errs = pxf.ParseTolerant([]byte("@dataset T 5\n(1)\n@dataset U (a)\n(2)\n"))
+	require.Len(t, errs, 1, "%v", errs)
+	require.Len(t, doc.Datasets, 1)
+	assert.Equal(t, "U", doc.Datasets[0].Type)
+	assert.Len(t, doc.Datasets[0].Rows, 1)
 }

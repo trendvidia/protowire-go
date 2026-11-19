@@ -141,12 +141,29 @@ func (p *parser) currentStartsEntry() bool {
 
 // syncTopLevel advances to the next plausible top-of-document
 // construct: a directive, a token that can start a body entry, or EOF.
-// Tolerant-mode recovery after a malformed directive.
-func (p *parser) syncTopLevel() {
+// Tolerant-mode recovery after a malformed directive that began on line.
+//
+// What is left of that line belongs to the directive, unless it starts an
+// entry (a key followed by '=', ':' or '{'), and a parenthesized group is
+// a row of a @dataset whose header failed, since an entry never opens
+// with '('. Neither is read as an entry: `@proto 5`, `@header 5 6` and
+// `@dataset T 5` followed by rows each gave one error per stray token
+// and lost the directives after them (#310).
+func (p *parser) syncTopLevel(line int) {
+	for p.current.Pos.Line == line && !p.currentStartsEntry() {
+		switch p.current.Kind {
+		case EOF, AT_TYPE, AT_DIRECTIVE, AT_DATASET, AT_PROTO:
+			return
+		}
+		p.advance()
+	}
 	for {
 		switch p.current.Kind {
 		case EOF, AT_TYPE, AT_DIRECTIVE, AT_DATASET, AT_PROTO, IDENT, STRING, INT:
 			return
+		case LPAREN:
+			p.skipBalanced(LPAREN, RPAREN)
+			continue
 		}
 		p.advance()
 	}
@@ -346,6 +363,7 @@ directives:
 	for {
 		switch p.current.Kind {
 		case AT_TYPE:
+			line := p.current.Pos.Line
 			p.advance() // consume @type
 			missingName := p.current.Kind != IDENT
 			if !missingName && p.tolerant && p.currentStartsEntry() {
@@ -358,41 +376,44 @@ directives:
 				if err := p.soft(errorf(p.current.Pos, "expected type name after @type, got %s", p.current.Kind)); err != nil {
 					return nil, err
 				}
-				p.syncTopLevel()
+				p.syncTopLevel(line)
 				continue
 			}
 			doc.TypeURL = p.current.Value
 			doc.BodyOffset = p.current.Pos.Offset + len(p.current.Value)
 			p.advance()
 		case AT_DIRECTIVE:
+			line := p.current.Pos.Line
 			d, end, err := p.parseDirective()
 			if err != nil {
 				if err := p.soft(err); err != nil {
 					return nil, err
 				}
-				p.syncTopLevel()
+				p.syncTopLevel(line)
 				continue
 			}
 			doc.Directives = append(doc.Directives, *d)
 			doc.BodyOffset = end
 		case AT_DATASET:
+			line := p.current.Pos.Line
 			ds, end, err := p.parseDatasetDirective()
 			if err != nil {
 				if err := p.soft(err); err != nil {
 					return nil, err
 				}
-				p.syncTopLevel()
+				p.syncTopLevel(line)
 				continue
 			}
 			doc.Datasets = append(doc.Datasets, *ds)
 			doc.BodyOffset = end
 		case AT_PROTO:
+			line := p.current.Pos.Line
 			pd, end, err := p.parseProtoDirective()
 			if err != nil {
 				if err := p.soft(err); err != nil {
 					return nil, err
 				}
-				p.syncTopLevel()
+				p.syncTopLevel(line)
 				continue
 			}
 			doc.Protos = append(doc.Protos, *pd)
