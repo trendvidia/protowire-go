@@ -11,6 +11,14 @@ format changes.
 
 ## [Unreleased]
 
+## [1.19.0] — 2026-11-19
+
+A minor release, because a `@proto` source body must now be triple-quoted,
+as the grammar says: `@proto "…"` is refused ([#305]). No `.pxf` file in
+the trendvidia repositories used that form. `ParseTolerant` now reports a
+malformed directive once, instead of once per stray token after it
+([#310]). No wire-format change.
+
 ### Changed
 
 - **A `@proto` source body must be triple-quoted** ([#305]). `Parse`, `Unmarshal` and `DatasetReader` read a simple-quoted `@proto "…"` as a source body, which the grammar does not admit (`proto_source_body = triple_string`). Its escapes could put `"""` in the body, and `FormatDocument` then wrote text that does not parse, since a triple-quoted string has no escapes. Now `@proto "…"` is refused with `1:8: @proto source body must be a triple-quoted string ("""...""")`, and `ParseTolerant` reports it and parses on. Of 22,005 `.pxf` files across the trendvidia repositories, none was written that way and none changed verdict. A hand-built `ProtoDirective` whose body holds `"""` still formats to text that does not parse, and its docs say so.
@@ -3323,7 +3331,8 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.18.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.19.0...HEAD
+[1.19.0]: https://github.com/trendvidia/protowire-go/compare/v1.18.0...v1.19.0
 [1.18.0]: https://github.com/trendvidia/protowire-go/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/trendvidia/protowire-go/compare/v1.16.1...v1.17.0
 [1.16.1]: https://github.com/trendvidia/protowire-go/compare/v1.16.0...v1.16.1
