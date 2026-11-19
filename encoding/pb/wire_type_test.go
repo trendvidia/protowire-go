@@ -83,7 +83,7 @@ func wireTypeInputs() [][]byte {
 	out = append(out,
 		mustHex("0a0161"+"0801"),     // s: "a", then s as a varint
 		mustHex("1007"+"1501000000"), // i64: 7, then i64 as fixed32
-		mustHex("720101"+"7001"),       // nums packed [1], then nums as a varint
+		mustHex("720101"+"7001"),     // nums packed [1], then nums as a varint
 		mustHex("7001"+"7501000000"), // nums [1], then nums as fixed32
 	)
 	return out
