@@ -11,6 +11,12 @@ format changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `@proto` source body must be triple-quoted** ([#305]). `Parse`, `Unmarshal` and `DatasetReader` read a simple-quoted `@proto "…"` as a source body, which the grammar does not admit (`proto_source_body = triple_string`). Its escapes could put `"""` in the body, and `FormatDocument` then wrote text that does not parse, since a triple-quoted string has no escapes. Now `@proto "…"` is refused with `1:8: @proto source body must be a triple-quoted string ("""...""")`, and `ParseTolerant` reports it and parses on. Of 22,005 `.pxf` files across the trendvidia repositories, none was written that way and none changed verdict. A hand-built `ProtoDirective` whose body holds `"""` still formats to text that does not parse, and its docs say so.
+
+[#305]: https://github.com/trendvidia/protowire-go/issues/305
+
 ## [1.18.0] — 2026-11-19
 
 A minor release, because it adds `DatasetKeyedDiagnostics`, which reports

@@ -28,7 +28,10 @@ import (
 // follow in source order, each after its comments: a named directive's
 // body and a @proto body as written, and a dataset as its header and then
 // one row per line, an absent cell left empty. A document whose only
-// directive is @type formats as it always has. The output is the one
+// directive is @type formats as it always has. A triple-quoted @proto is
+// written with its `"""` on lines of their own (#303), so its body reads
+// back byte for byte, unless the body holds `"""`, which only a hand-built
+// [ProtoDirective] can (#305). Otherwise the output is the one
 // protowire-typescript's format writes.
 func FormatDocument(doc *Document) []byte {
 	var buf bytes.Buffer

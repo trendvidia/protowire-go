@@ -596,6 +596,10 @@ func (p *parser) tolerantRowClose() bool {
 // matching `}` (exclusive); the contents are protobuf source and are
 // NOT decoded as PXF entries. Returns the directive plus the byte
 // offset immediately after the directive's last token.
+// protoSourceNotTriple refuses a @proto source body written as a
+// simple-quoted string (#305).
+const protoSourceNotTriple = `@proto source body must be a triple-quoted string ("""...""")`
+
 func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 	leading := p.flushComments()
 	atPos := p.current.Pos
@@ -632,10 +636,18 @@ func (p *parser) parseProtoDirective() (*ProtoDirective, int, error) {
 		return pd, end, nil
 
 	case STRING:
-		// Source: @proto """<proto-source>""" (triple-quoted) or "<...>"
-		// (simple-quoted, accepted lenient v1). The lexer's STRING token
-		// Value already has the unescaped content with delimiters
-		// stripped and (for triple-quoted) leading-LF / dedent applied.
+		// Source: @proto """<proto-source>""". The lexer's STRING token
+		// Value already has the delimiters stripped and the leading LF
+		// and dedent applied. The grammar admits only the triple-quoted
+		// form (proto_source_body = triple_string), and a simple-quoted
+		// body could carry """, which no formatter can write back (#305).
+		if !p.lex.tripleAt(p.current.Pos) {
+			err := errorf(p.current.Pos, protoSourceNotTriple)
+			// Consumed, so ParseTolerant does not resume at the string and
+			// read it as an entry's key.
+			p.advance()
+			return nil, 0, err
+		}
 		pd.Shape = ProtoSource
 		pd.Body = []byte(p.current.Value)
 		endOffset := p.lex.base + p.lex.pos

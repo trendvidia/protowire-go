@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/dynamicpb"
+	"google.golang.org/protobuf/types/known/emptypb"
 
 	"github.com/trendvidia/protowire-go/encoding/pxf"
 )
@@ -372,3 +373,58 @@ func TestParseProto_DescriptorUsesURLSafeBase64(t *testing.T) {
 
 // Import for dynamicpb used by the fast-path tests above.
 var _ = dynamicpb.NewMessage
+
+// A source body must be triple-quoted: the grammar's proto_source_body is a
+// triple_string. A simple-quoted body could carry `"""` through its escapes,
+// and no formatter can write that back (#305).
+func TestParseProto_SourceMustBeTripleQuoted(t *testing.T) {
+	const want = `1:8: @proto source body must be a triple-quoted string ("""...""")`
+	for _, in := range []string{
+		`@proto "syntax = \"proto3\";"`,
+		`@proto "syntax = \"proto3\"; // a \"\"\" b"`, // #305's body
+		`@proto ""`,
+	} {
+		t.Run(in, func(t *testing.T) {
+			_, err := pxf.Parse([]byte(in))
+			require.Error(t, err)
+			assert.Equal(t, want, err.Error())
+
+			// Unmarshal reads directives on its own path.
+			err = pxf.UnmarshalOptions{DiscardUnknown: true}.Unmarshal([]byte(in), &emptypb.Empty{})
+			require.Error(t, err)
+			assert.Equal(t, want, err.Error())
+
+			// So does a dataset stream's header.
+			_, err = pxf.UnmarshalOptions{}.NewDatasetReader(strings.NewReader(in + "\n@dataset T (a)\n(1)\n"))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "@proto source body must be a triple-quoted string")
+		})
+	}
+
+	// The triple-quoted form still reads, on the same line or the next.
+	for _, in := range []string{"@proto \"\"\"syntax = \"proto3\";\"\"\"\n", "@proto\n\"\"\"syntax = \"proto3\";\"\"\"\n"} {
+		doc, err := pxf.Parse([]byte(in))
+		require.NoError(t, err, in)
+		assert.Equal(t, `syntax = "proto3";`, string(doc.Protos[0].Body))
+		require.NoError(t, pxf.UnmarshalOptions{DiscardUnknown: true}.Unmarshal([]byte(in), &emptypb.Empty{}), in)
+	}
+}
+
+// ParseTolerant reports the simple-quoted body and parses on.
+func TestParseTolerantProto_SourceNotTripleQuoted(t *testing.T) {
+	doc, errs := pxf.ParseTolerant([]byte("@proto \"syntax\"\n@type a.v1.M\n\nx = 1\n"))
+	require.Len(t, errs, 1)
+	assert.Contains(t, errs[0].Error(), "1:8: @proto source body must be a triple-quoted string")
+	assert.Empty(t, doc.Protos)
+	assert.Equal(t, "a.v1.M", doc.TypeURL)
+	assert.Len(t, doc.Entries, 1)
+}
+
+// A hand-built source body holding `"""` cannot be written triple-quoted,
+// so FormatDocument's output for it does not parse. Parsing never yields
+// such a body (#305); this pins what the ProtoDirective docs say.
+func TestFormatDocument_HandBuiltProtoSourceWithTripleQuote(t *testing.T) {
+	doc := &pxf.Document{Protos: []pxf.ProtoDirective{{Shape: pxf.ProtoSource, Body: []byte(`a """ b`)}}}
+	_, err := pxf.Parse(pxf.FormatDocument(doc))
+	assert.Error(t, err)
+}
