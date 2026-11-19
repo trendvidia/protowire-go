@@ -11,6 +11,22 @@ format changes.
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-11-19
+
+A minor release, because it adds `DatasetKeyedDiagnostics`, which reports
+keyed violations in `@dataset` cells, each at its own position in the file
+([#296]). Several changes can move what a caller sees. A keyed error from
+`DatasetReader.Scan` or `BindRow` now sits at its row and names its column
+([#290]). A `pxf.Secret` literal in a list element or map value now records
+`value` present ([#289]). `FormatDocument` writes a triple-quoted `@proto`
+with its `"""` on lines of their own, so every such body reads back
+([#303]). PB `Unmarshal` handles a tag's wire type as protobuf does: it
+refuses wire types 6 and 7, and skips a field sent with another wire type
+rather than misreading or refusing it ([#304]). It also reads a map entry
+with no message value as an empty message, not nil ([#307]). SBE now
+refuses a group of entries with blockLength 0, and a oneof in a group
+entry ([#291], [#292]). No wire-format change.
+
 ### Added
 
 - **`DatasetKeyedDiagnostics` reports keyed violations in `@dataset` cells** ([#296]). `KeyedDiagnostics` walks a document's body, and a document with a `@dataset` has none, so editor tooling that runs `ParseTolerant` and then `KeyedDiagnostics` showed nothing for `({ a {} a {} })` in a keyed column, a row `DatasetReader.Scan` and `BindRow` refuse. `DatasetKeyedDiagnostics(ds, row)` takes one dataset and its row type, walks each cell against the field its column path ends at, and reports every finding at its own position in the file: that row on line 2 gives `2:9: duplicate key "a" in keyed field "kd"`, at the second `a`. The caller passes the row type because a typeless `@dataset` binds to an anonymous `@proto` that only the caller can compile. A column that does not resolve against the row type is skipped. `KeyedDiagnostics` itself is unchanged, and its comment now points to the new function.
@@ -3295,7 +3311,22 @@ Initial public release. Versioned to match sibling components in the
 
 [trendvidia/protowire#116]: https://github.com/trendvidia/protowire/issues/116
 
-[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/trendvidia/protowire-go/compare/v1.18.0...HEAD
+[1.18.0]: https://github.com/trendvidia/protowire-go/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/trendvidia/protowire-go/compare/v1.16.1...v1.17.0
+[1.16.1]: https://github.com/trendvidia/protowire-go/compare/v1.16.0...v1.16.1
+[1.16.0]: https://github.com/trendvidia/protowire-go/compare/v1.15.0...v1.16.0
+[1.15.0]: https://github.com/trendvidia/protowire-go/compare/v1.14.0...v1.15.0
+[1.14.0]: https://github.com/trendvidia/protowire-go/compare/v1.13.2...v1.14.0
+[1.13.2]: https://github.com/trendvidia/protowire-go/compare/v1.13.1...v1.13.2
+[1.13.1]: https://github.com/trendvidia/protowire-go/compare/v1.13.0...v1.13.1
+[1.13.0]: https://github.com/trendvidia/protowire-go/compare/v1.12.1...v1.13.0
+[1.12.1]: https://github.com/trendvidia/protowire-go/compare/v1.12.0...v1.12.1
+[1.12.0]: https://github.com/trendvidia/protowire-go/compare/v1.11.0...v1.12.0
+[1.11.0]: https://github.com/trendvidia/protowire-go/compare/v1.10.0...v1.11.0
+[1.10.0]: https://github.com/trendvidia/protowire-go/compare/v1.9.0...v1.10.0
+[1.9.0]: https://github.com/trendvidia/protowire-go/compare/v1.8.1...v1.9.0
+[1.8.1]: https://github.com/trendvidia/protowire-go/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/trendvidia/protowire-go/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/trendvidia/protowire-go/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/trendvidia/protowire-go/compare/v1.5.1...v1.6.0
