@@ -755,6 +755,11 @@ func unmarshalField(data []byte, num protowire.Number, typ protowire.Type, fv re
 		}
 		key := reflect.New(fv.Type().Key()).Elem()
 		val := reflect.New(fv.Type().Elem()).Elem()
+		if val.Kind() == reflect.Ptr {
+			// An entry with no value holds the value type's default, which
+			// for a message is an empty message, never nil (#307).
+			val.Set(reflect.New(val.Type().Elem()))
+		}
 		keyWire, valWire := wireTypesOf(key.Type()), wireTypesOf(val.Type())
 		entry := v
 		for len(entry) > 0 {

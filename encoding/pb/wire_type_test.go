@@ -119,24 +119,12 @@ func TestUnmarshal_WireTypeMatchesProtobuf(t *testing.T) {
 		require.NoError(t, err)
 		var want confAll
 		require.NoError(t, pb.Unmarshal(known, &want), "%x", known)
-		emptyMapMessages(&got)
 		assert.Equal(t, want, got, "%x: values differ from protobuf-go's", in)
 	}
 	// A positive marker that both verdicts were exercised, and not only one.
 	t.Logf("%d inputs: protobuf-go accepts %d, rejects %d", len(inputs), accepted, rejected)
 	assert.Greater(t, accepted, 100)
 	assert.Greater(t, rejected, 100)
-}
-
-// emptyMapMessages stands a nil message in MM for the empty message
-// protobuf-go reads from a map entry with no value. That difference is #307,
-// not a wire type's, and this goes when #307 is fixed.
-func emptyMapMessages(m *confAll) {
-	for k, v := range m.MM {
-		if v == nil {
-			m.MM[k] = &confInner{}
-		}
-	}
 }
 
 // The rows of #304's table, by name, on a struct of their own.

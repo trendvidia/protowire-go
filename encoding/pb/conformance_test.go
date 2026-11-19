@@ -393,3 +393,22 @@ func TestConformance_MapEntryFalseBool(t *testing.T) {
 	require.NoError(t, pb.Unmarshal(ours, &back))
 	assert.Equal(t, orig.BM, back.BM)
 }
+
+// A map entry with no value holds the value type's default, which for a
+// message is an empty message: protobuf-go never reads a nil one (#307).
+func TestUnmarshal_MapEntryWithNoValue(t *testing.T) {
+	md := conformanceDesc(t)
+	in := []byte{0x9a, 0x01, 0x02, 0x08, 0x01} // mm { key: 1 }, no value
+	oracle := dynamicpb.NewMessage(md)
+	require.NoError(t, proto.Unmarshal(in, oracle))
+	mm := oracle.Get(md.Fields().ByName("mm")).Map()
+	v := mm.Get(protoreflect.ValueOfInt32(1).MapKey())
+	require.True(t, v.IsValid(), "protobuf-go holds the entry")
+	assert.True(t, v.Message().IsValid(), "protobuf-go holds an empty message, not nil")
+	assert.Zero(t, proto.Size(v.Message().Interface()))
+
+	var got confAll
+	require.NoError(t, pb.Unmarshal(in, &got))
+	require.Contains(t, got.MM, int32(1))
+	assert.Equal(t, &confInner{}, got.MM[1])
+}
